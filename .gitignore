@@ -1,0 +1,17 @@
+# Local environment values
+.env
+.env.*
+!.env.example
+
+# OS and editor metadata
+.DS_Store
+.idea/
+.vscode/
+
+# Local assistant workspace settings
+.claude/
+.codex/
+
+# Local logs and coverage
+*.log
+coverage/

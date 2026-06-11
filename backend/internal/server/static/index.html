@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>finance_app — local test UI</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    max-width: 860px; margin: 0 auto; padding: 24px; line-height: 1.45;
+  }
+  h1 { margin: 0 0 4px; }
+  .sub { color: #888; margin: 0 0 20px; font-size: 14px; }
+  .card {
+    border: 1px solid #8884; border-radius: 10px; padding: 16px 18px; margin: 14px 0;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 17px; }
+  label { display: block; font-size: 13px; margin: 8px 0 2px; color: #777; }
+  input, select {
+    width: 100%; padding: 8px 10px; border: 1px solid #8886; border-radius: 7px;
+    background: transparent; color: inherit; font-size: 14px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 120px; }
+  button {
+    margin-top: 12px; padding: 9px 14px; border: 0; border-radius: 7px;
+    background: #2f6fed; color: #fff; font-size: 14px; cursor: pointer;
+  }
+  button.secondary { background: #8884; color: inherit; }
+  button.danger { background: #d6453d; padding: 4px 9px; margin: 0; font-size: 12px; }
+  button:hover { opacity: .9; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #8883; }
+  th { color: #888; font-weight: 600; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: #1a9e54; } .neg { color: #d6453d; }
+  pre {
+    background: #8881; padding: 10px; border-radius: 7px; overflow:auto;
+    font-size: 12px; white-space: pre-wrap; word-break: break-word; margin: 8px 0 0;
+  }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 20px; background:#8883; }
+  .ok { background:#1a9e5433; color:#1a9e54; }
+  .muted { color:#888; font-size:12px; }
+  #authState { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+  @media (max-width:640px){ .grid2 { grid-template-columns: 1fr; } }
+  .big { font-size: 22px; font-weight: 700; }
+</style>
+</head>
+<body>
+  <h1>finance_app</h1>
+  <p class="sub">Local test UI — log in, then add positions and view your performance.</p>
+
+  <!-- AUTH -->
+  <div class="card">
+    <h2>1 · Account</h2>
+    <div id="authState">
+      <span id="authPill" class="pill">Not logged in</span>
+      <span id="who" class="muted"></span>
+      <button id="logoutBtn" class="secondary" style="display:none" onclick="logout()">Log out</button>
+    </div>
+
+    <div id="authForms" class="grid2" style="margin-top:14px">
+      <div>
+        <strong>Register</strong>
+        <label>Email</label><input id="rEmail" value="me@example.com" />
+        <label>Password (min 8)</label><input id="rPass" type="password" value="StrongPassword123" />
+        <label>Display name</label><input id="rName" value="AlphaWolf" />
+        <label>Avatar</label>
+        <select id="rAvatar">
+          <option value="fox">fox</option>
+          <option value="bull">bull</option>
+          <option value="bear">bear</option>
+          <option value="default">default</option>
+        </select>
+        <button onclick="register()">Register</button>
+      </div>
+      <div>
+        <strong>Login</strong>
+        <label>Email</label><input id="lEmail" value="me@example.com" />
+        <label>Password</label><input id="lPass" type="password" value="StrongPassword123" />
+        <button onclick="login()">Log in</button>
+      </div>
+    </div>
+    <pre id="authOut" style="display:none"></pre>
+  </div>
+
+  <!-- everything below needs a token -->
+  <div id="app" style="display:none">
+
+    <!-- ADD POSITION -->
+    <div class="card">
+      <h2>2 · Add a position</h2>
+      <div class="row">
+        <div><label>Symbol</label><input id="pSymbol" value="AAPL" /></div>
+        <div><label>Asset type</label>
+          <select id="pType">
+            <option value="stock">stock</option>
+            <option value="etf">etf</option>
+            <option value="crypto">crypto</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div><label>Quantity</label><input id="pQty" type="number" value="10" step="any" /></div>
+        <div><label>Average buy price</label><input id="pPrice" type="number" value="180" step="any" /></div>
+        <div><label>Currency</label><input id="pCur" value="USD" /></div>
+      </div>
+      <button onclick="addPosition()">Add position</button>
+      <span class="muted" id="addHint"> — try AAPL · BTC-USD (crypto) · THYAO.IS (stock, TRY)</span>
+      <pre id="addOut" style="display:none"></pre>
+    </div>
+
+    <!-- POSITIONS -->
+    <div class="card">
+      <h2>3 · Your positions <button class="secondary" style="margin:0 0 0 8px;padding:4px 10px;font-size:12px" onclick="listPositions()">Refresh</button></h2>
+      <div id="positions"><p class="muted">No positions loaded yet.</p></div>
+    </div>
+
+    <!-- SUMMARY -->
+    <div class="card">
+      <h2>4 · Performance summary <button class="secondary" style="margin:0 0 0 8px;padding:4px 10px;font-size:12px" onclick="getSummary()">Calculate</button></h2>
+      <div id="summary"><p class="muted">Click “Calculate”. Prices come from the configured PriceProvider (mock by default).</p></div>
+    </div>
+
+    <!-- PRICE -->
+    <div class="card">
+      <h2>5 · Look up a price</h2>
+      <div class="row">
+        <div><label>Symbol</label><input id="prSymbol" value="AAPL" /></div>
+      </div>
+      <button onclick="getPrice()">Get price</button>
+      <pre id="priceOut" style="display:none"></pre>
+    </div>
+
+    <!-- LEADERBOARD -->
+    <div class="card">
+      <h2>6 · Anonymous leaderboard <button class="secondary" style="margin:0 0 0 8px;padding:4px 10px;font-size:12px" onclick="getLeaderboard()">Refresh</button></h2>
+      <p class="muted">Ranks all registered users by performance %. Shows only display name, avatar, % and index — never holdings or amounts. Register a few users (with positions) to populate it.</p>
+      <div id="leaderboard"><p class="muted">Click “Refresh”.</p></div>
+    </div>
+
+    <!-- SPRINT COMPETITION -->
+    <div class="card">
+      <h2>7 · Weekly sprint <button class="secondary" style="margin:0 0 0 8px;padding:4px 10px;font-size:12px" onclick="loadSprint()">Refresh</button></h2>
+      <p class="muted">Join to lock a private starting point, then performance is measured from there. Starting value is never shown.</p>
+      <div id="sprintInfo"><p class="muted">Click “Refresh”.</p></div>
+      <button id="joinBtn" style="display:none" onclick="joinSprint()">Join sprint</button>
+      <div id="sprintBoard"></div>
+    </div>
+
+    <!-- ACHIEVEMENTS -->
+    <div class="card">
+      <h2>8 · Achievements
+        <button class="secondary" style="margin:0 0 0 8px;padding:4px 10px;font-size:12px" onclick="getAchievements()">Refresh</button>
+        <button style="margin:0 0 0 4px;padding:4px 10px;font-size:12px" onclick="evaluateAchievements()">Evaluate now</button>
+      </h2>
+      <p class="muted">“Refresh” just lists current state. “Evaluate now” re-checks all rules (positions, performance, sprint rank) and unlocks anything earned.</p>
+      <div id="achievements"><p class="muted">Click “Refresh”.</p></div>
+    </div>
+  </div>
+
+<script>
+// When the page is served by the backend (http://localhost:8080/) we use the
+// same origin. When it's opened in a preview panel or as a file (origin is not
+// http/https), fall back to the default backend address.
+const API_BASE =
+  (location.protocol === "http:" || location.protocol === "https:")
+    ? location.origin
+    : "http://localhost:8080";
+
+// Token storage. localStorage is blocked in some contexts (e.g. data: URLs in
+// a preview panel), so we keep an in-memory copy and only use localStorage when
+// it is actually available (lets the token survive reloads at localhost:8080).
+const TOKEN_KEY = "fa_token";
+let memToken = null;
+function safeLS(fn) { try { return fn(); } catch (_) { return null; } }
+const getToken = () => memToken ?? safeLS(() => localStorage.getItem(TOKEN_KEY));
+const setToken = (t) => { memToken = t; safeLS(() => localStorage.setItem(TOKEN_KEY, t)); };
+const clearToken = () => { memToken = null; safeLS(() => localStorage.removeItem(TOKEN_KEY)); };
+
+function show(id, data) {
+  const el = document.getElementById(id);
+  el.style.display = "block";
+  el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+
+// Wraps fetch, parses JSON, and throws a clean message on error responses.
+async function api(method, path, body, auth) {
+  const headers = { "Content-Type": "application/json" };
+  if (auth) headers["Authorization"] = "Bearer " + getToken();
+  const res = await fetch(API_BASE + path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
+  return data;
+}
+
+function refreshAuthUI() {
+  const t = getToken();
+  document.getElementById("app").style.display = t ? "block" : "none";
+  document.getElementById("authForms").style.display = t ? "none" : "grid";
+  document.getElementById("logoutBtn").style.display = t ? "inline-block" : "none";
+  const pill = document.getElementById("authPill");
+  pill.textContent = t ? "Logged in" : "Not logged in";
+  pill.className = "pill " + (t ? "ok" : "");
+}
+
+async function register() {
+  try {
+    const r = await api("POST", "/auth/register", {
+      email: rEmail.value, password: rPass.value, display_name: rName.value, avatar_key: rAvatar.value,
+    });
+    setToken(r.token);
+    document.getElementById("who").textContent = r.user.email + " (" + r.user.display_name + ")";
+    show("authOut", "Registered & logged in ✔");
+    refreshAuthUI();
+  } catch (e) { show("authOut", "Error: " + e.message); }
+}
+
+async function login() {
+  try {
+    const r = await api("POST", "/auth/login", { email: lEmail.value, password: lPass.value });
+    setToken(r.token);
+    document.getElementById("who").textContent = r.user.email + " (" + r.user.display_name + ")";
+    show("authOut", "Logged in ✔");
+    refreshAuthUI();
+    listPositions();
+  } catch (e) { show("authOut", "Error: " + e.message); }
+}
+
+function logout() {
+  clearToken();
+  document.getElementById("who").textContent = "";
+  document.getElementById("positions").innerHTML = '<p class="muted">No positions loaded yet.</p>';
+  document.getElementById("summary").innerHTML = '<p class="muted">Click “Calculate”.</p>';
+  document.getElementById("leaderboard").innerHTML = '<p class="muted">Click “Refresh”.</p>';
+  document.getElementById("sprintInfo").innerHTML = '<p class="muted">Click “Refresh”.</p>';
+  document.getElementById("sprintBoard").innerHTML = '';
+  document.getElementById("joinBtn").style.display = 'none';
+  document.getElementById("achievements").innerHTML = '<p class="muted">Click “Refresh”.</p>';
+  refreshAuthUI();
+}
+
+async function addPosition() {
+  try {
+    await api("POST", "/portfolio/positions", {
+      symbol: pSymbol.value,
+      asset_type: pType.value,
+      quantity: parseFloat(pQty.value),
+      average_buy_price: parseFloat(pPrice.value),
+      currency: pCur.value,
+    }, true);
+    show("addOut", "Added " + pSymbol.value.toUpperCase() + " ✔");
+    listPositions();
+  } catch (e) { show("addOut", "Error: " + e.message); }
+}
+
+async function listPositions() {
+  try {
+    const list = await api("GET", "/portfolio/positions", null, true);
+    const box = document.getElementById("positions");
+    if (!list.length) { box.innerHTML = '<p class="muted">No positions yet — add one above.</p>'; return; }
+    let html = '<table><tr><th>Symbol</th><th>Type</th><th class="num">Qty</th><th class="num">Avg buy</th><th>Cur</th><th></th></tr>';
+    for (const p of list) {
+      // Stash the row so edit() can prefill without another fetch.
+      const j = encodeURIComponent(JSON.stringify(p));
+      html += `<tr><td>${p.symbol}</td><td>${p.asset_type}</td>` +
+        `<td class="num">${p.quantity}</td><td class="num">${p.average_buy_price}</td>` +
+        `<td>${p.currency}</td><td class="num">` +
+        `<button class="secondary" style="padding:4px 9px;margin:0 4px 0 0;font-size:12px" onclick="edit('${j}')">edit</button>` +
+        `<button class="danger" onclick="del('${p.id}')">delete</button></td></tr>`;
+    }
+    box.innerHTML = html + "</table>";
+  } catch (e) { document.getElementById("positions").innerHTML = "Error: " + e.message; }
+}
+
+async function edit(encoded) {
+  const p = JSON.parse(decodeURIComponent(encoded));
+  const qty = prompt("New quantity for " + p.symbol + ":", p.quantity);
+  if (qty === null) return;
+  const price = prompt("New average buy price for " + p.symbol + ":", p.average_buy_price);
+  if (price === null) return;
+  try {
+    await api("PUT", "/portfolio/positions/" + p.id, {
+      symbol: p.symbol, asset_type: p.asset_type,
+      quantity: parseFloat(qty), average_buy_price: parseFloat(price), currency: p.currency,
+    }, true);
+    listPositions();
+  } catch (e) { alert("Error: " + e.message); }
+}
+
+async function del(id) {
+  try { await api("DELETE", "/portfolio/positions/" + id, null, true); listPositions(); }
+  catch (e) { alert("Error: " + e.message); }
+}
+
+function gl(n) { // color a gain/loss number
+  const cls = n >= 0 ? "pos" : "neg";
+  const sign = n >= 0 ? "+" : "";
+  return `<span class="${cls}">${sign}${n}</span>`;
+}
+
+async function getSummary() {
+  try {
+    const s = await api("GET", "/portfolio/summary", null, true);
+    let html = `<div class="big">${gl(s.gain_loss)} <span class="muted">(${gl(s.gain_loss_percentage)}%)</span></div>`;
+    html += `<p class="muted">Cost basis ${s.total_cost_basis} → current value ${s.current_value} · index <strong>${s.portfolio_index}</strong> (started at 100)</p>`;
+    if (s.positions.length) {
+      html += '<table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Buy</th><th class="num">Now</th><th class="num">Value</th><th class="num">Gain/Loss</th><th class="num">%</th></tr>';
+      for (const p of s.positions) {
+        html += `<tr><td>${p.symbol}</td><td class="num">${p.quantity}</td>` +
+          `<td class="num">${p.average_buy_price}</td><td class="num">${p.current_price}</td>` +
+          `<td class="num">${p.current_value}</td><td class="num">${gl(p.gain_loss)}</td>` +
+          `<td class="num">${gl(p.gain_loss_percentage)}</td></tr>`;
+      }
+      html += "</table>";
+    }
+    document.getElementById("summary").innerHTML = html;
+  } catch (e) { document.getElementById("summary").innerHTML = "Error: " + e.message; }
+}
+
+async function getPrice() {
+  try { show("priceOut", await api("GET", "/prices/" + encodeURIComponent(prSymbol.value), null, true)); }
+  catch (e) { show("priceOut", "Error: " + e.message); }
+}
+
+async function getLeaderboard() {
+  try {
+    const board = await api("GET", "/leaderboard", null, true);
+    const box = document.getElementById("leaderboard");
+    if (!board.length) { box.innerHTML = '<p class="muted">No users yet.</p>'; return; }
+    let html = '<table><tr><th>#</th><th>Player</th><th>Avatar</th><th class="num">Gain/Loss %</th><th class="num">Index</th></tr>';
+    for (const e of board) {
+      html += `<tr><td>${e.rank}</td><td>${e.display_name}</td><td><span class="pill">${e.avatar_key}</span></td>` +
+        `<td class="num">${gl(e.gain_loss_percentage)}</td><td class="num">${e.portfolio_index}</td></tr>`;
+    }
+    box.innerHTML = html + "</table>";
+  } catch (e) { document.getElementById("leaderboard").innerHTML = "Error: " + e.message; }
+}
+
+let sprintId = null;
+
+async function loadSprint() {
+  const info = document.getElementById("sprintInfo");
+  const board = document.getElementById("sprintBoard");
+  const joinBtn = document.getElementById("joinBtn");
+  try {
+    const comps = await api("GET", "/competitions", null, true);
+    if (!comps.length) { info.innerHTML = '<p class="muted">No competitions.</p>'; return; }
+    const c = comps[0];
+    sprintId = c.id;
+
+    const me = await api("GET", "/competitions/" + sprintId + "/me", null, true);
+    info.innerHTML = `<p><strong>${c.name}</strong> <span class="pill ok">${c.status}</span></p>` +
+      (me.joined
+        ? `<p>You're in — rank <strong>#${me.current_rank}</strong>, sprint return ${gl(me.sprint_return_percentage)}%, index ${me.sprint_index}</p>`
+        : `<p class="muted">You haven't joined yet.</p>`);
+    joinBtn.style.display = me.joined ? "none" : "inline-block";
+
+    const rows = await api("GET", "/competitions/" + sprintId + "/leaderboard", null, true);
+    if (!rows.length) { board.innerHTML = '<p class="muted">No participants yet.</p>'; return; }
+    let html = '<table><tr><th>#</th><th>Player</th><th>Avatar</th><th class="num">Return %</th><th class="num">Index</th></tr>';
+    for (const e of rows) {
+      html += `<tr><td>${e.rank}</td><td>${e.display_name}</td><td><span class="pill">${e.avatar_key}</span></td>` +
+        `<td class="num">${gl(e.sprint_return_percentage)}</td><td class="num">${e.sprint_index}</td></tr>`;
+    }
+    board.innerHTML = html + "</table>";
+  } catch (e) { info.innerHTML = "Error: " + e.message; }
+}
+
+async function joinSprint() {
+  if (!sprintId) return;
+  try { await api("POST", "/competitions/" + sprintId + "/join", null, true); loadSprint(); getAchievements(); }
+  catch (e) { document.getElementById("sprintInfo").innerHTML = "Error: " + e.message + " (add a position with value first)"; }
+}
+
+function renderAchievements(list) {
+  let html = '<table><tr><th></th><th>Badge</th><th>Description</th></tr>';
+  for (const a of list) {
+    const mark = a.unlocked ? '✅' : '🔒';
+    const style = a.unlocked ? '' : 'opacity:.5';
+    html += `<tr style="${style}"><td>${mark}</td><td><strong>${a.name}</strong></td><td class="muted">${a.description}</td></tr>`;
+  }
+  document.getElementById("achievements").innerHTML = html + "</table>";
+}
+
+async function getAchievements() {
+  try { renderAchievements(await api("GET", "/achievements", null, true)); }
+  catch (e) { document.getElementById("achievements").innerHTML = "Error: " + e.message; }
+}
+
+async function evaluateAchievements() {
+  try { renderAchievements(await api("POST", "/achievements/evaluate", null, true)); }
+  catch (e) { document.getElementById("achievements").innerHTML = "Error: " + e.message; }
+}
+
+// boot
+refreshAuthUI();
+if (getToken()) listPositions();
+</script>
+</body>
+</html>
