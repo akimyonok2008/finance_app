@@ -86,7 +86,6 @@ func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler
 		Leaderboard:     leaderboardSvc,
 		Competitions:    competitionsSvc,
 		Achievements:    achievementsSvc,
-		PriceProvider:   priceProvider,
 		ReadinessChecks: readiness,
 		Info:            map[string]string{"storage_provider": "memory", "price_provider": "mock"},
 	})
@@ -151,7 +150,7 @@ func TestReady_OKWithNoChecks(t *testing.T) {
 // responses. ("symbol" also guards "symbols", "position_id" guards ids, etc.)
 var forbiddenPublicFields = []string{
 	"email", "password", "password_hash", "user_id", "portfolio_id", "position_id",
-	"quantity", "average_buy_price", "symbol", "positions", "total_cost_basis",
+	"quantity", "average_buy_price", "baseline_price", "symbol", "positions", "total_cost_basis",
 	"current_value", "gain_loss", "starting_value", "starting_value_base",
 	"starting_price", "snapshot",
 }
@@ -171,7 +170,7 @@ func TestPrivacy_PublicEndpointsExposeNoSensitiveFields(t *testing.T) {
 	require.Equal(t, http.StatusCreated, reg.Code)
 	token := extractToken(t, reg.Body.String())
 
-	rec := doReq(t, h, http.MethodPost, "/portfolio/positions", `{"symbol":"AAPL","asset_type":"stock","quantity":10,"average_buy_price":180,"currency":"USD"}`, token)
+	rec := doReq(t, h, http.MethodPost, "/portfolio/positions", `{"symbol":"AAPL","asset_type":"stock","quantity":10}`, token)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	comps := doReq(t, h, http.MethodGet, "/competitions", "", token)

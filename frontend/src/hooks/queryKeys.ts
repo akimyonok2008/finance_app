@@ -12,6 +12,9 @@ export const queryKeys = {
   competitions: ["competitions"] as const,
   currentSprintStatus: (id: string) => ["currentSprintStatus", id] as const,
   sprintLeaderboard: (id: string) => ["sprintLeaderboard", id] as const,
+  myProfile: ["profile", "me"] as const,
+  publicProfile: (handle: string) => ["profile", handle] as const,
+  exploreProfiles: (params: object) => ["exploreProfiles", params] as const,
 };
 
 /** Queries to invalidate after any successful position mutation. */

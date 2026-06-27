@@ -1,8 +1,9 @@
 # Finance App
 
 A privacy-first, gamified real-portfolio tracker. Users enter real holdings,
-track percentage performance, join weekly sprints, earn achievements, and
-compete anonymously without exposing wealth or positions.
+track percentage performance, create a locked strategy baseline, earn
+achievements, compare ranked performance, and review public portfolio
+composition without exposing wealth or position quantities.
 
 The product direction is "Strava or Duolingo for investing," not a paper
 trading simulator.
@@ -12,20 +13,32 @@ trading simulator.
 The repository contains a working full-stack prototype:
 
 - React + TypeScript frontend with registration, login, dashboard, responsive
-  portfolio management, global leaderboard, and competition Arena.
-- Go REST API with JWT authentication, portfolio calculations, anonymous
-  leaderboards, weekly sprint snapshots, and achievements.
+  portfolio management, unified strategy leaderboard, Explore, profiles, and
+  Portfolio Coach.
+- Go REST API with JWT authentication, portfolio calculations, strategy
+  baselines, ranked leaderboards, achievements, public profiles, and
+  privacy-filtered Top 10 portfolio comparisons.
 - Optional PostgreSQL persistence and Redis caching.
 - Deterministic mock price and FX providers for local development and tests.
 
-## Privacy Rule
+## Privacy Model
 
-Social and competition responses expose only anonymous performance metrics such
-as rank, display name, avatar, return percentage, and index.
+The app separates absolute financial privacy from public composition:
 
-They must never expose portfolio value, cost basis, dollar gain/loss, holdings,
-symbols, quantities, portfolio IDs, user IDs, email addresses, or snapshot
-details.
+- **Private owner views** such as Dashboard and Portfolio may show the
+  authenticated user's full positions and monetary totals.
+- **Strategy leaderboards** expose only opted-in profile details, rank,
+  percentage return, ranked index, badges, and optional public percentage
+  weights.
+- **Portfolio Coach Top 10 comparisons** may show or use public composition:
+  symbols, asset types, and percentage weights.
+
+No public or comparison surface may expose quantities, average buy prices,
+current position prices, portfolio value, cost basis, absolute gain/loss,
+starting value, portfolio/user IDs, emails, or brokerage identifiers.
+
+Public weights describe portfolio allocation percentages only. They must not be
+presented as monetary values or used to infer another user's wealth.
 
 ## Run Locally
 
@@ -83,8 +96,9 @@ return, and the portfolio total are normalized to the user's base currency.
 - Local development uses deterministic mock prices and FX rates by default.
 - The dashboard has no historical portfolio API, so its index path is
   illustrative and labeled as such.
-- Leaderboard timeframe tabs are UI-only until the backend supports timeframe
-  ranking and server pagination.
+- Leaderboard timeframe tabs are sent to the API, but the current backend
+  returns the same active strategy ranking until timeframe-specific ranking is
+  implemented.
 
 ## Verification
 

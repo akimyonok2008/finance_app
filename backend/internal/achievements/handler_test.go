@@ -17,13 +17,17 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
-type stubPositions struct{ m map[string][]portfolio.Position }
+type stubPositions struct {
+	m map[string][]portfolio.Position
+}
 
 func (s stubPositions) ListPositions(_ context.Context, userID string) ([]portfolio.Position, error) {
 	return s.m[userID], nil
 }
 
-type stubSummaries struct{ m map[string]*portfolio.PortfolioSummary }
+type stubSummaries struct {
+	m map[string]*portfolio.PortfolioSummary
+}
 
 func (s stubSummaries) GetSummary(_ context.Context, userID string) (*portfolio.PortfolioSummary, error) {
 	return s.m[userID], nil

@@ -11,6 +11,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/clock"
+	"github.com/ardakimyonok/finance_app/internal/coach"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/config"
 	"github.com/ardakimyonok/finance_app/internal/db"
@@ -19,6 +20,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
+	"github.com/ardakimyonok/finance_app/internal/profile"
 	"github.com/ardakimyonok/finance_app/internal/server"
 )
 
@@ -58,12 +60,35 @@ func (r rankProvider) GetUserRank(ctx context.Context, competitionID, userID str
 	return r.s.GetUserRank(ctx, competitionID, userID)
 }
 
+// leaderboardProfileAdapter joins public profile data onto leaderboard rows,
+// converting profile weights into the leaderboard package's shape.
+type leaderboardProfileAdapter struct{ s *profile.Service }
+
+func (a leaderboardProfileAdapter) PublicInfo(ctx context.Context, userID string) (leaderboard.ProfilePublicInfo, bool, error) {
+	info, ok, err := a.s.PublicInfoForUser(ctx, userID)
+	if err != nil || !ok {
+		return leaderboard.ProfilePublicInfo{}, ok, err
+	}
+	weights := make([]leaderboard.PublicWeight, 0, len(info.Weights))
+	for _, w := range info.Weights {
+		weights = append(weights, leaderboard.PublicWeight{
+			Symbol: w.Symbol, AssetType: w.AssetType, WeightPercentage: w.Weight,
+		})
+	}
+	return leaderboard.ProfilePublicInfo{
+		Handle: info.Handle, StrategyTag: info.StrategyTag,
+		IsPublic: info.IsPublic, ShowWeights: info.ShowWeights, Weights: weights,
+	}, true, nil
+}
+
 // repositories groups whichever implementations the storage provider selected.
 type repositories struct {
 	users        auth.UserRepository
 	portfolio    portfolio.Repository
 	competitions competitions.CompetitionRepository
 	achievements achievements.AchievementRepository
+	profiles     profile.Repository
+	snapshots    leaderboard.SnapshotStore
 }
 
 func main() {
@@ -119,6 +144,8 @@ func main() {
 			portfolio:    portfolio.NewInMemoryRepository(),
 			competitions: competitions.NewInMemoryCompetitionRepository(),
 			achievements: achievements.NewInMemoryAchievementRepository(),
+			profiles:     profile.NewInMemoryRepository(),
+			snapshots:    leaderboard.NewInMemorySnapshotStore(),
 		}
 	case "postgres":
 		pool, err := db.ConnectPostgres(ctx, cfg.DatabaseURL)
@@ -141,6 +168,8 @@ func main() {
 			portfolio:    portfolio.NewPostgresRepository(pool),
 			competitions: competitions.NewPostgresCompetitionRepository(pool),
 			achievements: achRepo,
+			profiles:     profile.NewPostgresRepository(pool),
+			snapshots:    leaderboard.NewPostgresSnapshotStore(pool),
 		}
 		readinessChecks = append(readinessChecks, server.ReadinessCheck{
 			Name:  "postgres",
@@ -163,6 +192,7 @@ func main() {
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
 	leaderboardSvc := leaderboard.NewService(authSvc, portfolioSvc)
+	leaderboardSvc.SetSnapshotStore(repos.snapshots)
 	competitionsSvc := competitions.NewService(
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
@@ -172,6 +202,23 @@ func main() {
 		rankProvider{competitionsSvc},
 	)
 	achievementsSvc.SetCurrentCompetitionProvider(competitionsSvc)
+	profileSvc := profile.NewService(repos.profiles, userProvider{authSvc}, summaryProvider{portfolioSvc})
+	profileSvc.SetAchievementProvider(achievementsSvc)
+	profileSvc.SetSprintRankProvider(competitionsSvc)
+	profileSvc.SetGlobalRankProvider(leaderboardSvc)
+	// Enrich leaderboard rows with public profile data (handle/tag/weights).
+	leaderboardSvc.SetProfileProvider(leaderboardProfileAdapter{profileSvc})
+
+	// --- AI Portfolio Coach ---
+	// Mock is the default, key-free provider. A real provider is only used when
+	// explicitly enabled AND implemented; until then we warn and fall back.
+	var coachProvider coach.Provider = coach.NewMockProvider()
+	if cfg.AIEnableRealProvider && cfg.AIProvider != "mock" && cfg.AIProvider != "" {
+		slog.Warn("AI_ENABLE_REAL_PROVIDER set but no real provider is implemented yet; using mock",
+			"requested_provider", cfg.AIProvider)
+	}
+	coachSvc := coach.NewService(authSvc, portfolioSvc, coachProvider)
+	coachSvc.SetAchievementLister(achievementsSvc)
 
 	// --- leaderboard caches (Redis only) ---
 	if redisClient != nil {
@@ -195,7 +242,8 @@ func main() {
 		Leaderboard:     leaderboardSvc,
 		Competitions:    competitionsSvc,
 		Achievements:    achievementsSvc,
-		PriceProvider:   priceProvider,
+		Coach:           coachSvc,
+		Profile:         profileSvc,
 		ReadinessChecks: readinessChecks,
 		Info: map[string]string{
 			"storage_provider": cfg.StorageProvider,

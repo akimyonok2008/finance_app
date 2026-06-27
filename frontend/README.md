@@ -3,7 +3,9 @@
 Premium, dark-mode-first React interface for the gamified real-portfolio
 tracker. The frontend talks directly to the Go API and currently provides
 authentication, a read-only game dashboard, manual portfolio management, a
-global leaderboard, and a unified competition Arena.
+unified strategy leaderboard, Explore, public profiles, and Portfolio Coach.
+It also includes standalone owner and public strategy profile screens.
+Explore provides public-safe strategy discovery without exposing wealth.
 
 ## Implemented Screens
 
@@ -19,32 +21,89 @@ global leaderboard, and a unified competition Arena.
 
 - Portfolio index, value, cost basis, gain/loss, and percentage performance.
 - Deterministic prototype index chart until historical snapshots are available.
-- Current weekly sprint status and privacy-safe sprint standings.
+- Current competition status and privacy-safe standings preview.
 - Personal global rank and full privacy-safe leaderboard detail view.
-- Trophy case preview with links into the Arena.
+- Achievement preview.
 - Working Dashboard and Portfolio navigation, refresh, logout, skeletons,
   partial errors, and new-user onboarding.
 - Responsive bento layout for desktop and mobile.
 
-The dashboard is intentionally read-only. Sprint joining, sprint standings,
-and the complete achievement collection live in the Arena.
+The dashboard is intentionally read-only. Portfolio management lives on the
+Portfolio page; ranked performance and achievements live on the Leaderboard.
 
 ### Portfolio
 
 - Portfolio summary cards.
-- Add, edit, and delete positions.
-- Desktop form and positions table.
-- Mobile add drawer and position cards.
-- Currency-aware position pricing plus base-currency value, gain/loss, and
-  FX-normalized return.
+- Add a position with just **symbol, asset type, and quantity** — the backend
+  locks the baseline at today's market price, so every position starts at index
+  `100`. There is no buy-price or currency input.
+- Edit is **quantity-only**; the symbol and locked baseline are immutable (delete
+  and re-add to re-baseline). Delete with confirmation.
+- Desktop form and positions table (with a Baseline column), mobile add drawer
+  and position cards, all showing base-currency value, gain/loss, and
+  FX-normalized return measured from the locked baseline.
 - Loading, empty, validation-error, and confirmation states.
 - Query invalidation keeps portfolio, dashboard ranking, and achievements fresh.
 
-### Leaderboard and Arena
+### Leaderboard
 
-- Privacy-safe global leaderboard with client-side filtering and pagination.
-- Current competition join flow and cohort standings.
-- Achievement evaluation and complete trophy collection.
+- Privacy-safe ranked performance with `1W`, `1M`, `3M`, `6M`, `1Y`, and `ALL`
+  timeframe controls — the tabs hit `GET /leaderboard?timeframe=…`, which the
+  backend honours (windows fall back to since-baseline until history accrues).
+  Eligibility is automatic — there is no "join" or baseline step; the
+  locked-baseline portfolio is the ranked source of truth.
+- Public rows link to the profile and show strategy tag + opted-in weight chips
+  (enriched by the backend); private profiles stay anonymous. The current user's
+  row is highlighted.
+- Ranked rows plus the achievement collection in one screen.
+- Legacy `/arena`, `/sprint`, and `/achievements` routes redirect to
+  `/leaderboard`.
+
+### Portfolio Coach
+
+- Four private analysis modes: Fundamental Analysis, Technical Analysis,
+  Portfolio Review, and Compare with Top 10.
+- Top 10 comparisons may use public symbols, asset types, and percentage
+  weights.
+- Quantities and all monetary values remain private.
+
+### Profiles
+
+- `/profile` lets the authenticated owner edit profile metadata, strategy tag,
+  and public visibility settings while viewing a public preview.
+- `/profiles/:handle` shows a privacy-filtered public strategy profile with
+  performance, ranks, badges, symbols, percentage weights, exposures, and
+  concentration.
+- Profile calls use `GET /profiles/me`, `PATCH /profiles/me`, and
+  `GET /profiles/{handle}`.
+- Public profiles show symbols and percentage weights, not quantities, values,
+  cost basis, or buy prices.
+
+### Explore Strategies
+
+- `/explore` shows featured public strategies, a **Similar to You** section
+  (profiles overlapping your holdings/approach), top performers, and trending
+  holdings.
+- Search supports public profiles and symbols, with an explicit symbol filter
+  and top/return/rank/recent sorting.
+- Profile cards link to `/profiles/:handle`; trending symbols apply an Explore
+  filter rather than opening a discussion or symbol page.
+- Explore uses `GET /profiles/explore` and renders only public-safe profile,
+  ranked-performance, badge, symbol, asset-type, and percentage-weight fields.
+- Explore shows symbols and weights only. It does not show quantities,
+  portfolio values, cost basis, average buy prices, or absolute gain/loss.
+
+## Privacy Surfaces
+
+- Dashboard and Portfolio are owner-only and may display the authenticated
+  user's positions and monetary totals.
+- Leaderboard rows display ranked performance and may display opted-in symbols,
+  asset types, and percentage weights.
+- Coach comparison profiles may display public composition using symbols,
+  asset types, and percentage weights.
+- Public screens never display quantities, average buy prices, position prices,
+  portfolio value, cost basis, absolute gain/loss, user IDs, emails, or
+  brokerage identifiers.
 
 ## Stack
 
@@ -98,10 +157,15 @@ stored under `finance_app_user`.
 | `/register` | Implemented | Create an account |
 | `/dashboard` | Implemented | Performance and game overview |
 | `/portfolio` | Implemented | Manage holdings |
-| `/leaderboard` | Implemented | Privacy-safe global leaderboard |
-| `/arena` | Implemented | Sprint join, cohort ranking, and trophies |
-| `/sprint` | Redirected | Arena replaces the separate sprint page |
-| `/achievements` | Redirected | Arena replaces the separate achievement page |
+| `/leaderboard` | Implemented | Strategy baseline, ranked performance, privacy, and achievements |
+| `/arena` | Redirected | Unified into `/leaderboard` |
+| `/coach` | Implemented | Private analysis and public Top 10 composition comparison |
+| `/explore` | Implemented | Discover public strategies, performers, and trending holdings |
+| `/profile` | Implemented | Edit owner profile settings and view public preview |
+| `/profiles/:handle` | Implemented | View a privacy-filtered public strategy profile |
+| `/profile/me` | Redirected | Owner profile lives at `/profile` |
+| `/sprint` | Redirected | Unified into `/leaderboard` |
+| `/achievements` | Redirected | Unified into `/leaderboard` |
 
 Unknown and unimplemented routes currently redirect to `/dashboard`.
 
@@ -113,13 +177,18 @@ src/
   auth/            provider, storage, protected route, and auth context
   components/
     portfolio/     position forms, tables, cards, dialogs, and summaries
+    explore/       public-safe strategy discovery cards and filters
+    profile/       reusable privacy-safe profile display and settings form
     ui/            reusable UI primitives
   hooks/           TanStack Query hooks and centralized query keys
   pages/
     auth/          login and registration
     Dashboard/     bento dashboard and formatters
     arena/         competition and achievement experience
-    leaderboard/   privacy-safe global standings
+    coach/         portfolio analysis and Top 10 comparison
+    leaderboard/   strategy baseline and privacy-safe ranked standings
+    Explore/       strategy discovery page
+    Profile/       owner and public profile screens
     PortfolioPage.tsx
   types/           API and form types
   utils/           formatting and class-name helpers
@@ -164,14 +233,14 @@ screens are added.
 ## Known Frontend Gaps
 
 - The dashboard chart is derived from the current index because the backend
-  does not yet expose portfolio history.
-- Personal leaderboard matching currently uses the authenticated display name
-  because the backend does not expose `/leaderboard/me`.
-- Sprint and achievements are unified in the Arena screen.
+  does not yet expose per-position portfolio history.
+- Personal ranking uses `GET /leaderboard/me` (exact rank + participant count);
+  `rank_delta` is not shown because rank history is not tracked yet.
+- Ranked performance and achievements are unified on the Leaderboard.
 - The current achievement API exposes unlock state but not numeric progress, so
   legacy locked badges display `0 / 1` and unlocked badges display `1 / 1`.
-- Timeframe filtering, a separate `me` row, and server pagination require a
-  future personalized leaderboard backend contract.
+- The frontend sends timeframe filters, but timeframe-specific rankings and a
+  personalized eligibility row require a future leaderboard backend contract.
 - Google sign-in is a visual prototype only and is disabled unless mock auth is
   enabled.
 - There is no automated frontend test suite yet; build, lint, and browser QA

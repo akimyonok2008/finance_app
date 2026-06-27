@@ -2,10 +2,12 @@ import type { LeaderboardTimeframe } from "@/types/leaderboard";
 import { cn } from "@/utils/cn";
 
 const tabs = [
-  { label: "Daily", value: "daily" },
-  { label: "Weekly", value: "weekly" },
-  { label: "Monthly", value: "monthly" },
-  { label: "All-Time", value: "all_time" },
+  { label: "1W", value: "1W" },
+  { label: "1M", value: "1M" },
+  { label: "3M", value: "3M" },
+  { label: "6M", value: "6M" },
+  { label: "1Y", value: "1Y" },
+  { label: "All", value: "ALL" },
 ] as const;
 
 export function TimeframeTabs({
@@ -19,7 +21,7 @@ export function TimeframeTabs({
     <div
       role="tablist"
       aria-label="Leaderboard timeframe"
-      className="grid grid-cols-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-1 sm:flex"
+      className="grid grid-cols-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-1 sm:flex"
     >
       {tabs.map((tab) => {
         const active = tab.value === value;

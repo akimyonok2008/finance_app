@@ -13,13 +13,17 @@ import (
 
 // --- test doubles ------------------------------------------------------------
 
-type fakePositions struct{ m map[string][]portfolio.Position }
+type fakePositions struct {
+	m map[string][]portfolio.Position
+}
 
 func (f fakePositions) ListPositions(_ context.Context, userID string) ([]portfolio.Position, error) {
 	return f.m[userID], nil
 }
 
-type fakeSummaries struct{ m map[string]*portfolio.PortfolioSummary }
+type fakeSummaries struct {
+	m map[string]*portfolio.PortfolioSummary
+}
 
 func (f fakeSummaries) GetSummary(_ context.Context, userID string) (*portfolio.PortfolioSummary, error) {
 	return f.m[userID], nil

@@ -10,15 +10,11 @@ var (
 	ErrInvalidAssetType = errors.New("asset_type must be one of: stock, etf, crypto")
 	// ErrInvalidQuantity is returned when quantity is not greater than zero.
 	ErrInvalidQuantity = errors.New("quantity must be greater than 0")
-	// ErrInvalidPrice is returned when average_buy_price is not greater than zero.
-	ErrInvalidPrice = errors.New("average_buy_price must be greater than 0")
-	// ErrCurrencyRequired is returned when currency is missing.
-	ErrCurrencyRequired = errors.New("currency is required")
 	// ErrUnsupportedSymbol is returned when a symbol has an invalid format or
 	// cannot be priced by the active provider. Maps to HTTP 400.
 	ErrUnsupportedSymbol = errors.New("unsupported or unpriceable symbol")
-	// ErrUnsupportedCurrency is returned when a position's currency cannot be
-	// converted to the base currency. Maps to HTTP 400.
+	// ErrUnsupportedCurrency is returned when a symbol's quote currency cannot
+	// be converted to the base currency. Maps to HTTP 400.
 	ErrUnsupportedCurrency = errors.New("unsupported currency")
 
 	// ErrPositionNotFound is returned when a position does not exist OR does not

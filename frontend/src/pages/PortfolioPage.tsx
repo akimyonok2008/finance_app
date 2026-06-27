@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { ArrowLeft, LogOut, Plus } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { Plus } from "lucide-react";
 
 import { useAuth } from "@/auth/useAuth";
+import { AppNav } from "@/components/layout/AppNav";
 import { Button } from "@/components/ui/button";
 import {
   Drawer,
@@ -21,8 +21,7 @@ import { usePositionRows, type PositionRow } from "@/hooks/usePositionRows";
 
 export function PortfolioPage() {
   const { rows, isLoading, isError, error } = usePositionRows();
-  const { user, logout } = useAuth();
-  const navigate = useNavigate();
+  const { user } = useAuth();
 
   const [editTarget, setEditTarget] = useState<PositionRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<PositionRow | null>(null);
@@ -30,47 +29,22 @@ export function PortfolioPage() {
 
   const errorMessage = error?.message;
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
-  };
-
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50">
-      <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <Link
-          to="/dashboard"
-          className="mb-6 inline-flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs font-medium text-zinc-400 transition hover:border-zinc-700 hover:bg-zinc-900/70 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Back to dashboard
-        </Link>
+      <main className="mx-auto w-full max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
+        <AppNav />
 
         {/* Header */}
-        <div className="mb-8 flex items-start justify-between gap-4">
-          <div className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-zinc-500">
-              Portfolio
-            </span>
-            <h1 className="text-2xl font-medium tracking-tight sm:text-3xl">
-              Your positions
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              {user?.display_name
-                ? `${user.display_name}'s holdings`
-                : "Track your holdings and performance."}
-            </p>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleLogout}
-            className="shrink-0 text-slate-400 hover:text-slate-200"
-            aria-label="Sign out"
-          >
-            <LogOut />
-            <span className="hidden sm:inline">Sign out</span>
-          </Button>
+        <div className="mb-8 flex flex-col gap-1">
+          <span className="text-xs font-medium text-zinc-500">Portfolio</span>
+          <h1 className="text-2xl font-medium tracking-tight sm:text-3xl">
+            Your positions
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {user?.display_name
+              ? `${user.display_name}'s holdings`
+              : "Track your holdings and performance."}
+          </p>
         </div>
 
         <PortfolioSummaryCards />

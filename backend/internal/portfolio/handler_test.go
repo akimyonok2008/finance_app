@@ -28,7 +28,6 @@ func newTestEnv() *testEnv {
 	provider := prices.NewMockPriceProvider()
 	svc := portfolio.NewService(portfolio.NewInMemoryRepository(), provider, fx.NewMockFXProvider())
 	ph := portfolio.NewHandler(svc)
-	priceH := prices.NewHandler(provider)
 
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
@@ -39,7 +38,6 @@ func newTestEnv() *testEnv {
 		r.Get("/portfolio/positions", ph.ListPositions)
 		r.Put("/portfolio/positions/{positionId}", ph.UpdatePosition)
 		r.Delete("/portfolio/positions/{positionId}", ph.DeletePosition)
-		r.Get("/prices/{symbol}", priceH.GetPrice)
 	})
 	return &testEnv{router: r, tm: tm}
 }
@@ -63,7 +61,9 @@ func (e *testEnv) do(t *testing.T, method, path, body, token string) *httptest.R
 	return rec
 }
 
-const aaplBody = `{"symbol":"AAPL","asset_type":"stock","quantity":10,"average_buy_price":180,"currency":"USD"}`
+// No price/currency in the payload: the baseline is locked server-side at the
+// current quote (mock AAPL = 195 USD).
+const aaplBody = `{"symbol":"AAPL","asset_type":"stock","quantity":10}`
 
 func TestGetPortfolio_RequiresAuth(t *testing.T) {
 	e := newTestEnv()
@@ -98,11 +98,23 @@ func TestAddPosition_CreatesValidPosition(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "AAPL", body["symbol"])
 	assert.NotEmpty(t, body["id"])
+	// Baseline locked at today's quote; no average_buy_price anywhere.
+	assert.Equal(t, 195.0, body["baseline_price"])
+	assert.NotContains(t, rec.Body.String(), "average_buy_price")
+}
+
+func TestAddPosition_RejectsClientSuppliedPrice(t *testing.T) {
+	e := newTestEnv()
+	// average_buy_price is no longer part of the contract; strict decoding
+	// rejects it so clients cannot even attempt to set a historical price.
+	legacy := `{"symbol":"AAPL","asset_type":"stock","quantity":10,"average_buy_price":1}`
+	rec := e.do(t, http.MethodPost, "/portfolio/positions", legacy, e.token(t, "user-1"))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAddPosition_RejectsInvalidPayload(t *testing.T) {
 	e := newTestEnv()
-	bad := `{"symbol":"AAPL","asset_type":"bond","quantity":10,"average_buy_price":180,"currency":"USD"}`
+	bad := `{"symbol":"AAPL","asset_type":"bond","quantity":10}`
 	rec := e.do(t, http.MethodPost, "/portfolio/positions", bad, e.token(t, "user-1"))
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -140,14 +152,15 @@ func TestUpdatePosition_UpdatesOwn(t *testing.T) {
 	created := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, tok)
 	id := decodeID(t, created)
 
-	upd := `{"symbol":"AAPL","asset_type":"stock","quantity":12,"average_buy_price":175,"currency":"USD"}`
+	upd := `{"quantity":12}`
 	rec := e.do(t, http.MethodPut, "/portfolio/positions/"+id, upd, tok)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, 12.0, body["quantity"])
-	assert.Equal(t, 175.0, body["average_buy_price"])
+	// The locked baseline is untouched by the quantity edit.
+	assert.Equal(t, 195.0, body["baseline_price"])
 }
 
 func TestUpdatePosition_RejectsOtherUsersPosition(t *testing.T) {
@@ -155,7 +168,7 @@ func TestUpdatePosition_RejectsOtherUsersPosition(t *testing.T) {
 	created := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"))
 	id := decodeID(t, created)
 
-	rec := e.do(t, http.MethodPut, "/portfolio/positions/"+id, aaplBody, e.token(t, "user-2"))
+	rec := e.do(t, http.MethodPut, "/portfolio/positions/"+id, `{"quantity":5}`, e.token(t, "user-2"))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "another user's position must be invisible (404)")
 }
 
@@ -191,43 +204,11 @@ func TestSummary_ReturnsCalculatedSummary(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, 1800.0, body["total_cost_basis"])
+	// Fresh position: baseline = today's price, so the index starts at 100.
+	assert.Equal(t, 1950.0, body["total_cost_basis"])
 	assert.Equal(t, 1950.0, body["current_value"])
-	assert.Equal(t, 150.0, body["gain_loss"])
-	assert.InDelta(t, 108.33, body["portfolio_index"], 0.01)
-}
-
-func TestGetPrice_ReturnsPrice(t *testing.T) {
-	e := newTestEnv()
-	rec := e.do(t, http.MethodGet, "/prices/AAPL", "", e.token(t, "user-1"))
-
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, "AAPL", body["symbol"])
-	assert.Equal(t, 195.0, body["price"])
-	assert.Equal(t, "mock", body["source"])
-}
-
-func TestGetPrice_UnknownSymbolHandledCleanly(t *testing.T) {
-	e := newTestEnv()
-	// A well-formed but unsupported symbol → 404 (the mock provider doesn't know it).
-	rec := e.do(t, http.MethodGet, "/prices/UNKNOWN", "", e.token(t, "user-1"))
-
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assertError(t, rec.Body.Bytes())
-}
-
-func TestGetPrice_MalformedSymbolIsBadRequest(t *testing.T) {
-	e := newTestEnv()
-	rec := e.do(t, http.MethodGet, "/prices/A_B", "", e.token(t, "user-1"))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-func TestGetPrice_RequiresAuth(t *testing.T) {
-	e := newTestEnv()
-	rec := e.do(t, http.MethodGet, "/prices/AAPL", "", "")
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, 0.0, body["gain_loss"])
+	assert.InDelta(t, 100.0, body["portfolio_index"], 0.01)
 }
 
 func decodeID(t *testing.T, rec *httptest.ResponseRecorder) string {

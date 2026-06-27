@@ -53,41 +53,48 @@ type portfolioView struct {
 	Currency string `json:"currency"`
 }
 
+// positionView is the owner-private position shape. BaselinePrice is the price
+// locked at add time (today's market price) — there is no average buy price in
+// the product.
 type positionView struct {
-	ID              string  `json:"id"`
-	Symbol          string  `json:"symbol"`
-	AssetType       string  `json:"asset_type"`
-	Quantity        float64 `json:"quantity"`
-	AverageBuyPrice float64 `json:"average_buy_price"`
-	Currency        string  `json:"currency"`
+	ID            string  `json:"id"`
+	Symbol        string  `json:"symbol"`
+	AssetType     string  `json:"asset_type"`
+	Quantity      float64 `json:"quantity"`
+	BaselinePrice float64 `json:"baseline_price"`
+	Currency      string  `json:"currency"`
 }
 
+// positionRequest is the create payload: no price, no currency — the baseline
+// is locked server-side at the current market quote.
 type positionRequest struct {
-	Symbol          string  `json:"symbol"`
-	AssetType       string  `json:"asset_type"`
-	Quantity        float64 `json:"quantity"`
-	AverageBuyPrice float64 `json:"average_buy_price"`
-	Currency        string  `json:"currency"`
+	Symbol    string  `json:"symbol"`
+	AssetType string  `json:"asset_type"`
+	Quantity  float64 `json:"quantity"`
+}
+
+// updatePositionRequest allows quantity changes only; the symbol and locked
+// baseline price are immutable after creation.
+type updatePositionRequest struct {
+	Quantity float64 `json:"quantity"`
 }
 
 func toPositionView(p *Position) positionView {
 	return positionView{
-		ID:              p.ID,
-		Symbol:          p.Symbol,
-		AssetType:       p.AssetType,
-		Quantity:        p.Quantity,
-		AverageBuyPrice: p.AverageBuyPrice,
-		Currency:        p.Currency,
+		ID:            p.ID,
+		Symbol:        p.Symbol,
+		AssetType:     p.AssetType,
+		Quantity:      p.Quantity,
+		BaselinePrice: p.AverageBuyPrice,
+		Currency:      p.Currency,
 	}
 }
 
 func (r positionRequest) toInput() PositionInput {
 	return PositionInput{
-		Symbol:          r.Symbol,
-		AssetType:       r.AssetType,
-		Quantity:        r.Quantity,
-		AverageBuyPrice: r.AverageBuyPrice,
-		Currency:        r.Currency,
+		Symbol:    r.Symbol,
+		AssetType: r.AssetType,
+		Quantity:  r.Quantity,
 	}
 }
 
@@ -155,12 +162,12 @@ func (h *Handler) UpdatePosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	positionID := chi.URLParam(r, "positionId")
-	var req positionRequest
+	var req updatePositionRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	pos, err := h.svc.UpdatePosition(r.Context(), userID, positionID, req.toInput())
+	pos, err := h.svc.UpdatePosition(r.Context(), userID, positionID, req.Quantity)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -217,8 +224,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrSymbolRequired),
 		errors.Is(err, ErrInvalidAssetType),
 		errors.Is(err, ErrInvalidQuantity),
-		errors.Is(err, ErrInvalidPrice),
-		errors.Is(err, ErrCurrencyRequired),
 		errors.Is(err, ErrUnsupportedSymbol),
 		errors.Is(err, ErrUnsupportedCurrency):
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())

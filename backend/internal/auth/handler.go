@@ -79,7 +79,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 // Me handles GET /me. It relies on RequireAuth having placed the user id in the
-// request context.
+// request context, and returns the current user's public projection — letting
+// the SPA validate a stored token and rehydrate the user on boot.
 func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	userID, ok := UserIDFromContext(r.Context())
 	if !ok {

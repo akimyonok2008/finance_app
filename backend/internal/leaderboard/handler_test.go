@@ -21,7 +21,9 @@ type stubUsers struct{ users []auth.User }
 
 func (s stubUsers) ListUsers(_ context.Context) ([]auth.User, error) { return s.users, nil }
 
-type stubSummaries struct{ byUser map[string]*portfolio.PortfolioSummary }
+type stubSummaries struct {
+	byUser map[string]*portfolio.PortfolioSummary
+}
 
 func (s stubSummaries) Summary(_ context.Context, userID string) (*portfolio.PortfolioSummary, error) {
 	return s.byUser[userID], nil

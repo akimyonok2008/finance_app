@@ -31,7 +31,9 @@ func (s stubUsers) GetUserByID(_ context.Context, id string) (*auth.User, error)
 	return nil, assert.AnError
 }
 
-type stubPositions struct{ m map[string][]portfolio.Position }
+type stubPositions struct {
+	m map[string][]portfolio.Position
+}
 
 func (s stubPositions) ListPositions(_ context.Context, userID string) ([]portfolio.Position, error) {
 	return s.m[userID], nil

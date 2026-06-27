@@ -9,7 +9,10 @@ import { LoginPage } from "@/pages/auth/LoginPage";
 import { RegisterPage } from "@/pages/auth/RegisterPage";
 import { PortfolioPage } from "@/pages/PortfolioPage";
 import { LeaderboardPage } from "@/pages/leaderboard/LeaderboardPage";
-import { ArenaPage } from "@/pages/arena/ArenaPage";
+import { CoachPage } from "@/pages/coach/CoachPage";
+import { MyProfilePage } from "@/pages/Profile/MyProfilePage";
+import { PublicProfilePage } from "@/pages/Profile/PublicProfilePage";
+import { ExplorePage } from "@/pages/Explore/ExplorePage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -57,19 +60,49 @@ export default function App() {
               }
             />
 
+            <Route path="/arena" element={<Navigate to="/leaderboard" replace />} />
+
             <Route
-              path="/arena"
+              path="/coach"
               element={
                 <ProtectedRoute>
-                  <ArenaPage />
+                  <CoachPage />
                 </ProtectedRoute>
               }
             />
 
-            <Route path="/sprint" element={<Navigate to="/arena" replace />} />
+            <Route
+              path="/profile"
+              element={
+                <ProtectedRoute>
+                  <MyProfilePage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/profiles/:handle"
+              element={
+                <ProtectedRoute>
+                  <PublicProfilePage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/explore"
+              element={
+                <ProtectedRoute>
+                  <ExplorePage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route path="/sprint" element={<Navigate to="/leaderboard" replace />} />
+            <Route path="/profile/me" element={<Navigate to="/profile" replace />} />
             <Route
               path="/achievements"
-              element={<Navigate to="/arena" replace />}
+              element={<Navigate to="/leaderboard" replace />}
             />
 
             {/* Redirect root to dashboard */}

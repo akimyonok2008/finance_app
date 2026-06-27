@@ -8,22 +8,24 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/coach"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
-	"github.com/ardakimyonok/finance_app/internal/prices"
+	"github.com/ardakimyonok/finance_app/internal/profile"
 )
 
 // Deps bundles the constructed services the router needs. Grouping them keeps
 // New's signature stable as the app grows.
 type Deps struct {
-	Auth          *auth.Service
-	Tokens        *auth.TokenManager
-	Portfolio     *portfolio.Service
-	Leaderboard   *leaderboard.Service
-	Competitions  *competitions.Service
-	Achievements  *achievements.Service
-	PriceProvider prices.PriceProvider
+	Auth         *auth.Service
+	Tokens       *auth.TokenManager
+	Portfolio    *portfolio.Service
+	Leaderboard  *leaderboard.Service
+	Competitions *competitions.Service
+	Achievements *achievements.Service
+	Coach        *coach.Service
+	Profile      *profile.Service
 
 	// ReadinessChecks are dependency probes for GET /ready (postgres, redis, ...).
 	ReadinessChecks []ReadinessCheck
@@ -45,10 +47,14 @@ func New(d Deps) http.Handler {
 	authHandler := auth.NewHandler(d.Auth)
 	portfolioHandler := portfolio.NewHandler(d.Portfolio)
 	portfolioHandler.SetAchievementEvaluator(d.Achievements) // trigger badges on add/summary
-	priceHandler := prices.NewHandler(d.PriceProvider)
 	leaderboardHandler := leaderboard.NewHandler(d.Leaderboard)
 	competitionHandler := competitions.NewHandler(d.Competitions, d.Achievements)
 	achievementHandler := achievements.NewHandler(d.Achievements)
+	coachHandler := coach.NewHandler(d.Coach)
+	var profileHandler *profile.Handler
+	if d.Profile != nil {
+		profileHandler = profile.NewHandler(d.Profile)
+	}
 
 	// Local test UI (development convenience, not a production frontend).
 	r.Get("/", serveIndex)
@@ -76,9 +82,8 @@ func New(d Deps) http.Handler {
 		r.Put("/portfolio/positions/{positionId}", portfolioHandler.UpdatePosition)
 		r.Delete("/portfolio/positions/{positionId}", portfolioHandler.DeletePosition)
 
-		r.Get("/prices/{symbol}", priceHandler.GetPrice)
-
 		r.Get("/leaderboard", leaderboardHandler.GetLeaderboard)
+		r.Get("/leaderboard/me", leaderboardHandler.GetMyStanding)
 
 		r.Get("/competitions", competitionHandler.ListCompetitions)
 		r.Post("/competitions/{competitionId}/join", competitionHandler.JoinCompetition)
@@ -87,6 +92,17 @@ func New(d Deps) http.Handler {
 
 		r.Get("/achievements", achievementHandler.ListAchievements)
 		r.Post("/achievements/evaluate", achievementHandler.Evaluate)
+
+		r.Post("/portfolio/coach", coachHandler.Coach)
+
+		if profileHandler != nil {
+			r.Get("/profiles/me", profileHandler.GetMe)
+			r.Patch("/profiles/me", profileHandler.UpdateMe)
+			// Static segment registered before {handle} so Explore is never
+			// shadowed by the public-profile wildcard.
+			r.Get("/profiles/explore", profileHandler.Explore)
+			r.Get("/profiles/{handle}", profileHandler.GetPublic)
+		}
 	})
 
 	return r

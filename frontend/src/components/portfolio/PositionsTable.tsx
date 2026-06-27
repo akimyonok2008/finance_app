@@ -75,7 +75,7 @@ export function PositionsTable({
             <TableHead>Symbol</TableHead>
             <TableHead>Type</TableHead>
             <TableHead className="text-right">Quantity</TableHead>
-            <TableHead className="text-right">Avg Buy</TableHead>
+            <TableHead className="text-right">Baseline</TableHead>
             <TableHead className="text-right">Current Price</TableHead>
             <TableHead className="text-right">FX Return</TableHead>
             <TableHead className="text-right">Base Gain / Loss</TableHead>
@@ -111,7 +111,7 @@ export function PositionsTable({
                     {row.quantity}
                   </TableCell>
                   <TableCell className="text-right tabular-nums text-slate-300">
-                    {formatMoney(row.average_buy_price, currency)}
+                    {formatMoney(row.baseline_price, currency)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums text-slate-300">
                     {formatMoney(row.current_price, priceCurrency)}

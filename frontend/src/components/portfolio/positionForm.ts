@@ -5,8 +5,6 @@ export type PositionFormState = {
   symbol: string;
   asset_type: AssetType;
   quantity: string;
-  average_buy_price: string;
-  currency: string;
 };
 
 export type PositionFormErrors = Partial<
@@ -17,8 +15,6 @@ export const EMPTY_POSITION_FORM: PositionFormState = {
   symbol: "",
   asset_type: "stock",
   quantity: "",
-  average_buy_price: "",
-  currency: "USD",
 };
 
 const SYMBOL_PATTERN = /^[A-Z0-9.-]+$/;
@@ -28,9 +24,10 @@ export type ValidationResult =
   | { ok: false; errors: PositionFormErrors };
 
 /**
- * Mirror of the backend's symbol/quantity/price rules so the user gets instant
- * feedback. The backend remains the source of truth (priceability is checked
- * server-side and surfaced separately).
+ * Mirror of the backend's symbol/quantity rules so the user gets instant
+ * feedback. There is no price/currency input: the backend locks the baseline at
+ * today's market quote, so every position starts at index 100. The backend
+ * remains the source of truth (priceability is checked server-side).
  */
 export function validatePositionForm(
   state: PositionFormState,
@@ -53,18 +50,6 @@ export function validatePositionForm(
     errors.quantity = "Quantity must be greater than 0.";
   }
 
-  const price = Number(state.average_buy_price);
-  if (state.average_buy_price.trim() === "" || Number.isNaN(price)) {
-    errors.average_buy_price = "Enter an average buy price.";
-  } else if (price <= 0) {
-    errors.average_buy_price = "Price must be greater than 0.";
-  }
-
-  const currency = state.currency.trim().toUpperCase();
-  if (!currency) {
-    errors.currency = "Currency is required.";
-  }
-
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
   }
@@ -75,8 +60,6 @@ export function validatePositionForm(
       symbol,
       asset_type: state.asset_type,
       quantity,
-      average_buy_price: price,
-      currency,
     },
   };
 }

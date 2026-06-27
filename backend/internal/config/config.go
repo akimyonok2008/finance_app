@@ -19,6 +19,8 @@ const (
 	defaultPriceCacheSecs   = 300
 	defaultBaseCurrency     = "USD"
 	defaultEnableBackground = false
+	defaultAIProvider       = "mock"
+	defaultAITimeoutSecs    = 20
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -36,6 +38,16 @@ type Config struct {
 	EnableBackgroundWorkers    bool
 	LeaderboardRefreshInterval time.Duration
 	PriceCacheTTL              time.Duration
+
+	// AI Portfolio Coach. Defaults are safe and key-free: the mock provider
+	// runs locally with no external API. A real provider is only used when
+	// AIEnableRealProvider is true AND AIProvider names a non-mock provider.
+	AIProvider           string // "mock" (default); future: "openai", "gemini"
+	AIModel              string
+	AIAPIKey             string
+	AIBaseURL            string
+	AITimeout            time.Duration
+	AIEnableRealProvider bool
 }
 
 // Load reads configuration from environment variables, falling back to
@@ -55,6 +67,13 @@ func Load() Config {
 		EnableBackgroundWorkers:    getEnvBool("ENABLE_BACKGROUND_WORKERS", defaultEnableBackground),
 		LeaderboardRefreshInterval: time.Duration(getEnvInt("LEADERBOARD_REFRESH_INTERVAL_SECONDS", defaultLeaderboardSecs)) * time.Second,
 		PriceCacheTTL:              time.Duration(getEnvInt("PRICE_CACHE_TTL_SECONDS", defaultPriceCacheSecs)) * time.Second,
+
+		AIProvider:           getEnv("AI_PROVIDER", defaultAIProvider),
+		AIModel:              getEnv("AI_MODEL", ""),
+		AIAPIKey:             getEnv("AI_API_KEY", ""),
+		AIBaseURL:            getEnv("AI_BASE_URL", ""),
+		AITimeout:            time.Duration(getEnvInt("AI_TIMEOUT_SECONDS", defaultAITimeoutSecs)) * time.Second,
+		AIEnableRealProvider: getEnvBool("AI_ENABLE_REAL_PROVIDER", false),
 	}
 }
 

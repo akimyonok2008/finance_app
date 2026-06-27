@@ -23,7 +23,12 @@ type Portfolio struct {
 	UpdatedAt time.Time
 }
 
-// Position is a single manually-entered holding.
+// Position is a single manually-entered holding. AverageBuyPrice is the LOCKED
+// BASELINE PRICE: it is set by the backend to the current market price at add
+// time and can never be supplied or edited by the client. All performance
+// (index starting at 100) is measured from this baseline, so historical buy
+// prices cannot inflate ranked gains. Currency is the quote currency of the
+// locked price, also backend-derived.
 type Position struct {
 	ID              string
 	UserID          string
@@ -31,19 +36,19 @@ type Position struct {
 	Symbol          string
 	AssetType       string
 	Quantity        float64
-	AverageBuyPrice float64
-	Currency        string
+	AverageBuyPrice float64 // locked baseline price (today's price at add)
+	Currency        string  // quote currency of the locked baseline price
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
 
-// PositionInput carries the client-supplied fields for create/update.
+// PositionInput carries the client-supplied fields for creating a position.
+// There is deliberately NO price and NO currency here: the baseline price is
+// locked server-side at the current market quote.
 type PositionInput struct {
-	Symbol          string
-	AssetType       string
-	Quantity        float64
-	AverageBuyPrice float64
-	Currency        string
+	Symbol    string
+	AssetType string
+	Quantity  float64
 }
 
 // PortfolioSummary is the calculated, response-ready view of a portfolio. All
@@ -65,11 +70,13 @@ type PortfolioSummary struct {
 // CurrentValue are in the position's local currency; the *Base fields are the
 // FX-normalized base-currency equivalents used for portfolio totals.
 type PositionSummary struct {
-	PositionID           string  `json:"position_id"`
-	Symbol               string  `json:"symbol"`
-	AssetType            string  `json:"asset_type"`
-	Quantity             float64 `json:"quantity"`
-	AverageBuyPrice      float64 `json:"average_buy_price"`
+	PositionID string  `json:"position_id"`
+	Symbol     string  `json:"symbol"`
+	AssetType  string  `json:"asset_type"`
+	Quantity   float64 `json:"quantity"`
+	// AverageBuyPrice is the locked baseline price (today's price at add time).
+	// Serialized as baseline_price — the product has no "average buy price".
+	AverageBuyPrice      float64 `json:"baseline_price"`
 	CurrentPrice         float64 `json:"current_price"`
 	CurrentPriceCurrency string  `json:"current_price_currency"`
 	CostBasis            float64 `json:"cost_basis"`           // local currency

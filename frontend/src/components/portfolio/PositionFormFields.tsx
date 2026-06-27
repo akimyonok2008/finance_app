@@ -1,3 +1,5 @@
+import { LockKeyhole } from "lucide-react";
+
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -7,12 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  ASSET_TYPES,
-  CURRENCIES,
-  DEMO_SYMBOLS,
-  type AssetType,
-} from "@/types/portfolio";
+import { ASSET_TYPES, DEMO_SYMBOLS, type AssetType } from "@/types/portfolio";
 import type {
   PositionFormErrors,
   PositionFormState,
@@ -71,7 +68,7 @@ export function PositionFormFields({
         <FieldError message={errors.symbol} />
       </div>
 
-      {/* Asset type + Currency */}
+      {/* Asset type + Quantity */}
       <div className="grid grid-cols-2 gap-4">
         <div className="grid gap-1.5">
           <Label htmlFor={id("asset_type")}>Asset Type</Label>
@@ -95,30 +92,6 @@ export function PositionFormFields({
         </div>
 
         <div className="grid gap-1.5">
-          <Label htmlFor={id("currency")}>Currency</Label>
-          <Select
-            value={state.currency}
-            disabled={disabled}
-            onValueChange={(v) => onChange({ currency: v })}
-          >
-            <SelectTrigger id={id("currency")} aria-label="Currency">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CURRENCIES.map((c) => (
-                <SelectItem key={c} value={c}>
-                  {c}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <FieldError message={errors.currency} />
-        </div>
-      </div>
-
-      {/* Quantity + Avg buy price */}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="grid gap-1.5">
           <Label htmlFor={id("quantity")}>Quantity</Label>
           <Input
             id={id("quantity")}
@@ -136,25 +109,16 @@ export function PositionFormFields({
           />
           <FieldError message={errors.quantity} />
         </div>
+      </div>
 
-        <div className="grid gap-1.5">
-          <Label htmlFor={id("average_buy_price")}>Avg Buy Price</Label>
-          <Input
-            id={id("average_buy_price")}
-            name="average_buy_price"
-            type="number"
-            inputMode="decimal"
-            step="any"
-            min="0"
-            placeholder="180.00"
-            value={state.average_buy_price}
-            disabled={disabled}
-            aria-invalid={!!errors.average_buy_price}
-            className="tabular-nums"
-            onChange={(e) => onChange({ average_buy_price: e.target.value })}
-          />
-          <FieldError message={errors.average_buy_price} />
-        </div>
+      {/* Baseline note — there is no price/currency input by design. */}
+      <div className="flex items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5 text-xs text-zinc-400">
+        <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" />
+        <span>
+          Added at today’s market price. Your index starts at{" "}
+          <span className="font-medium text-zinc-200">100</span> and tracks
+          performance from here — no buy price needed.
+        </span>
       </div>
     </div>
   );

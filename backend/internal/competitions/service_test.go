@@ -44,7 +44,9 @@ func (f fakeUsers) GetUserByID(_ context.Context, id string) (*auth.User, error)
 	return u, nil
 }
 
-type fakePositions struct{ m map[string][]portfolio.Position }
+type fakePositions struct {
+	m map[string][]portfolio.Position
+}
 
 func (f fakePositions) ListPositions(_ context.Context, userID string) ([]portfolio.Position, error) {
 	return f.m[userID], nil
@@ -78,8 +80,8 @@ func compID() string { return WeeklySprintID(fixedTime) }
 func TestWeeklySprint_ISOWeekIDAndBounds(t *testing.T) {
 	c := WeeklySprint(fixedTime)
 	assert.Equal(t, "weekly_2026_24", c.ID)
-	assert.Equal(t, time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC), c.StartsAt)  // Monday
-	assert.Equal(t, time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC), c.EndsAt)   // next Monday
+	assert.Equal(t, time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC), c.StartsAt) // Monday
+	assert.Equal(t, time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC), c.EndsAt)  // next Monday
 	assert.Equal(t, StatusActive, c.Status)
 }
 
@@ -117,8 +119,8 @@ func TestJoin_StoresSnapshot(t *testing.T) {
 	snap := entry.Snapshots[0]
 	assert.Equal(t, "AAPL", snap.Symbol)
 	assert.Equal(t, 10.0, snap.Quantity)
-	assert.Equal(t, 195.0, snap.StartingPrice)         // mock AAPL price
-	assert.Equal(t, 1950.0, snap.StartingValueBase)    // 10 * 195 USD
+	assert.Equal(t, 195.0, snap.StartingPrice)      // mock AAPL price
+	assert.Equal(t, 1950.0, snap.StartingValueBase) // 10 * 195 USD
 	assert.Equal(t, 1950.0, entry.StartingValue)
 }
 

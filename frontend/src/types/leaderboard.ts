@@ -1,34 +1,52 @@
-// Privacy guard: leaderboard UI must never include portfolio value, cost basis,
-// holdings, symbols, quantities, average buy price, email, user id, or portfolio id.
+import type { ProfileBadge } from "@/types/profile";
 
-export type LeaderboardTimeframe =
-  | "daily"
-  | "weekly"
-  | "monthly"
-  | "all_time";
+// Public ranking projections only. Never add quantities, values, cost basis,
+// prices, emails, user ids, or portfolio ids to this contract.
+export type LeaderboardTimeframe = "1W" | "1M" | "3M" | "6M" | "1Y" | "ALL";
+
+export type PublicAssetType =
+  | "stock"
+  | "etf"
+  | "crypto"
+  | "fund"
+  | "cash"
+  | "other";
+
+/** Public composition weight: symbol + asset type + percentage only. */
+export type PublicWeight = {
+  symbol: string;
+  asset_type: PublicAssetType;
+  weight_percentage: number;
+};
 
 export type LeaderboardEntry = {
   rank: number;
   display_name: string;
+  handle?: string;
   avatar_key?: string;
   strategy_tag?: string;
-  change_24h_percentage?: number | null;
-  total_roi_percentage: number;
-  portfolio_index?: number;
+  ranked_index: number;
+  ranked_return_percentage: number;
+  public_weights: PublicWeight[];
+  badges: ProfileBadge[];
   is_me?: boolean;
 };
 
 export type LeaderboardGlobalResponse = {
   timeframe: LeaderboardTimeframe;
-  page: number;
-  page_size: number;
-  total: number;
   entries: LeaderboardEntry[];
-  me?: LeaderboardEntry | null;
 };
 
 export type LeaderboardQueryParams = {
   timeframe: LeaderboardTimeframe;
-  page?: number;
-  page_size?: number;
+};
+
+/** GET /leaderboard/me — the caller's own standing for a timeframe. */
+export type LeaderboardStanding = {
+  timeframe: LeaderboardTimeframe;
+  eligible: boolean;
+  rank: number | null;
+  total_participants: number;
+  ranked_return_percentage: number;
+  ranked_index: number;
 };

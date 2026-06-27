@@ -54,10 +54,14 @@ func (s *Service) GetOrCreateDefaultPortfolio(userID string) (*Portfolio, error)
 }
 
 // AddPosition validates the input and creates a position in the user's default
-// portfolio. The symbol must pass format checks AND be priceable by the active
-// provider, so unpriceable tickers can never enter the repository.
+// portfolio, LOCKING the baseline at the current market price. The client never
+// supplies a price or currency: the backend fetches today's quote and stores
+// price + quote currency as the immutable baseline. A fresh position therefore
+// starts at exactly 0% gain (portfolio index contribution of 100), and ranked
+// performance can only come from market moves after the add — historical buy
+// prices do not exist in this model.
 func (s *Service) AddPosition(ctx context.Context, userID string, in PositionInput) (*Position, error) {
-	clean, err := s.validatePosition(ctx, in)
+	clean, quote, err := s.validatePosition(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -75,8 +79,8 @@ func (s *Service) AddPosition(ctx context.Context, userID string, in PositionInp
 		Symbol:          clean.Symbol,
 		AssetType:       clean.AssetType,
 		Quantity:        clean.Quantity,
-		AverageBuyPrice: clean.AverageBuyPrice,
-		Currency:        clean.Currency,
+		AverageBuyPrice: quote.Price,    // locked baseline: today's price
+		Currency:        quote.Currency, // quote currency of the baseline
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -91,13 +95,15 @@ func (s *Service) ListPositions(userID string) ([]*Position, error) {
 	return s.repo.ListPositionsByUser(userID)
 }
 
-// UpdatePosition validates input and updates a position the user owns. Updating
-// a position that does not exist or belongs to another user returns
+// UpdatePosition updates the QUANTITY of a position the user owns. The symbol
+// and locked baseline price are immutable — re-pricing on edit would let users
+// reset a losing baseline, which breaks ranking fairness. To change symbols,
+// delete and re-add (which locks a fresh baseline at that day's price).
+// Updating a position that does not exist or belongs to another user returns
 // ErrPositionNotFound.
-func (s *Service) UpdatePosition(ctx context.Context, userID, positionID string, in PositionInput) (*Position, error) {
-	clean, err := s.validatePosition(ctx, in)
-	if err != nil {
-		return nil, err
+func (s *Service) UpdatePosition(_ context.Context, userID, positionID string, quantity float64) (*Position, error) {
+	if quantity <= 0 {
+		return nil, ErrInvalidQuantity
 	}
 
 	existing, err := s.ownedPosition(userID, positionID)
@@ -105,11 +111,7 @@ func (s *Service) UpdatePosition(ctx context.Context, userID, positionID string,
 		return nil, err
 	}
 
-	existing.Symbol = clean.Symbol
-	existing.AssetType = clean.AssetType
-	existing.Quantity = clean.Quantity
-	existing.AverageBuyPrice = clean.AverageBuyPrice
-	existing.Currency = clean.Currency
+	existing.Quantity = quantity
 	existing.UpdatedAt = time.Now().UTC()
 
 	if err := s.repo.UpdatePosition(existing); err != nil {
@@ -181,27 +183,29 @@ func (s *Service) ownedPosition(userID, positionID string) (*Position, error) {
 	return pos, nil
 }
 
-// validatePosition runs format validation then confirms the currency is
-// FX-convertible and the symbol is priceable by the active provider. This is
-// the gate that keeps unpriceable tickers and unknown currencies out of the
-// repository (so they can never later break summaries or leaderboards).
-func (s *Service) validatePosition(ctx context.Context, in PositionInput) (PositionInput, error) {
+// validatePosition runs format validation, fetches the current quote (which is
+// both the priceability gate AND the baseline to lock), and confirms the quote
+// currency is FX-convertible. This keeps unpriceable tickers and unknown
+// currencies out of the repository so they can never later break summaries or
+// leaderboards.
+func (s *Service) validatePosition(ctx context.Context, in PositionInput) (PositionInput, *prices.Price, error) {
 	clean, err := validateAndNormalize(in)
 	if err != nil {
-		return PositionInput{}, err
+		return PositionInput{}, nil, err
 	}
-	if _, err := s.fx.GetRate(ctx, clean.Currency, fx.BaseCurrency); err != nil {
-		return PositionInput{}, ErrUnsupportedCurrency
+	quote, err := s.provider.GetLatestPrice(ctx, clean.Symbol)
+	if err != nil || quote == nil {
+		return PositionInput{}, nil, ErrUnsupportedSymbol
 	}
-	if _, err := s.provider.GetLatestPrice(ctx, clean.Symbol); err != nil {
-		return PositionInput{}, ErrUnsupportedSymbol
+	if _, err := s.fx.GetRate(ctx, quote.Currency, fx.BaseCurrency); err != nil {
+		return PositionInput{}, nil, ErrUnsupportedCurrency
 	}
-	return clean, nil
+	return clean, quote, nil
 }
 
 // validateAndNormalize checks a PositionInput and returns a normalized copy
-// (symbol and currency upper-cased, whitespace trimmed). It enforces the
-// safe-symbol format but does NOT check priceability.
+// (symbol upper-cased, whitespace trimmed). It enforces the safe-symbol format
+// but does NOT check priceability.
 func validateAndNormalize(in PositionInput) (PositionInput, error) {
 	if strings.TrimSpace(in.Symbol) == "" {
 		return PositionInput{}, ErrSymbolRequired
@@ -217,19 +221,10 @@ func validateAndNormalize(in PositionInput) (PositionInput, error) {
 	if in.Quantity <= 0 {
 		return PositionInput{}, ErrInvalidQuantity
 	}
-	if in.AverageBuyPrice <= 0 {
-		return PositionInput{}, ErrInvalidPrice
-	}
-	currency := strings.ToUpper(strings.TrimSpace(in.Currency))
-	if currency == "" {
-		return PositionInput{}, ErrCurrencyRequired
-	}
 
 	return PositionInput{
-		Symbol:          symbol,
-		AssetType:       assetType,
-		Quantity:        in.Quantity,
-		AverageBuyPrice: in.AverageBuyPrice,
-		Currency:        currency,
+		Symbol:    symbol,
+		AssetType: assetType,
+		Quantity:  in.Quantity,
 	}, nil
 }

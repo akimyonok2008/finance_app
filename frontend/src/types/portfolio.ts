@@ -3,13 +3,17 @@ export type AssetType = "stock" | "etf" | "crypto";
 /** Supported demo/mock currencies (backend rejects others with 400). */
 export type CurrencyCode = "USD" | "TRY" | "EUR" | "GBP";
 
-/** A raw position as returned by GET /portfolio/positions. */
+/**
+ * A raw position as returned by GET /portfolio/positions. `baseline_price` is
+ * the market price locked at add time (today's price) in the position's quote
+ * currency — there is no average/historical buy price in the product.
+ */
 export type Position = {
   id: string;
   symbol: string;
   asset_type: AssetType;
   quantity: number;
-  average_buy_price: number;
+  baseline_price: number;
   currency: string;
 };
 
@@ -24,7 +28,7 @@ export type PositionSummary = {
   symbol: string;
   asset_type: AssetType;
   quantity: number;
-  average_buy_price: number;
+  baseline_price: number;
   current_price?: number;
   current_price_currency?: string;
   cost_basis?: number;
@@ -51,15 +55,20 @@ export type PortfolioSummary = {
   positions?: PositionSummary[];
 };
 
+/**
+ * Create payload: no price and no currency. The backend locks the baseline at
+ * the current market quote, so positions always start at index 100.
+ */
 export type CreatePositionInput = {
   symbol: string;
   asset_type: AssetType;
   quantity: number;
-  average_buy_price: number;
-  currency: string;
 };
 
-export type UpdatePositionInput = CreatePositionInput;
+/** Only the quantity is editable; the locked baseline price is immutable. */
+export type UpdatePositionInput = {
+  quantity: number;
+};
 
 export const ASSET_TYPES: AssetType[] = ["stock", "etf", "crypto"];
 

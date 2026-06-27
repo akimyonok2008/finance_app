@@ -10,14 +10,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { PositionFormFields } from "@/components/portfolio/PositionFormFields";
-import {
-  validatePositionForm,
-  type PositionFormErrors,
-  type PositionFormState,
-} from "@/components/portfolio/positionForm";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { AssetTypeBadge } from "@/components/portfolio/AssetTypeBadge";
 import { useUpdatePosition } from "@/hooks/usePositions";
 import type { Position } from "@/types/portfolio";
+import { formatMoney } from "@/utils/formatMoney";
 
 type Props = {
   position: Position | null;
@@ -25,20 +23,10 @@ type Props = {
   onOpenChange: (open: boolean) => void;
 };
 
-function toFormState(position: Position): PositionFormState {
-  return {
-    symbol: position.symbol,
-    asset_type: position.asset_type,
-    quantity: String(position.quantity),
-    average_buy_price: String(position.average_buy_price),
-    currency: position.currency,
-  };
-}
-
 /**
- * Inner form, initialized directly from the position prop. It is keyed by the
- * position id in the parent so switching positions (or reopening) remounts it
- * with fresh state — no effect-driven syncing required.
+ * Quantity-only edit. The symbol and locked baseline price are immutable — to
+ * change a holding, delete it and re-add (which locks a fresh baseline at that
+ * day's price). This keeps ranked performance fair.
  */
 function EditPositionForm({
   position,
@@ -47,46 +35,38 @@ function EditPositionForm({
   position: Position;
   onClose: () => void;
 }) {
-  const [state, setState] = useState<PositionFormState>(() =>
-    toFormState(position),
+  const [quantity, setQuantity] = useState<string>(() =>
+    String(position.quantity),
   );
-  const [errors, setErrors] = useState<PositionFormErrors>({});
+  const [error, setError] = useState<string | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
 
   const updatePosition = useUpdatePosition();
-
-  const onChange = (patch: Partial<PositionFormState>) => {
-    setState((prev) => ({ ...prev, ...patch }));
-    setErrors((prev) => {
-      const next = { ...prev };
-      for (const key of Object.keys(patch)) {
-        delete next[key as keyof PositionFormState];
-      }
-      return next;
-    });
-  };
+  const pending = updatePosition.isPending;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setBackendError(null);
 
-    const result = validatePositionForm(state);
-    if (!result.ok) {
-      setErrors(result.errors);
+    const value = Number(quantity);
+    if (quantity.trim() === "" || Number.isNaN(value)) {
+      setError("Enter a quantity.");
       return;
     }
-    setErrors({});
+    if (value <= 0) {
+      setError("Quantity must be greater than 0.");
+      return;
+    }
+    setError(null);
 
     updatePosition.mutate(
-      { id: position.id, input: result.value },
+      { id: position.id, input: { quantity: value } },
       {
         onSuccess: () => onClose(),
         onError: (err: Error) => setBackendError(err.message),
       },
     );
   };
-
-  const pending = updatePosition.isPending;
 
   return (
     <form onSubmit={handleSubmit} className="grid gap-5" noValidate>
@@ -100,13 +80,48 @@ function EditPositionForm({
         </div>
       )}
 
-      <PositionFormFields
-        idPrefix="edit"
-        state={state}
-        errors={errors}
-        disabled={pending}
-        onChange={onChange}
-      />
+      {/* Immutable identity + locked baseline, shown read-only for context. */}
+      <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <span className="text-base font-semibold tracking-wide">
+            {position.symbol}
+          </span>
+          <AssetTypeBadge type={position.asset_type} />
+        </div>
+        <div className="text-right">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+            Baseline
+          </div>
+          <div className="text-sm tabular-nums text-slate-300">
+            {formatMoney(position.baseline_price, position.currency)}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-1.5">
+        <Label htmlFor="edit-quantity">Quantity</Label>
+        <Input
+          id="edit-quantity"
+          name="quantity"
+          type="number"
+          inputMode="decimal"
+          step="any"
+          min="0"
+          value={quantity}
+          disabled={pending}
+          aria-invalid={!!error}
+          className="tabular-nums"
+          onChange={(e) => {
+            setQuantity(e.target.value);
+            setError(null);
+          }}
+        />
+        {error && <p className="text-xs text-rose-400">{error}</p>}
+        <p className="text-xs text-muted-foreground">
+          Symbol and baseline price can’t change. Delete and re-add to reset the
+          baseline at today’s price.
+        </p>
+      </div>
 
       <DialogFooter>
         <Button
@@ -139,7 +154,7 @@ export function EditPositionModal({ position, open, onOpenChange }: Props) {
         <DialogHeader>
           <DialogTitle>Edit position</DialogTitle>
           <DialogDescription>
-            Update the details of {position?.symbol ?? "this position"}.
+            Update the quantity of {position?.symbol ?? "this position"}.
           </DialogDescription>
         </DialogHeader>
 

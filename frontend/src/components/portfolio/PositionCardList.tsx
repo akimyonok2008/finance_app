@@ -125,8 +125,8 @@ export function PositionCardList({
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <Stat label="Quantity" value={String(row.quantity)} />
                   <Stat
-                    label="Avg Buy"
-                    value={formatMoney(row.average_buy_price, currency)}
+                    label="Baseline"
+                    value={formatMoney(row.baseline_price, currency)}
                     className="text-slate-300"
                   />
                   <Stat

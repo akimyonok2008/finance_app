@@ -1,8 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeft } from "lucide-react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
 
+import { AppNav } from "@/components/layout/AppNav";
 import { useArena } from "@/hooks/useArena";
 import { ArenaEmptyState } from "@/pages/arena/ArenaEmptyState";
 import { ArenaSkeleton } from "@/pages/arena/ArenaSkeleton";
@@ -41,14 +40,8 @@ export function ArenaPage() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50">
-      <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <Link
-          to="/dashboard"
-          className="mb-8 inline-flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs font-medium text-zinc-400 transition hover:border-zinc-700 hover:bg-zinc-900/70 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Back to dashboard
-        </Link>
+      <main className="mx-auto w-full max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
+        <AppNav />
 
         <motion.header
           initial={{ opacity: 0, y: -10 }}
