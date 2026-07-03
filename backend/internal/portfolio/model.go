@@ -51,6 +51,14 @@ type PositionInput struct {
 	Quantity  float64
 }
 
+// StrategyWeightInput is a target allocation used to create a fresh strategy
+// baseline. It contains no quantities, money values, prices, or private ids.
+type StrategyWeightInput struct {
+	Symbol           string  `json:"symbol"`
+	AssetType        string  `json:"asset_type"`
+	WeightPercentage float64 `json:"weight_percentage"`
+}
+
 // PortfolioSummary is the calculated, response-ready view of a portfolio. All
 // totals are expressed in the base currency (USD) after FX normalization, so
 // mixed-currency portfolios are comparable.
@@ -64,6 +72,7 @@ type PortfolioSummary struct {
 	GainLossPercentage float64           `json:"gain_loss_percentage"`
 	PortfolioIndex     float64           `json:"portfolio_index"`
 	Positions          []PositionSummary `json:"positions"`
+	QuoteStatus        QuoteStatus       `json:"quote_status"`
 }
 
 // PositionSummary is the calculated view of a single position. CostBasis and
@@ -88,6 +97,19 @@ type PositionSummary struct {
 	CurrentValueBase     float64 `json:"current_value_base"` // base currency
 	GainLossBase         float64 `json:"gain_loss_base"`     // base currency
 	BaseCurrency         string  `json:"base_currency"`
+	QuoteProvider        string  `json:"quote_provider,omitempty"`
+	QuoteProviderStatus  string  `json:"quote_provider_status,omitempty"`
+	QuoteIsStale         bool    `json:"quote_is_stale"`
+	QuoteFetchedAt       string  `json:"quote_fetched_at,omitempty"`
+	QuoteExpiresAt       string  `json:"quote_expires_at,omitempty"`
+}
+
+type QuoteStatus struct {
+	Provider       string `json:"provider"`
+	ProviderStatus string `json:"provider_status"`
+	LastFetchedAt  string `json:"last_fetched_at,omitempty"`
+	StaleCount     int    `json:"stale_count"`
+	TotalQuotes    int    `json:"total_quotes"`
 }
 
 // validAssetTypes is the set of allowed asset_type values.

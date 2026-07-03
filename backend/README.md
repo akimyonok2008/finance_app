@@ -19,10 +19,14 @@ comparisons.
   composition)
 - **Public/private profiles** ✅ (opt-in visibility, safe composition weights,
   performance, ranks, and badges)
-
+- **Friends + private DMs** ✅ (follow public profiles, mutual follow creates
+  friend state, one-to-one DMs only between mutual followers)
 Still **out of scope**: brokerage integrations (Plaid/SnapTrade), WebSockets,
-public unauthenticated leaderboards, Google/OAuth login, payments, and advanced
-gamification.
+public unauthenticated leaderboards, payments, public SaaS launch hardening, and
+advanced gamification. Public feeds, likes, comments, reposts, group chats, and
+message attachments are also intentionally out of scope.
+
+This configuration is intended for personal use, not public launch.
 
 ## Privacy model
 
@@ -34,6 +38,7 @@ Privacy is enforced by response shape and depends on the surface:
 | Sprint leaderboard | rank, display name, avatar, sprint return percentage, sprint index | snapshot composition and all absolute financial data |
 | Portfolio Coach Top 10 context | public display metadata, symbols, asset types, percentage weights, return percentage, portfolio index | quantities, prices, values, cost basis, absolute gain/loss, IDs, email |
 | Public profile | handle, display metadata, strategy tag, joined date, performance, ranks, badges, percentage composition/exposures | quantities, prices, values, cost basis, absolute gain/loss, IDs, email, brokerage data |
+| Friends and DMs | handle, display name, avatar key, strategy tag, follow/friend state, authenticated message text | portfolio values, quantities, cost basis, buy prices, email, user IDs, brokerage data |
 | Authenticated owner Portfolio/Dashboard | the owner's full portfolio and monetary totals | another user's private data |
 
 Symbols and percentage weights are intentionally public only in
@@ -42,6 +47,30 @@ percentage, not a monetary value. Profiles start **private with weights hidden**
 owners must explicitly enable profile visibility and public weights.
 Public/comparison responses must never expose or enable reconstruction of
 another user's quantities or wealth.
+
+## Social MVP
+
+The social layer is deliberately narrow:
+
+- `POST /social/follows/{handle}` follows a public profile by handle.
+- `DELETE /social/follows/{handle}` unfollows idempotently.
+- `GET /social/follow-state/{handle}` returns whether the authenticated user
+  follows, is followed by, or is friends with the target.
+- `GET /social/following`, `GET /social/followers`, and `GET /social/friends`
+  return safe profile summaries only.
+- `GET /dm/conversations` lists authenticated one-to-one conversations.
+- `POST /dm/conversations` creates or returns a conversation with a mutual
+  friend.
+- `GET /dm/conversations/{conversationId}/messages` lists messages for
+  participants only.
+- `POST /dm/conversations/{conversationId}/messages` sends a message only if the
+  other participant is still a mutual friend.
+
+DMs are available only between mutual followers. Existing conversation history
+may remain visible after an unfollow, but sending new messages is blocked until
+the mutual follow is restored. There are no WebSockets, notifications, public
+feeds, likes, comments, group chats, attachments, reactions, or investment
+advice system messages in this MVP.
 
 ## What Milestone 2 adds
 
@@ -84,6 +113,12 @@ internal/
     model.go repository.go service.go handler.go errors.go *_test.go
   profile/                 opt-in public profiles + privacy-safe portfolio projection
     model.go validation.go repository.go service.go projection.go handler.go *_test.go
+  marketdata/              instrument search, quotes, Twelve Data adapter, cache, worker
+    model.go provider.go service.go handler.go repository.go *_test.go
+  social/                  follows, friends, mutual-only DMs
+    model.go repository.go service.go handler.go *_test.go
+  strategy/                copy-preview and copy-from-public-weights
+    service.go handler.go types.go *_test.go
   fx/                      currency conversion behind FXProvider (USD base)
     model.go provider.go mock_provider.go provider_test.go
   clock/                   Clock interface (RealClock / FixedClock) for testable time
@@ -103,14 +138,14 @@ internal/
   config/config.go         env-based config with dev defaults
 ```
 
-**Layering:** `HTTP Handler → Service → Repository`, with prices behind the
-`PriceProvider` interface. Business logic never imports `finance-go` — only
-`internal/prices/yahoo_provider.go` does. Both the repository and the price
-provider are interfaces, so storage and the price feed are swappable without
-touching the service or handlers. The repositories already ship in two
-implementations — in-memory and PostgreSQL (selected via `STORAGE_PROVIDER`) —
-and the Yahoo prototype feed can later be replaced by a licensed market-data
-provider the same way.
+**Layering:** `HTTP Handler → Service → Repository`, with prices and market data
+behind provider interfaces. Business logic never imports provider SDKs directly:
+`internal/prices/yahoo_provider.go` and `internal/marketdata/twelvedata_provider.go`
+are adapter edges. Auth, portfolio, leaderboard, profile, social, market data,
+and strategy repositories already ship with in-memory and PostgreSQL-backed
+implementations where durable state is needed. Storage is selected with
+`STORAGE_PROVIDER`; market data is selected with `PRICE_PROVIDER` plus
+`ENABLE_REAL_MARKET_DATA`.
 
 ## Setup
 
@@ -136,14 +171,40 @@ app falls back to development defaults). See `.env.example`.
 | `PORT`                                 | `8080`                   | HTTP listen port.                                          |
 | `JWT_SECRET`                           | `dev-secret-change-me`   | HMAC signing secret. **Change in production.**             |
 | `JWT_EXPIRY_HOURS`                     | `24`                     | Token lifetime in hours.                                   |
+| `GOOGLE_AUTH_ENABLED`                  | `false`                  | Enables `POST /auth/google`.                               |
+| `GOOGLE_CLIENT_ID`                     | *(empty)*                | Google OAuth web client ID used as ID-token audience.      |
 | `STORAGE_PROVIDER`                     | `memory`                 | `memory` or `postgres`.                                    |
 | `DATABASE_URL`                         | local `finance_app` DSN  | Postgres connection string (when `postgres`).              |
 | `REDIS_URL`                            | *(empty — disabled)*     | e.g. `redis://localhost:6379/0`; enables caches.           |
-| `PRICE_PROVIDER`                       | `mock`                   | Price source: `mock` or `yahoo`.                           |
+| `PRICE_PROVIDER`                       | `mock`                   | Price source: `mock`, `twelvedata`, or prototype `yahoo`.   |
 | `PRICE_CACHE_TTL_SECONDS`              | `300`                    | How long quotes are cached.                                |
 | `BASE_CURRENCY`                        | `USD`                    | Base currency for normalization.                           |
 | `ENABLE_BACKGROUND_WORKERS`            | `false`                  | Run the ticker-based maintenance worker.                   |
 | `LEADERBOARD_REFRESH_INTERVAL_SECONDS` | `60`                     | Worker tick interval.                                      |
+
+### Provider Auth
+
+Password auth remains available through `POST /auth/register` and
+`POST /auth/login`. Provider auth adds:
+
+- `POST /auth/google` with `{ "credential": "<google_id_token>" }`
+
+The endpoint verifies the provider ID token server-side, validates issuer,
+expiry, signature, and audience, then issues the same app JWT shape as password
+login. Provider accounts are keyed by `(provider, sub)` in `auth_identities`,
+not by email. A verified provider email can link to an existing password user;
+unverified email is rejected for safe linking.
+
+Google setup: create a Google OAuth Web Client ID, set
+`GOOGLE_AUTH_ENABLED=true`, set `GOOGLE_CLIENT_ID`, and use the same client ID
+in `VITE_GOOGLE_CLIENT_ID`. For local Vite development, add
+`http://localhost:5173` as an Authorized JavaScript origin in Google Cloud. The
+current Google Identity Services callback flow does not need an Authorized
+redirect URI.
+
+Security notes: raw provider payloads and tokens are never returned in API
+responses. Do not log ID tokens or provider raw claims.
+TODO: account unlinking.
 
 ### Storage providers & migrations
 
@@ -162,6 +223,61 @@ To reset the local development database:
 ```bash
 docker compose down -v && docker compose up -d   # drops the pgdata volume
 ```
+
+Simple personal backup/restore:
+
+```bash
+pg_dump "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" > finance_app_backup.sql
+psql "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" < finance_app_backup.sql
+```
+
+## Route contract
+
+Public:
+
+- `GET /health`
+- `GET /ready`
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/google`
+
+JWT-protected:
+
+- `GET /me`
+- `GET /portfolio`
+- `GET /portfolio/summary`
+- `GET /portfolio/positions`
+- `POST /portfolio/positions`
+- `PUT /portfolio/positions/{positionId}`
+- `DELETE /portfolio/positions/{positionId}`
+- `GET /instruments/search?q=AAP`
+- `GET /quotes?symbols=AAPL,QQQ`
+- `GET /leaderboard?timeframe=ALL`
+- `GET /leaderboard/me?timeframe=ALL`
+- `GET /competitions`
+- `POST /competitions/{competitionId}/join`
+- `GET /competitions/{competitionId}/me`
+- `GET /competitions/{competitionId}/leaderboard`
+- `GET /achievements`
+- `POST /achievements/evaluate`
+- `POST /portfolio/coach`
+- `POST /coach/compare-profile`
+- `POST /strategy-portfolio/copy-preview`
+- `POST /strategy-portfolio/copy-from-profile`
+- `GET /profiles/me`
+- `PATCH /profiles/me`
+- `GET /profiles/explore`
+- `GET /profiles/{handle}`
+- `POST /social/follows/{handle}`
+- `DELETE /social/follows/{handle}`
+- `GET /social/follow-state/{handle}`
+- `GET /social/following`
+- `GET /social/followers`
+- `GET /social/friends`
+- `GET /dm/conversations`
+- `POST /dm/conversations`
+- `GET /dm/conversations/{conversationId}/messages`
+- `POST /dm/conversations/{conversationId}/messages`
 
 ## Run the tests
 
@@ -192,8 +308,14 @@ docker compose up -d
 STORAGE_PROVIDER=postgres REDIS_URL=redis://localhost:6379/0 \
   ENABLE_BACKGROUND_WORKERS=true go run ./cmd/api
 
-# Real prototype prices via Yahoo / finance-go:
-PRICE_PROVIDER=yahoo go run ./cmd/api
+# Durable development mode with Twelve Data:
+docker compose up -d
+STORAGE_PROVIDER=postgres \
+DATABASE_URL="postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" \
+ENABLE_REAL_MARKET_DATA=true \
+PRICE_PROVIDER=twelvedata \
+TWELVE_DATA_API_KEY="your_key_here" \
+go run ./cmd/api
 ```
 
 ## Infrastructure (Phase 3)
@@ -243,6 +365,44 @@ job runs, skipped leaderboard users, and provider failures. Logs **never**
 include passwords, hashes, tokens, holdings, quantities, or portfolio values.
 
 ## Price providers
+
+### Twelve Data real market-data foundation
+
+Prototype 3A adds an optional Twelve Data provider for USA stocks and ETFs.
+It is disabled by default; tests and local development still use the mock
+provider unless explicitly configured.
+
+```env
+ENABLE_REAL_MARKET_DATA=true
+PRICE_PROVIDER=twelvedata
+TWELVE_DATA_API_KEY=your_key_here
+TWELVE_DATA_BASE_URL=https://api.twelvedata.com
+QUOTE_REFRESH_INTERVAL_SECONDS=600
+QUOTE_CACHE_TTL_SECONDS=600
+TWELVE_DATA_MAX_REQUESTS_PER_MINUTE=6
+TWELVE_DATA_DAILY_REQUEST_BUDGET=500
+TWELVE_DATA_REQUEST_TIMEOUT_SECONDS=10
+ENABLE_QUOTE_REFRESH_WORKER=false
+QUOTE_STALE_AFTER_SECONDS=900
+QUOTE_ALLOW_STALE_ON_PROVIDER_ERROR=true
+```
+
+All Twelve Data access stays behind the backend. The frontend calls only:
+
+- `GET /instruments/search?q=AAP`
+- `GET /quotes?symbols=AAPL,QQQ,SPY`
+
+Quotes are deduplicated, cached in the `market_quotes` registry, and served
+from cache when fresh. If the provider is unavailable or rate-limited, stale
+cached quotes are returned when available and marked with freshness metadata.
+The quote refresh worker is disabled by default and, when enabled, refreshes
+only symbols currently used by active portfolios.
+
+Instrument search calls Twelve Data symbol search first when real market data
+is enabled, caches normalized USA stock/ETF results in the local `instruments`
+registry, and falls back to cached matches if the provider is unavailable or
+rate-limited. This supports the user experience of searching all USA stocks/ETFs
+without seeding every instrument manually.
 
 ### MockPriceProvider
 
@@ -337,12 +497,15 @@ Private profiles stay fully anonymous (no handle/weights).
 `ALL` is since-baseline (index 100). Trailing windows compare the current index
 to the index snapshot recorded at `now − window`; the background worker records
 one index snapshot per user per tick (`leaderboard_snapshots`). A user with no
-snapshot old enough falls back to since-baseline. An unknown timeframe is
-treated as `ALL` (never a 400).
+snapshot old enough is excluded from that timeframe ranking. An unknown
+timeframe is treated as `ALL` (never a 400).
 
-**`GET /leaderboard/me`** returns the caller's own `rank`, `total_participants`,
-`ranked_return_percentage`, and `ranked_index` for the requested timeframe
-(`eligible:false`, `rank:null` when the caller has no rankable portfolio).
+**`GET /leaderboard/me`** returns the caller's own `eligible`, `rank`,
+`participant_count` / `total_participants`, `percentile`, `best_rank`,
+`ranked_return_percentage`, `ranked_index`, and `next_milestone` for the
+requested timeframe. `previous_rank` and `rank_delta` are nullable until rank
+event history exists. For insufficient window history it returns
+`eligible:false`, `rank:null`, and a safe reason string.
 
 **It never exposes** portfolio value, cost basis, dollar gain/loss, quantities,
 average/baseline buy prices, portfolio id, user id, email, or password data. An
@@ -350,8 +513,9 @@ explicit test serializes the response and asserts none of the forbidden keys
 appear.
 
 > Prototype note: with `STORAGE_PROVIDER=memory` and workers off, no snapshots
-> accrue, so every timeframe shows the since-baseline value. Snapshots are real
-> with `ENABLE_BACKGROUND_WORKERS=true` (and persist under Postgres).
+> accrue, so non-`ALL` timeframe rankings stay empty until snapshots are
+> recorded. Snapshots are real with `ENABLE_BACKGROUND_WORKERS=true` and persist
+> under Postgres.
 
 **How it is calculated** (live, on each request):
 
@@ -474,13 +638,14 @@ messaging, comments, likes, categories, or AI here.
 | `q`      | —       | Case-insensitive search over handle, display name, and public symbols.         |
 | `symbol` | —       | Public-symbol filter (normalized to upper-case). Malformed symbol → `400`.     |
 | `sort`   | `top`   | One of `top`, `return`, `rank`, `recent`. Unknown value → `400`.               |
+| `timeframe` | `ALL` | One of `1W`, `1M`, `3M`, `6M`, `1Y`, `ALL`. Unknown value → `400`.             |
 | `limit`  | `20`    | Page size for `top_performers`; clamped to a max of `50`. Non-positive → `400`. |
 | `offset` | `0`     | Page offset for `top_performers`. Negative → `400`.                            |
 
-Sorting: `top` prefers ascending global rank (ranked profiles first), then
-portfolio index, then return percentage; `return` is return percentage
-descending; `rank` is global rank ascending with unranked profiles last;
-`recent` is profile `updated_at` descending.
+Sorting: `top` prefers ascending rank for the selected timeframe, then portfolio
+index, then return percentage; `return` is ranked return percentage descending;
+`rank` is rank ascending with unranked profiles last; `recent` is profile
+`updated_at` descending.
 
 **Response sections**
 
@@ -493,18 +658,36 @@ descending; `rank` is global rank ascending with unranked profiles last;
   Computed globally, independent of `q`/`symbol`/pagination. Empty for an
   unauthenticated/identity-less caller.
 - `top_performers` — the paginated list of public-safe profile cards.
-- `trending_holdings` — symbols ranked by how many public profiles hold them,
+- `timeframe` / `timeframe_fallback` — the selected discovery window and whether
+  the service fell back to active since-baseline rankings.
+- `trending_holdings` — symbols ranked by how many eligible public profiles hold them,
   with `profile_count`, `average_weight_percentage`, `top10_count` (symbols held
-  by the current top-10 ranked public profiles), and `asset_type`. Computed
-  globally across all public profiles (independent of `q`/`symbol`/pagination).
+  by the selected timeframe's top-10 public profiles), and `asset_type`.
+  Computed globally across public-weight profiles eligible for the selected
+  timeframe (independent of `q`/`symbol`/pagination).
 - `pagination` — `limit`, `offset`, `total`, `has_more` for `top_performers`.
 
 **Privacy.** Explore shows public strategy profiles, symbols, and weights only.
 It never exposes quantities, portfolio values, buy prices, cost basis, absolute
 gain/loss, emails, or internal IDs. Private profiles (`is_public=false`) are
-excluded entirely. A public profile with `show_public_weights=false` may still
-appear in `top_performers` but with an empty `public_weights` array, and it does
-not contribute to `trending_holdings`.
+excluded entirely. A public profile with `show_public_weights=false` is excluded
+from Explore so Compare/Copy discovery always operates on visible public
+weights.
+
+### Copy public strategy weights
+
+`POST /strategy-portfolio/copy-preview` accepts `{ "handle": "alpha_wolf" }`
+and returns only source display metadata plus public `{symbol, asset_type,
+weight_percentage}` rows and the disclaimer:
+`"This copies public strategy weights only. No trades are executed."`
+
+`POST /strategy-portfolio/copy-from-profile` accepts the same handle plus the
+reviewed weights and replaces the authenticated user's current positions with a
+fresh baseline at current market prices. Internally the portfolio service uses a
+neutral notional allocation to create quantities matching the submitted
+percentages; it never copies another user's quantities, values, cost basis, buy
+prices, ids, or private data. Self-copy is rejected for the MVP. Private,
+hidden-weight, missing, or empty-baseline source profiles return `404`.
 
 ## Correctness & fairness (milestone 5)
 
@@ -603,6 +786,9 @@ All responses are JSON. Errors use a consistent envelope: `{"error": "message"}`
 | GET    | `/achievements`                   | Your badges (unlocked + locked)           | 200, 401            |
 | POST   | `/achievements/evaluate`          | Re-evaluate badges, return updated list   | 200, 401            |
 | POST   | `/portfolio/coach`                | AI Portfolio Coach analysis (see below)   | 200, 400, 401, 500  |
+| POST   | `/coach/compare-profile`          | Compare own weights with a public profile | 200, 400, 401, 404  |
+| POST   | `/strategy-portfolio/copy-preview` | Preview public weights before copying    | 200, 400, 401, 404  |
+| POST   | `/strategy-portfolio/copy-from-profile` | Replace own baseline from public weights | 200, 400, 401, 404  |
 | GET    | `/profiles/me`                    | Owner profile settings + public preview   | 200, 401, 500       |
 | PATCH  | `/profiles/me`                    | Update profile metadata/privacy settings  | 200, 400, 401, 409  |
 | GET    | `/profiles/explore`               | Explore Strategies discovery page         | 200, 400, 401, 500  |
@@ -643,6 +829,15 @@ Response is a structured DTO: `title`, `summary`, `risk_level`, `observations[]`
 `technical_notes[]`, `fundamental_notes[]`, `top10_comparison{}`,
 `learning_points[]`, `questions_to_consider[]`, and always the exact
 `disclaimer`: **"Educational portfolio analysis only. Not financial advice."**
+
+`POST /coach/compare-profile` accepts `{ "handle": "alpha_wolf" }` and returns
+a deterministic, structured comparison between the authenticated user's current
+strategy weights and the target profile's public weights: overlap score, shared
+symbols, top weight differences, top-3 concentration comparison, learning
+points, and the disclaimer **"This is educational comparison, not investment
+advice."** It does not call an LLM and does not expose target quantities,
+values, prices, cost basis, ids, or emails. Empty caller portfolios return
+`400`; private/hidden/missing targets return `404`.
 
 Behavior & guarantees:
 
@@ -781,14 +976,24 @@ suffix; crypto uses the `BASE-QUOTE` form like `BTC-USD`).
   to re-baseline a holding you delete and re-add it. There is no historical
   baseline/lot history yet.
 - Leaderboard timeframe windows (1W/1M/…) are driven by index snapshots recorded
-  by the background worker, so they only become meaningful once history has
-  accrued (with workers enabled + Postgres). Old snapshots are not yet pruned.
+  by the background worker, so non-`ALL` windows only include users after enough
+  history has accrued. Old snapshots are not yet pruned.
 - The weekly sprint is generated from the current ISO week and ensured lazily
   (plus by the background worker); sprints are not auto-archived and there is
   still only one concurrent sprint.
-- FX rates are mock prototype values and the Yahoo price provider is
-  prototype-grade; swap the `FXProvider` / `PriceProvider` for licensed feeds
-  before any launch.
+- FX rates are mock prototype values. Twelve Data support is conservative and
+  personal/free-tier oriented; the Yahoo provider remains prototype-only.
+  Production use needs licensed market data and FX feeds plus redistribution
+  review.
+- Google sign-in is implemented through Google Identity Services and backend ID
+  token verification, but it requires a Google Web Client ID configured for the
+  exact local origin. Apple is not exposed as a public Prototype 3 auth route.
+- Instrument search and quotes are backend-owned and cached. They are not a full
+  security master: asset-type normalization is intentionally loose and focused
+  on USA stocks/ETFs plus seeded mock/demo instruments.
+- Social/DMs are authenticated, mutual-follow gated, and polling-based. There
+  are no WebSockets, push notifications, moderation tools, group chats,
+  attachments, reactions, blocking, or reporting yet.
 - Background jobs are a single in-process ticker worker — no distributed queue,
   no horizontal scaling of workers yet.
 - Achievement evaluation is best-effort and synchronous (no event bus / no
@@ -798,11 +1003,18 @@ suffix; crypto uses the `BASE-QUOTE` form like `BTC-USD`).
 
 ## Next development steps
 
-- Replace mock price and FX providers with licensed production feeds.
-- Add sprint archival/history and distributed-safe background workers.
-- Move money calculations from float64 to a decimal type.
-- Continue the React frontend with dedicated sprint, leaderboard, and
-  achievement pages.
+- Add true historical portfolio series so Dashboard charts and rank deltas come
+  from stored history instead of current-index projections.
+- Replace mock FX and prototype/free-tier market-data assumptions with licensed
+  production feeds, stronger entitlement handling, and provider observability.
+- Add account management: unlink provider identities, delete/export account,
+  rotate secrets, and production OAuth hardening.
+- Add sprint archival/history, snapshot pruning, and distributed-safe
+  background workers.
+- Move money/quantity calculations from float64 to a decimal type.
+- Add moderation/block/report controls before expanding social features.
+- Add frontend automated tests around auth, portfolio entry, symbol search,
+  leaderboard standing, Explore/social, and copy/coach flows.
 
 Storage, caching, pricing, FX, and cross-module calls are behind interfaces, so
 these changes can be made without rewriting the handlers.

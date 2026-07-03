@@ -43,6 +43,48 @@ type CoachRequest struct {
 	Mode string `json:"mode"`
 }
 
+type CompareProfileRequest struct {
+	Handle string `json:"handle"`
+}
+
+type CompareTargetProfile struct {
+	Handle      string `json:"handle"`
+	DisplayName string `json:"display_name"`
+	AvatarKey   string `json:"avatar_key"`
+	StrategyTag string `json:"strategy_tag"`
+}
+
+type WeightDifference struct {
+	Symbol                 string  `json:"symbol"`
+	MyWeightPercentage     float64 `json:"my_weight_percentage"`
+	TargetWeightPercentage float64 `json:"target_weight_percentage"`
+	DifferencePercentage   float64 `json:"difference_percentage"`
+	AssetType              string  `json:"asset_type"`
+}
+
+type ConcentrationComparison struct {
+	MyPositionCount            int     `json:"my_position_count"`
+	TargetPositionCount        int     `json:"target_position_count"`
+	MyTop3WeightPercentage     float64 `json:"my_top3_weight_percentage"`
+	TargetTop3WeightPercentage float64 `json:"target_top3_weight_percentage"`
+}
+
+type LearningPoint struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+type CompareProfileResponse struct {
+	TargetProfile           CompareTargetProfile    `json:"target_profile"`
+	Summary                 string                  `json:"summary"`
+	OverlapScore            float64                 `json:"overlap_score"`
+	SharedSymbols           []string                `json:"shared_symbols"`
+	WeightDifferences       []WeightDifference      `json:"weight_differences"`
+	ConcentrationComparison ConcentrationComparison `json:"concentration_comparison"`
+	LearningPoints          []LearningPoint         `json:"learning_points"`
+	Disclaimer              string                  `json:"disclaimer"`
+}
+
 // CoachObservation is a single labelled finding.
 type CoachObservation struct {
 	Label  string `json:"label"`

@@ -16,6 +16,7 @@ type Repository interface {
 	CreatePosition(p *Position) error
 	GetPosition(id string) (*Position, error)
 	ListPositionsByUser(userID string) ([]*Position, error)
+	ListActiveSymbols() ([]string, error)
 	UpdatePosition(p *Position) error
 	DeletePosition(id string) error
 }
@@ -91,6 +92,20 @@ func (r *InMemoryRepository) ListPositionsByUser(userID string) ([]*Position, er
 		if p, ok := r.positions[id]; ok && p.UserID == userID {
 			copied := *p
 			out = append(out, &copied)
+		}
+	}
+	return out, nil
+}
+
+func (r *InMemoryRepository) ListActiveSymbols() ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, p := range r.positions {
+		if !seen[p.Symbol] {
+			seen[p.Symbol] = true
+			out = append(out, p.Symbol)
 		}
 	}
 	return out, nil

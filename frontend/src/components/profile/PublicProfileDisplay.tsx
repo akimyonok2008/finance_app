@@ -2,16 +2,34 @@ import { ShieldCheck } from "lucide-react";
 
 import { ConcentrationCard } from "@/components/profile/ConcentrationCard";
 import { ExposureBreakdownCard } from "@/components/profile/ExposureBreakdownCard";
+import { FollowButton } from "@/components/social/FollowButton";
 import { ProfileBadgesCard } from "@/components/profile/ProfileBadgesCard";
 import { ProfileHeader } from "@/components/profile/ProfileHeader";
 import { ProfilePerformanceCards } from "@/components/profile/ProfilePerformanceCards";
 import { PublicWeightsCard } from "@/components/profile/PublicWeightsCard";
+import { StrategyProfileActions } from "@/components/strategy/StrategyProfileActions";
+import { useMyProfile } from "@/hooks/useProfile";
 import type { PublicProfile } from "@/types/profile";
 
 export function PublicProfileDisplay({ profile }: { profile: PublicProfile }) {
+  const me = useMyProfile();
+  const isSelf = me.data?.handle === profile.handle;
+
   return (
     <div className="space-y-5">
-      <ProfileHeader profile={profile} />
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <ProfileHeader profile={profile} />
+        <div className="flex flex-wrap justify-end gap-2">
+          <FollowButton handle={profile.handle} isSelf={isSelf} />
+          {profile.public_weights.length > 0 && (
+          <StrategyProfileActions
+            handle={profile.handle}
+            displayName={profile.display_name}
+            canCopy
+          />
+          )}
+        </div>
+      </div>
       <ProfilePerformanceCards profile={profile} />
       <div className="grid gap-5 xl:grid-cols-[1.05fr_.95fr]">
         <PublicWeightsCard weights={profile.public_weights} />

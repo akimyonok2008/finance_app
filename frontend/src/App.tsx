@@ -9,10 +9,11 @@ import { LoginPage } from "@/pages/auth/LoginPage";
 import { RegisterPage } from "@/pages/auth/RegisterPage";
 import { PortfolioPage } from "@/pages/PortfolioPage";
 import { LeaderboardPage } from "@/pages/leaderboard/LeaderboardPage";
-import { CoachPage } from "@/pages/coach/CoachPage";
 import { MyProfilePage } from "@/pages/Profile/MyProfilePage";
 import { PublicProfilePage } from "@/pages/Profile/PublicProfilePage";
 import { ExplorePage } from "@/pages/Explore/ExplorePage";
+import { FriendsPage } from "@/pages/FriendsPage";
+import { MessagesPage } from "@/pages/MessagesPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -64,11 +65,7 @@ export default function App() {
 
             <Route
               path="/coach"
-              element={
-                <ProtectedRoute>
-                  <CoachPage />
-                </ProtectedRoute>
-              }
+              element={<Navigate to="/portfolio?tab=coach" replace />}
             />
 
             <Route
@@ -98,6 +95,33 @@ export default function App() {
               }
             />
 
+            <Route
+              path="/friends"
+              element={
+                <ProtectedRoute>
+                  <FriendsPage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/messages"
+              element={
+                <ProtectedRoute>
+                  <MessagesPage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/messages/:conversationId"
+              element={
+                <ProtectedRoute>
+                  <MessagesPage />
+                </ProtectedRoute>
+              }
+            />
+
             <Route path="/sprint" element={<Navigate to="/leaderboard" replace />} />
             <Route path="/profile/me" element={<Navigate to="/profile" replace />} />
             <Route
@@ -105,7 +129,7 @@ export default function App() {
               element={<Navigate to="/leaderboard" replace />}
             />
 
-            {/* Redirect root to dashboard */}
+            {/* Redirect root to the overview hub. */}
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
 
             {/* Fallback for unimplemented routes */}

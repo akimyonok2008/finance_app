@@ -37,3 +37,28 @@ type RegisterInput struct {
 	DisplayName string
 	AvatarKey   string
 }
+
+type AuthProvider string
+
+const (
+	ProviderGoogle AuthProvider = "google"
+	ProviderApple  AuthProvider = "apple"
+)
+
+type AuthIdentity struct {
+	ID              string
+	UserID          string
+	Provider        AuthProvider
+	ProviderSubject string
+	Email           string
+	EmailVerified   bool
+}
+
+type ProviderClaims struct {
+	Provider      AuthProvider
+	Subject       string
+	Email         string
+	EmailVerified bool
+	DisplayName   string
+	AvatarKey     string
+}

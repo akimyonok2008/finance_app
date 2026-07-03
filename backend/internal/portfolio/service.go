@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -90,6 +91,56 @@ func (s *Service) AddPosition(ctx context.Context, userID string, in PositionInp
 	return pos, nil
 }
 
+// ReplaceWithStrategyWeights creates a fresh baseline from public percentage
+// weights. It validates the entire target allocation first, then replaces the
+// user's positions with neutral notional quantities that reproduce the requested
+// weights at current market prices. No source quantities, money values, cost
+// basis, or prices are copied.
+func (s *Service) ReplaceWithStrategyWeights(ctx context.Context, userID string, weights []StrategyWeightInput) error {
+	prepared, err := s.prepareStrategyWeights(ctx, weights)
+	if err != nil {
+		return err
+	}
+
+	pf, err := s.GetOrCreateDefaultPortfolio(userID)
+	if err != nil {
+		return err
+	}
+	existing, err := s.repo.ListPositionsByUser(userID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	newPositions := make([]*Position, 0, len(prepared))
+	for _, p := range prepared {
+		newPositions = append(newPositions, &Position{
+			ID:              uuid.NewString(),
+			UserID:          userID,
+			PortfolioID:     pf.ID,
+			Symbol:          p.Symbol,
+			AssetType:       p.AssetType,
+			Quantity:        p.Quantity,
+			AverageBuyPrice: p.Price,
+			Currency:        p.Currency,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		})
+	}
+
+	for _, pos := range existing {
+		if err := s.repo.DeletePosition(pos.ID); err != nil {
+			return err
+		}
+	}
+	for _, pos := range newPositions {
+		if err := s.repo.CreatePosition(pos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ListPositions returns the requesting user's positions only.
 func (s *Service) ListPositions(userID string) ([]*Position, error) {
 	return s.repo.ListPositionsByUser(userID)
@@ -163,10 +214,46 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 		}
 
 		summaries = append(summaries, CalculatePositionSummary(pos, price.Price, price.Currency, costBase, valueBase, fx.BaseCurrency))
+		i := len(summaries) - 1
+		summaries[i].QuoteProvider = price.Source
+		summaries[i].QuoteProviderStatus = price.ProviderStatus
+		summaries[i].QuoteIsStale = price.IsStale
+		if !price.FetchedAt.IsZero() {
+			summaries[i].QuoteFetchedAt = price.FetchedAt.Format(time.RFC3339)
+		}
+		if !price.ExpiresAt.IsZero() {
+			summaries[i].QuoteExpiresAt = price.ExpiresAt.Format(time.RFC3339)
+		}
 	}
 
 	summary := CalculatePortfolioSummary(userID, pf.ID, fx.BaseCurrency, summaries)
+	summary.QuoteStatus = summarizeQuoteStatus(summaries)
 	return &summary, nil
+}
+
+func summarizeQuoteStatus(positions []PositionSummary) QuoteStatus {
+	status := QuoteStatus{TotalQuotes: len(positions)}
+	for _, p := range positions {
+		if status.Provider == "" && p.QuoteProvider != "" {
+			status.Provider = p.QuoteProvider
+		}
+		if p.QuoteIsStale {
+			status.StaleCount++
+		}
+		if p.QuoteProviderStatus != "" && (status.ProviderStatus == "" || p.QuoteIsStale) {
+			status.ProviderStatus = p.QuoteProviderStatus
+		}
+		if p.QuoteFetchedAt > status.LastFetchedAt {
+			status.LastFetchedAt = p.QuoteFetchedAt
+		}
+	}
+	if status.Provider == "" {
+		status.Provider = "mock"
+	}
+	if status.ProviderStatus == "" {
+		status.ProviderStatus = "ok"
+	}
+	return status
 }
 
 // ownedPosition fetches a position and confirms it belongs to userID. Both a
@@ -201,6 +288,69 @@ func (s *Service) validatePosition(ctx context.Context, in PositionInput) (Posit
 		return PositionInput{}, nil, ErrUnsupportedCurrency
 	}
 	return clean, quote, nil
+}
+
+type preparedStrategyPosition struct {
+	Symbol    string
+	AssetType string
+	Quantity  float64
+	Price     float64
+	Currency  string
+}
+
+func (s *Service) prepareStrategyWeights(ctx context.Context, weights []StrategyWeightInput) ([]preparedStrategyPosition, error) {
+	if len(weights) == 0 {
+		return nil, ErrInvalidWeights
+	}
+
+	seen := map[string]bool{}
+	var total float64
+	out := make([]preparedStrategyPosition, 0, len(weights))
+
+	for _, item := range weights {
+		symbol, err := prices.ValidateAndNormalizeSymbol(item.Symbol)
+		if err != nil {
+			return nil, ErrUnsupportedSymbol
+		}
+		if seen[symbol] {
+			return nil, ErrInvalidWeights
+		}
+		seen[symbol] = true
+
+		assetType := strings.ToLower(strings.TrimSpace(item.AssetType))
+		if !validAssetTypes[assetType] {
+			return nil, ErrInvalidAssetType
+		}
+		if item.WeightPercentage <= 0 || !isFinite(item.WeightPercentage) {
+			return nil, ErrInvalidWeights
+		}
+		total += item.WeightPercentage
+
+		quote, err := s.provider.GetLatestPrice(ctx, symbol)
+		if err != nil || quote == nil || quote.Price <= 0 {
+			return nil, ErrUnsupportedSymbol
+		}
+		rate, err := s.fx.GetRate(ctx, quote.Currency, fx.BaseCurrency)
+		if err != nil || rate <= 0 {
+			return nil, ErrUnsupportedCurrency
+		}
+		quantity := item.WeightPercentage / (quote.Price * rate)
+		if quantity <= 0 || !isFinite(quantity) {
+			return nil, ErrInvalidWeights
+		}
+		out = append(out, preparedStrategyPosition{
+			Symbol: symbol, AssetType: assetType, Quantity: quantity,
+			Price: quote.Price, Currency: quote.Currency,
+		})
+	}
+	if math.Abs(total-100) > 0.5 {
+		return nil, ErrInvalidWeights
+	}
+	return out, nil
+}
+
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // validateAndNormalize checks a PositionInput and returns a normalized copy

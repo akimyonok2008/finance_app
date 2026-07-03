@@ -1,6 +1,7 @@
 import { CircleUserRound, Trophy } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { StrategyProfileActions } from "@/components/strategy/StrategyProfileActions";
 import type { ExploreProfile } from "@/types/explore";
 import { formatPercent } from "@/utils/formatPercent";
 import { gainLossColor } from "@/utils/gainLoss";
@@ -12,10 +13,9 @@ export function TopPerformersList({ profiles }: { profiles: ExploreProfile[] }) 
       <p className="mt-1 text-xs text-zinc-500">Ranked strategy performance from public baselines.</p>
       <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/40">
         {profiles.map((profile, index) => (
-          <Link
+          <article
             key={profile.handle}
-            to={`/profiles/${encodeURIComponent(profile.handle)}`}
-            className="grid gap-4 border-b border-zinc-800 p-4 transition last:border-b-0 hover:bg-white/[0.025] sm:grid-cols-[36px_minmax(160px,1fr)_110px_90px_minmax(140px,1fr)] sm:items-center"
+            className="grid gap-4 border-b border-zinc-800 p-4 transition last:border-b-0 hover:bg-white/[0.025] lg:grid-cols-[36px_minmax(160px,1fr)_110px_90px_minmax(140px,1fr)_220px] lg:items-center"
           >
             <div className="font-mono text-sm tabular-nums text-zinc-500">
               #{profile.global_rank ?? index + 1}
@@ -47,7 +47,23 @@ export function TopPerformersList({ profiles }: { profiles: ExploreProfile[] }) 
               ))}
               {profile.badges[0] ? <Trophy className="h-3.5 w-3.5 text-amber-300/70" /> : null}
             </div>
-          </Link>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Link
+                to={`/profiles/${encodeURIComponent(profile.handle)}`}
+                className="rounded-md border border-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800 hover:text-white"
+              >
+                View profile
+              </Link>
+              {profile.public_weights.length > 0 && (
+                <StrategyProfileActions
+                  handle={profile.handle}
+                  displayName={profile.display_name}
+                  canCopy
+                  compact
+                />
+              )}
+            </div>
+          </article>
         ))}
       </div>
     </section>

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // authResponse is the shared success shape for register and login.
@@ -37,6 +38,23 @@ type registerRequest struct {
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+type googleRequest struct {
+	Credential string `json:"credential"`
+	GCSRFToken string `json:"g_csrf_token,omitempty"`
+}
+
+type appleRequest struct {
+	IdentityToken     string `json:"identity_token"`
+	AuthorizationCode string `json:"authorization_code"`
+	User              struct {
+		Name struct {
+			FirstName string `json:"firstName"`
+			LastName  string `json:"lastName"`
+		} `json:"name"`
+		Email string `json:"email"`
+	} `json:"user"`
 }
 
 // Register handles POST /auth/register.
@@ -78,6 +96,41 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
 }
 
+func (h *Handler) Google(w http.ResponseWriter, r *http.Request) {
+	var req googleRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.Credential) == "" {
+		writeError(w, http.StatusBadRequest, "credential is required")
+		return
+	}
+	user, token, err := h.svc.LoginWithGoogle(r.Context(), req.Credential)
+	if err != nil {
+		writeProviderError(w, err, "Google sign-in failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+}
+
+func (h *Handler) Apple(w http.ResponseWriter, r *http.Request) {
+	var req appleRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	displayName := strings.TrimSpace(req.User.Name.FirstName + " " + req.User.Name.LastName)
+	user, token, err := h.svc.LoginWithApple(r.Context(), req.IdentityToken, ProviderClaims{
+		Email: req.User.Email, DisplayName: displayName,
+	})
+	if err != nil {
+		writeProviderError(w, err, "Apple sign-in failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+}
+
 // Me handles GET /me. It relies on RequireAuth having placed the user id in the
 // request context, and returns the current user's public projection — letting
 // the SPA validate a stored token and rehydrate the user on boot.
@@ -111,6 +164,17 @@ func statusForError(err error) int {
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+func writeProviderError(w http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, ErrProviderDisabled), errors.Is(err, ErrProviderNotConfigured):
+		writeError(w, http.StatusServiceUnavailable, "This sign-in method is not configured.")
+	case errors.Is(err, ErrProviderEmailUnverified), errors.Is(err, ErrInvalidProviderToken):
+		writeError(w, http.StatusUnauthorized, fallback)
+	default:
+		writeError(w, http.StatusInternalServerError, fallback)
 	}
 }
 

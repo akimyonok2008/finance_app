@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { AssetTypeBadge } from "@/components/portfolio/AssetTypeBadge";
 import { PortfolioEmptyState } from "@/components/portfolio/PortfolioEmptyState";
+import { QuoteFreshnessBadge } from "@/components/portfolio/QuoteFreshnessBadge";
 import { PortfolioCardsSkeleton } from "@/components/portfolio/PortfolioSkeleton";
 import {
   rowBaseCurrency,
@@ -111,6 +112,12 @@ export function PositionCardList({
                       {row.symbol}
                     </span>
                     <AssetTypeBadge type={row.asset_type} />
+                    <QuoteFreshnessBadge
+                      provider={row.quote_provider}
+                      status={row.quote_provider_status}
+                      isStale={row.quote_is_stale}
+                      fetchedAt={row.quote_fetched_at}
+                    />
                   </div>
                   <div
                     className={cn(

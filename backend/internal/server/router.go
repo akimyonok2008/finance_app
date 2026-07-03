@@ -11,8 +11,11 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/coach"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/marketdata"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/profile"
+	"github.com/ardakimyonok/finance_app/internal/social"
+	"github.com/ardakimyonok/finance_app/internal/strategy"
 )
 
 // Deps bundles the constructed services the router needs. Grouping them keeps
@@ -26,6 +29,9 @@ type Deps struct {
 	Achievements *achievements.Service
 	Coach        *coach.Service
 	Profile      *profile.Service
+	Strategy     *strategy.Service
+	MarketData   *marketdata.Service
+	Social       *social.Service
 
 	// ReadinessChecks are dependency probes for GET /ready (postgres, redis, ...).
 	ReadinessChecks []ReadinessCheck
@@ -51,6 +57,15 @@ func New(d Deps) http.Handler {
 	competitionHandler := competitions.NewHandler(d.Competitions, d.Achievements)
 	achievementHandler := achievements.NewHandler(d.Achievements)
 	coachHandler := coach.NewHandler(d.Coach)
+	strategyHandler := strategy.NewHandler(d.Strategy)
+	var marketDataHandler *marketdata.Handler
+	if d.MarketData != nil {
+		marketDataHandler = marketdata.NewHandler(d.MarketData)
+	}
+	var socialHandler *social.Handler
+	if d.Social != nil {
+		socialHandler = social.NewHandler(d.Social)
+	}
 	var profileHandler *profile.Handler
 	if d.Profile != nil {
 		profileHandler = profile.NewHandler(d.Profile)
@@ -66,6 +81,7 @@ func New(d Deps) http.Handler {
 	r.Route("/auth", func(r chi.Router) {
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
+		r.Post("/google", authHandler.Google)
 	})
 
 	// JWT-protected routes. RequireAuthWithUser also rejects valid tokens whose
@@ -74,6 +90,24 @@ func New(d Deps) http.Handler {
 		r.Use(auth.RequireAuthWithUser(d.Tokens, d.Auth))
 
 		r.Get("/me", authHandler.Me)
+
+		if marketDataHandler != nil {
+			r.Get("/instruments/search", marketDataHandler.SearchInstruments)
+			r.Get("/quotes", marketDataHandler.Quotes)
+		}
+		if socialHandler != nil {
+			r.Post("/social/follows/{handle}", socialHandler.Follow)
+			r.Delete("/social/follows/{handle}", socialHandler.Unfollow)
+			r.Get("/social/follow-state/{handle}", socialHandler.FollowState)
+			r.Get("/social/following", socialHandler.Following)
+			r.Get("/social/followers", socialHandler.Followers)
+			r.Get("/social/friends", socialHandler.Friends)
+
+			r.Get("/dm/conversations", socialHandler.Conversations)
+			r.Post("/dm/conversations", socialHandler.CreateConversation)
+			r.Get("/dm/conversations/{conversationId}/messages", socialHandler.Messages)
+			r.Post("/dm/conversations/{conversationId}/messages", socialHandler.SendMessage)
+		}
 
 		r.Get("/portfolio", portfolioHandler.GetPortfolio)
 		r.Get("/portfolio/summary", portfolioHandler.Summary)
@@ -94,6 +128,10 @@ func New(d Deps) http.Handler {
 		r.Post("/achievements/evaluate", achievementHandler.Evaluate)
 
 		r.Post("/portfolio/coach", coachHandler.Coach)
+		r.Post("/coach/compare-profile", coachHandler.CompareProfile)
+
+		r.Post("/strategy-portfolio/copy-preview", strategyHandler.CopyPreview)
+		r.Post("/strategy-portfolio/copy-from-profile", strategyHandler.CopyFromProfile)
 
 		if profileHandler != nil {
 			r.Get("/profiles/me", profileHandler.GetMe)

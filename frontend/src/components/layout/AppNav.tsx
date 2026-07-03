@@ -1,4 +1,11 @@
-import { CircleUserRound, Compass, LayoutDashboard, LogOut, Medal, Sparkles, WalletCards } from "lucide-react";
+import {
+  CircleUserRound,
+  Compass,
+  LayoutDashboard,
+  LogOut,
+  Medal,
+  WalletCards,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
@@ -13,11 +20,10 @@ type NavItem = {
 
 const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/portfolio", label: "Portfolio", icon: WalletCards },
   { to: "/leaderboard", label: "Leaderboard", icon: Medal },
+  { to: "/portfolio", label: "Portfolio", icon: WalletCards },
   { to: "/explore", label: "Explore", icon: Compass },
   { to: "/profile", label: "Profile", icon: CircleUserRound },
-  { to: "/coach", label: "Coach", icon: Sparkles },
 ];
 
 type AppNavProps = {

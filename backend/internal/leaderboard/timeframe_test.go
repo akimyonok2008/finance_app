@@ -51,7 +51,7 @@ func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 	assert.InDelta(t, 109.09, board[0].RankedIndex, 0.05)
 }
 
-func TestBuildTimeframe_FallsBackToSinceBaselineWithoutSnapshot(t *testing.T) {
+func TestBuildTimeframe_ExcludesUsersWithoutOldEnoughSnapshot(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(20, 120)}}
 	svc := NewService(users, sums)
@@ -59,10 +59,7 @@ func TestBuildTimeframe_FallsBackToSinceBaselineWithoutSnapshot(t *testing.T) {
 
 	board, err := svc.BuildTimeframe(context.Background(), Timeframe1M)
 	require.NoError(t, err)
-	require.Len(t, board, 1)
-	// No snapshot old enough → since-baseline (index 120 → +20%).
-	assert.InDelta(t, 20.0, board[0].RankedReturnPercentage, 0.01)
-	assert.InDelta(t, 120.0, board[0].RankedIndex, 0.01)
+	assert.Empty(t, board)
 }
 
 func TestBuild_EnrichesPublicProfilesOnly(t *testing.T) {
@@ -126,7 +123,13 @@ func TestUserStanding(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, st.Ranked)
 	assert.Equal(t, 2, st.Rank)
-	assert.Equal(t, 3, st.TotalParticipants)
+	assert.Equal(t, 3, st.ParticipantCount)
+	assert.Equal(t, 2, *st.BestRank)
+	assert.InDelta(t, 66.67, st.Percentile, 0.01)
+	require.NotNil(t, st.NextMilestone)
+	assert.Equal(t, "#1", st.NextMilestone.Label)
+	assert.Equal(t, 1, st.NextMilestone.RankGap)
+	assert.InDelta(t, 4.0, st.NextMilestone.ReturnGapPercentage, 0.01)
 	assert.InDelta(t, 8.0, st.RankedReturnPercentage, 0.01)
 
 	// Unknown user: not ranked, but total still reported.
@@ -134,7 +137,21 @@ func TestUserStanding(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ghost.Ranked)
 	assert.Equal(t, 0, ghost.Rank)
-	assert.Equal(t, 3, ghost.TotalParticipants)
+	assert.Equal(t, 3, ghost.ParticipantCount)
+	assert.Equal(t, "Create a strategy baseline to enter the leaderboard.", ghost.Reason)
+}
+
+func TestUserStanding_WindowedIneligibleWhenHistoryMissing(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(8, 108)}}
+	svc := NewService(users, sums)
+	svc.SetSnapshotStore(NewInMemorySnapshotStore())
+
+	st, err := svc.UserStanding(context.Background(), "u1", Timeframe1W)
+	require.NoError(t, err)
+	assert.False(t, st.Ranked)
+	assert.Equal(t, 0, st.ParticipantCount)
+	assert.Equal(t, "Not enough ranked history for this timeframe yet.", st.Reason)
 }
 
 func TestRefreshCache_RecordsSnapshotsWithoutCache(t *testing.T) {

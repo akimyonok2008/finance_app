@@ -2,6 +2,7 @@ import { LockKeyhole } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SymbolAutocomplete } from "@/components/portfolio/SymbolAutocomplete";
 import {
   Select,
   SelectContent,
@@ -9,7 +10,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ASSET_TYPES, DEMO_SYMBOLS, type AssetType } from "@/types/portfolio";
+import type { Instrument } from "@/types/instruments";
+import { ASSET_TYPES, type AssetType } from "@/types/portfolio";
 import type {
   PositionFormErrors,
   PositionFormState,
@@ -49,21 +51,23 @@ export function PositionFormFields({
       {/* Symbol */}
       <div className="grid gap-1.5">
         <Label htmlFor={id("symbol")}>Symbol</Label>
-        <Input
+        <SymbolAutocomplete
           id={id("symbol")}
-          name="symbol"
-          autoComplete="off"
-          autoCapitalize="characters"
-          placeholder="AAPL"
           value={state.symbol}
           disabled={disabled}
-          aria-invalid={!!errors.symbol}
-          aria-describedby={id("symbol-help")}
-          className="uppercase tabular-nums tracking-wide"
-          onChange={(e) => onChange({ symbol: e.target.value.toUpperCase() })}
+          invalid={!!errors.symbol}
+          describedBy={id("symbol-help")}
+          onValueChange={(symbol) => onChange({ symbol })}
+          onSelect={(instrument: Instrument) =>
+            onChange({
+              symbol: instrument.symbol,
+              asset_type:
+                instrument.asset_type === "etf" ? "etf" : "stock",
+            })
+          }
         />
         <p id={id("symbol-help")} className="text-xs text-muted-foreground">
-          Demo: {DEMO_SYMBOLS.slice(0, 7).join(", ")}
+          Select a listed instrument so prices can update automatically.
         </p>
         <FieldError message={errors.symbol} />
       </div>

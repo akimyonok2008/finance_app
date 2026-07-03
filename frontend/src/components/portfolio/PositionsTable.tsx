@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/table";
 import { AssetTypeBadge } from "@/components/portfolio/AssetTypeBadge";
 import { PortfolioEmptyState } from "@/components/portfolio/PortfolioEmptyState";
+import { QuoteFreshnessBadge } from "@/components/portfolio/QuoteFreshnessBadge";
 import { PortfolioTableSkeleton } from "@/components/portfolio/PortfolioSkeleton";
 import {
   rowBaseCurrency,
@@ -102,7 +103,15 @@ export function PositionsTable({
                   className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.03]"
                 >
                   <TableCell className="font-medium tracking-wide">
-                    {row.symbol}
+                    <div className="flex items-center gap-2">
+                      <span>{row.symbol}</span>
+                      <QuoteFreshnessBadge
+                        provider={row.quote_provider}
+                        status={row.quote_provider_status}
+                        isStale={row.quote_is_stale}
+                        fetchedAt={row.quote_fetched_at}
+                      />
+                    </div>
                   </TableCell>
                   <TableCell>
                     <AssetTypeBadge type={row.asset_type} />

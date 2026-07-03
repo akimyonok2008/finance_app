@@ -40,6 +40,15 @@ type PublicWeight struct {
 	Weight    float64 `json:"weight"`
 }
 
+// StrategyWeight is the privacy-safe, reusable representation of a public
+// strategy allocation. It intentionally carries only symbol, asset type, and
+// percentage weight.
+type StrategyWeight struct {
+	Symbol           string  `json:"symbol"`
+	AssetType        string  `json:"asset_type"`
+	WeightPercentage float64 `json:"weight_percentage"`
+}
+
 type Exposure struct {
 	Name   string  `json:"name"`
 	Weight float64 `json:"weight"`
@@ -66,6 +75,19 @@ type PublicProfile struct {
 	AssetTypeExposure []Exposure     `json:"asset_type_exposure"`
 	CurrencyExposure  []Exposure     `json:"currency_exposure"`
 	Concentration     Concentration  `json:"concentration"`
+}
+
+// PublicStrategy is the internal safe contract used by copy/compare features.
+// UserID is for server-side self-copy checks only and must never be serialized
+// on public responses.
+type PublicStrategy struct {
+	UserID        string
+	Handle        string
+	DisplayName   string
+	AvatarKey     string
+	StrategyTag   string
+	Weights       []StrategyWeight
+	Concentration Concentration
 }
 
 type OwnerProfile struct {

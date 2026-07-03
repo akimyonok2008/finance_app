@@ -19,5 +19,10 @@ var (
 	// vague so callers cannot distinguish "unknown email" from "wrong password".
 	ErrInvalidCredentials = errors.New("invalid email or password")
 	// ErrUserNotFound is returned by the repository when a lookup misses.
-	ErrUserNotFound = errors.New("user not found")
+	ErrUserNotFound            = errors.New("user not found")
+	ErrIdentityNotFound        = errors.New("auth identity not found")
+	ErrProviderDisabled        = errors.New("this sign-in method is not enabled")
+	ErrProviderNotConfigured   = errors.New("this sign-in method is not configured")
+	ErrInvalidProviderToken    = errors.New("provider sign-in failed")
+	ErrProviderEmailUnverified = errors.New("provider email is not verified")
 )

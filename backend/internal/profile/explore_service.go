@@ -32,14 +32,25 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 	if err != nil {
 		return ExploreResponse{}, err
 	}
+	ranks, fallback := s.exploreRankings(ctx, filter.Timeframe)
 
 	all := make([]scoredCard, 0, len(profiles))
 	allCards := make([]PublicProfile, 0, len(profiles))
 	for _, p := range profiles {
-		if !p.IsPublic {
+		if !p.IsPublic || !p.ShowPublicWeights {
 			continue
 		}
 		card := s.publicProjection(ctx, p)
+		if len(card.PublicWeights) == 0 {
+			continue
+		}
+		if rank, ok := ranks[p.UserID]; ok {
+			card.GlobalRank = &rank.Rank
+			card.ReturnPercentage = rank.RankedReturnPercentage
+			card.PortfolioIndex = rank.RankedIndex
+		} else if s.timeframeRanks != nil && !fallback {
+			continue
+		}
 		all = append(all, scoredCard{profile: p, card: card})
 		allCards = append(allCards, card)
 	}
@@ -84,10 +95,12 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 	}
 
 	return ExploreResponse{
-		Featured:         featured,
-		Similar:          similar,
-		TopPerformers:    topPerformers,
-		TrendingHoldings: trending,
+		Timeframe:         filter.Timeframe,
+		TimeframeFallback: fallback,
+		Featured:          featured,
+		Similar:           similar,
+		TopPerformers:     topPerformers,
+		TrendingHoldings:  trending,
 		Pagination: ExplorePagination{
 			Limit:   filter.Limit,
 			Offset:  filter.Offset,
@@ -95,6 +108,24 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 			HasMore: end < total,
 		},
 	}, nil
+}
+
+func (s *Service) exploreRankings(ctx context.Context, timeframe string) (map[string]TimeframeRanking, bool) {
+	if timeframe == "" {
+		timeframe = TimeframeAll
+	}
+	if s.timeframeRanks == nil {
+		return map[string]TimeframeRanking{}, true
+	}
+	rows, err := s.timeframeRanks.UserRankings(ctx, timeframe)
+	if err != nil {
+		return map[string]TimeframeRanking{}, true
+	}
+	out := make(map[string]TimeframeRanking, len(rows))
+	for _, row := range rows {
+		out[row.UserID] = row
+	}
+	return out, false
 }
 
 // buildSimilar returns up to maxSimilar public profiles whose composition most
@@ -356,7 +387,7 @@ func mostCommonAsset(counts map[string]int) string {
 // values return an ErrInvalid-wrapped error so the handler can map them to 400.
 // limit is clamped to maxExploreLimit rather than rejected.
 func ParseExploreFilter(get func(string) string) (ExploreFilter, error) {
-	f := ExploreFilter{Sort: SortTop, Limit: defaultExploreLimit}
+	f := ExploreFilter{Sort: SortTop, Timeframe: TimeframeAll, Limit: defaultExploreLimit}
 
 	f.Query = strings.TrimSpace(get("q"))
 
@@ -374,6 +405,15 @@ func ParseExploreFilter(get func(string) string) (ExploreFilter, error) {
 			f.Sort = raw
 		default:
 			return f, invalid("invalid sort")
+		}
+	}
+
+	if raw := strings.TrimSpace(get("timeframe")); raw != "" {
+		switch strings.ToUpper(raw) {
+		case Timeframe1W, Timeframe1M, Timeframe3M, Timeframe6M, Timeframe1Y, TimeframeAll:
+			f.Timeframe = strings.ToUpper(raw)
+		default:
+			return f, invalid("invalid timeframe")
 		}
 	}
 

@@ -4,8 +4,10 @@ import { useState } from "react";
 import { useAuth } from "@/auth/useAuth";
 import { LeaderboardAchievements } from "@/components/leaderboard/LeaderboardAchievements";
 import { RankedLeaderboard } from "@/components/leaderboard/RankedLeaderboard";
+import { YourStandingCard } from "@/components/leaderboard/YourStandingCard";
 import { AppNav } from "@/components/layout/AppNav";
 import { useGlobalLeaderboard } from "@/hooks/useGlobalLeaderboard";
+import { useLeaderboardStanding } from "@/hooks/useLeaderboardStanding";
 import { LeaderboardSkeleton } from "@/pages/leaderboard/LeaderboardSkeleton";
 import { TimeframeTabs } from "@/pages/leaderboard/TimeframeTabs";
 import type { LeaderboardTimeframe } from "@/types/leaderboard";
@@ -14,6 +16,8 @@ export function LeaderboardPage() {
   const { user } = useAuth();
   const [timeframe, setTimeframe] = useState<LeaderboardTimeframe>("ALL");
   const query = useGlobalLeaderboard({ timeframe });
+  const standingQuery = useLeaderboardStanding(timeframe);
+  const isWindowed = timeframe !== "ALL";
   const entries = (query.data?.entries ?? []).map((entry) => ({
     ...entry,
     is_me:
@@ -31,12 +35,15 @@ export function LeaderboardPage() {
           actions={
             <button
               type="button"
-              onClick={() => query.refetch()}
-              disabled={query.isFetching}
+              onClick={() => {
+                void query.refetch();
+                void standingQuery.refetch();
+              }}
+              disabled={query.isFetching || standingQuery.isFetching}
               aria-label="Refresh leaderboard"
               className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800/70 hover:text-zinc-100 disabled:opacity-50"
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${query.isFetching ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-3.5 w-3.5 ${query.isFetching || standingQuery.isFetching ? "animate-spin" : ""}`} />
             </button>
           }
         />
@@ -53,6 +60,15 @@ export function LeaderboardPage() {
           </div>
           <TimeframeTabs value={timeframe} onChange={setTimeframe} />
         </header>
+
+        <YourStandingCard
+          standing={standingQuery.data}
+          isLoading={standingQuery.isLoading}
+          isError={standingQuery.isError}
+          onRetry={() => {
+            void standingQuery.refetch();
+          }}
+        />
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_21rem]">
           <section aria-labelledby="rankings-title">
@@ -71,7 +87,17 @@ export function LeaderboardPage() {
                 <button type="button" onClick={() => query.refetch()} className="mt-4 text-xs font-medium text-zinc-300 underline underline-offset-4">Retry</button>
               </div>
             ) : (
-              <RankedLeaderboard entries={entries} />
+              <RankedLeaderboard
+                entries={entries}
+                emptyTitle={
+                  isWindowed ? "Not enough ranked history yet" : "No ranked strategies yet"
+                }
+                emptyDescription={
+                  isWindowed
+                    ? "This timeframe will fill in as leaderboard snapshots accrue."
+                    : "Create a public strategy baseline to enter the board."
+                }
+              />
             )}
           </section>
 

@@ -66,7 +66,7 @@ func (s *Service) SetCache(cache LeaderboardCache) {
 }
 
 // SetSnapshotStore attaches the index-snapshot store that powers trailing
-// timeframes. Without it, every timeframe falls back to since-baseline (ALL).
+// timeframes. Without it, windowed leaderboards have no eligible rows.
 func (s *Service) SetSnapshotStore(store SnapshotStore) {
 	s.snapshots = store
 }
@@ -100,7 +100,7 @@ func (s *Service) Build(ctx context.Context) ([]LeaderboardEntry, error) {
 
 // BuildTimeframe ranks users over the given window. ALL uses the cache fast
 // path (identical to Build); trailing windows are computed live from index
-// snapshots — a user with no snapshot old enough falls back to since-baseline.
+// snapshots. A user with no snapshot old enough is excluded from that window.
 func (s *Service) BuildTimeframe(ctx context.Context, tf Timeframe) ([]LeaderboardEntry, error) {
 	if tf == TimeframeAll {
 		return s.Build(ctx)
@@ -221,6 +221,30 @@ type Result struct {
 	SkippedCount int
 }
 
+type UserRanking struct {
+	UserID                 string
+	Rank                   int
+	RankedReturnPercentage float64
+	RankedIndex            float64
+}
+
+func (s *Service) UserRankings(ctx context.Context, tf Timeframe) ([]UserRanking, error) {
+	rows, _, err := s.rankRows(ctx, tf)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]UserRanking, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, UserRanking{
+			UserID:                 row.userID,
+			Rank:                   row.entry.Rank,
+			RankedReturnPercentage: row.entry.RankedReturnPercentage,
+			RankedIndex:            row.entry.RankedIndex,
+		})
+	}
+	return out, nil
+}
+
 // GetUserRank returns the exact global rank for userID, or 0 when the user's
 // portfolio cannot be ranked. Internal ids are used only for matching and are
 // never added to the public leaderboard response.
@@ -285,10 +309,25 @@ func (s *Service) BuildResult(ctx context.Context) (Result, error) {
 type Standing struct {
 	Timeframe              Timeframe
 	Rank                   int
-	TotalParticipants      int
+	PreviousRank           *int
+	RankDelta              *int
+	BestRank               *int
+	ParticipantCount       int
+	Percentile             float64
 	RankedReturnPercentage float64
 	RankedIndex            float64
 	Ranked                 bool
+	Reason                 string
+	NextMilestone          *Milestone
+}
+
+// Milestone is the next reachable rank target for the caller. All values are
+// rank/percentage-only and safe for the private standing response.
+type Milestone struct {
+	Label               string
+	TargetRank          int
+	RankGap             int
+	ReturnGapPercentage float64
 }
 
 // UserStanding computes the caller's rank within the timeframe board, plus the
@@ -299,14 +338,25 @@ func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe)
 	if err != nil {
 		return Standing{}, err
 	}
-	st := Standing{Timeframe: tf, TotalParticipants: len(rows)}
+	st := Standing{Timeframe: tf, ParticipantCount: len(rows)}
 	for _, r := range rows {
 		if r.userID == userID {
 			st.Rank = r.entry.Rank
 			st.RankedReturnPercentage = r.entry.RankedReturnPercentage
 			st.RankedIndex = r.entry.RankedIndex
 			st.Ranked = true
+			best := r.entry.Rank
+			st.BestRank = &best
+			st.Percentile = percentile(r.entry.Rank, len(rows))
+			st.NextMilestone = nextMilestone(rows, r.entry.Rank, r.entry.RankedReturnPercentage)
 			break
+		}
+	}
+	if !st.Ranked {
+		if _, windowed := tf.window(); windowed {
+			st.Reason = "Not enough ranked history for this timeframe yet."
+		} else {
+			st.Reason = "Create a strategy baseline to enter the leaderboard."
 		}
 	}
 	return st, nil
@@ -322,6 +372,8 @@ type rankedRow struct {
 // rankRows is the single live-ranking core: summarize each user, compute the
 // timeframe return (since-baseline for ALL, else current-index vs the snapshot
 // at now-window), enrich with public profile data, then sort and assign ranks.
+// Windowed rows require old-enough snapshots; otherwise the user is excluded
+// from that timeframe rather than being ranked on all-time performance.
 func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int, error) {
 	users, err := s.users.ListUsers(ctx)
 	if err != nil {
@@ -342,11 +394,21 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 		// Default = since-baseline (ALL): index already encodes it.
 		retPct := summary.PortfolioIndex - 100
 		idx := summary.PortfolioIndex
-		if windowed && s.snapshots != nil {
-			if base, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff); err == nil && found && base > 0 {
-				retPct = (summary.PortfolioIndex/base - 1) * 100
-				idx = 100 * summary.PortfolioIndex / base
+		if windowed {
+			if s.snapshots == nil {
+				continue
 			}
+			base, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff)
+			if err != nil {
+				skipped++
+				log.Printf("leaderboard: skipping user %s due to snapshot error: %v", u.ID, err)
+				continue
+			}
+			if !found || base <= 0 {
+				continue
+			}
+			retPct = (summary.PortfolioIndex/base - 1) * 100
+			idx = 100 * summary.PortfolioIndex / base
 		}
 		e := rankedEntry(0, u.DisplayName, u.AvatarKey, round2(retPct), round2(idx))
 		s.enrich(ctx, u.ID, &e)
@@ -375,6 +437,41 @@ func entriesOf(rows []rankedRow) []LeaderboardEntry {
 		entries = append(entries, r.entry)
 	}
 	return entries
+}
+
+func percentile(rank, participants int) float64 {
+	if rank <= 0 || participants <= 0 {
+		return 0
+	}
+	return round2(float64(participants-rank+1) / float64(participants) * 100)
+}
+
+func nextMilestone(rows []rankedRow, rank int, returnPct float64) *Milestone {
+	if rank <= 1 {
+		return nil
+	}
+	targetRank, label := 1, "#1"
+	switch {
+	case rank > 100:
+		targetRank, label = 100, "Top 100"
+	case rank > 25:
+		targetRank, label = 25, "Top 25"
+	case rank > 10:
+		targetRank, label = 10, "Top 10"
+	}
+	gap := 0.0
+	if targetRank > 0 && targetRank <= len(rows) {
+		gap = round2(rows[targetRank-1].entry.RankedReturnPercentage - returnPct)
+		if gap < 0 {
+			gap = 0
+		}
+	}
+	return &Milestone{
+		Label:               label,
+		TargetRank:          targetRank,
+		RankGap:             rank - targetRank,
+		ReturnGapPercentage: gap,
+	}
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }

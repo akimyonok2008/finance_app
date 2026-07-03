@@ -34,14 +34,26 @@ type GlobalRankProvider interface {
 	GetUserRank(ctx context.Context, userID string) (int, error)
 }
 
+type TimeframeRanking struct {
+	UserID                 string
+	Rank                   int
+	RankedReturnPercentage float64
+	RankedIndex            float64
+}
+
+type TimeframeRankProvider interface {
+	UserRankings(ctx context.Context, timeframe string) ([]TimeframeRanking, error)
+}
+
 type Service struct {
-	repo         Repository
-	users        UserProvider
-	summaries    SummaryProvider
-	achievements AchievementProvider
-	sprintRanks  SprintRankProvider
-	globalRanks  GlobalRankProvider
-	now          func() time.Time
+	repo           Repository
+	users          UserProvider
+	summaries      SummaryProvider
+	achievements   AchievementProvider
+	sprintRanks    SprintRankProvider
+	globalRanks    GlobalRankProvider
+	timeframeRanks TimeframeRankProvider
+	now            func() time.Time
 }
 
 func NewService(repo Repository, users UserProvider, summaries SummaryProvider) *Service {
@@ -97,6 +109,10 @@ func (s *Service) SetSprintRankProvider(provider SprintRankProvider) {
 
 func (s *Service) SetGlobalRankProvider(provider GlobalRankProvider) {
 	s.globalRanks = provider
+}
+
+func (s *Service) SetTimeframeRankProvider(provider TimeframeRankProvider) {
+	s.timeframeRanks = provider
 }
 
 func (s *Service) GetMe(ctx context.Context, userID string) (OwnerProfile, error) {
@@ -156,6 +172,46 @@ func (s *Service) GetPublic(ctx context.Context, handle string) (PublicProfile, 
 		return PublicProfile{}, err
 	}
 	return s.publicProjection(ctx, p), nil
+}
+
+// PublicStrategyByHandle returns the safe public strategy weights used by copy
+// and compare flows. Private profiles, hidden weights, missing/empty baselines,
+// and summary failures all collapse to ErrNotFound so callers never leak which
+// condition applied.
+func (s *Service) PublicStrategyByHandle(ctx context.Context, handle string) (PublicStrategy, error) {
+	handle = strings.ToLower(strings.TrimSpace(handle))
+	p, err := s.repo.GetByHandle(ctx, handle)
+	if errors.Is(err, ErrNotFound) || !p.IsPublic || !p.ShowPublicWeights {
+		return PublicStrategy{}, ErrNotFound
+	}
+	if err != nil {
+		return PublicStrategy{}, err
+	}
+	summary, err := s.summaries.GetSummary(ctx, p.UserID)
+	if err != nil || summary == nil || len(summary.Positions) == 0 {
+		return PublicStrategy{}, ErrNotFound
+	}
+	weights, _, _, concentration := buildComposition(summary)
+	if len(weights) == 0 {
+		return PublicStrategy{}, ErrNotFound
+	}
+	out := PublicStrategy{
+		UserID:        p.UserID,
+		Handle:        p.Handle,
+		DisplayName:   p.DisplayName,
+		AvatarKey:     p.AvatarKey,
+		StrategyTag:   p.StrategyTag,
+		Concentration: concentration,
+		Weights:       make([]StrategyWeight, 0, len(weights)),
+	}
+	for _, w := range weights {
+		out.Weights = append(out.Weights, StrategyWeight{
+			Symbol:           w.Symbol,
+			AssetType:        w.AssetType,
+			WeightPercentage: w.Weight,
+		})
+	}
+	return out, nil
 }
 
 func (s *Service) getOrCreate(ctx context.Context, userID string) (Profile, error) {

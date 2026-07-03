@@ -21,6 +21,6 @@ export type AuthContextValue = {
   isAuthenticated: boolean;
   isBootstrapping: boolean;
   login: (values: LoginFormValues) => Promise<void>;
-  loginWithGoogle: () => Promise<void>;
+  loginWithGoogle: (credential: string) => Promise<void>;
   logout: () => void;
 };

@@ -68,6 +68,7 @@ func TestExploreRouteEndToEnd(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, do("/profiles/explore?sort=wealthiest", token).Code)
 	assert.Equal(t, http.StatusBadRequest, do("/profiles/explore?symbol=bad%20symbol!", token).Code)
 	assert.Equal(t, http.StatusBadRequest, do("/profiles/explore?limit=0", token).Code)
+	assert.Equal(t, http.StatusBadRequest, do("/profiles/explore?timeframe=2W", token).Code)
 
 	// Happy path -> 200, sections present, no forbidden keys, no PII.
 	ok := do("/profiles/explore?sort=top", token)

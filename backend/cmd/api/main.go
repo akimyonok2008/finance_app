@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/redis/go-redis/v9"
 
@@ -18,10 +19,13 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/marketdata"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/profile"
 	"github.com/ardakimyonok/finance_app/internal/server"
+	"github.com/ardakimyonok/finance_app/internal/social"
+	"github.com/ardakimyonok/finance_app/internal/strategy"
 )
 
 // --- adapters -----------------------------------------------------------------
@@ -81,6 +85,25 @@ func (a leaderboardProfileAdapter) PublicInfo(ctx context.Context, userID string
 	}, true, nil
 }
 
+type profileTimeframeRankAdapter struct{ s *leaderboard.Service }
+
+func (a profileTimeframeRankAdapter) UserRankings(ctx context.Context, timeframe string) ([]profile.TimeframeRanking, error) {
+	rows, err := a.s.UserRankings(ctx, leaderboard.ParseTimeframe(timeframe))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]profile.TimeframeRanking, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, profile.TimeframeRanking{
+			UserID:                 row.UserID,
+			Rank:                   row.Rank,
+			RankedReturnPercentage: row.RankedReturnPercentage,
+			RankedIndex:            row.RankedIndex,
+		})
+	}
+	return out, nil
+}
+
 // repositories groups whichever implementations the storage provider selected.
 type repositories struct {
 	users        auth.UserRepository
@@ -89,25 +112,21 @@ type repositories struct {
 	achievements achievements.AchievementRepository
 	profiles     profile.Repository
 	snapshots    leaderboard.SnapshotStore
+	marketdata   marketdata.Repository
+	social       social.Repository
 }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	ctx := context.Background()
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
 
 	if cfg.UsingDefaultSecret() {
 		slog.Warn("using the default development JWT secret; set JWT_SECRET before production")
-	}
-
-	// --- price provider (+ cache decorator) ---
-	baseProvider, err := prices.NewProvider(cfg.PriceProvider)
-	if err != nil {
-		slog.Error("price provider configuration error", "error", err)
-		os.Exit(1)
-	}
-	if cfg.PriceProvider == "yahoo" {
-		slog.Warn("the Yahoo (finance-go) provider is PROTOTYPE ONLY; replace before production")
 	}
 
 	// --- Redis (optional) ---
@@ -130,7 +149,6 @@ func main() {
 	if redisClient != nil {
 		priceCache = prices.NewRedisPriceCache(redisClient)
 	}
-	priceProvider := prices.NewCachedPriceProvider(baseProvider, priceCache, cfg.PriceCacheTTL)
 
 	// --- storage ---
 	var (
@@ -146,6 +164,8 @@ func main() {
 			achievements: achievements.NewInMemoryAchievementRepository(),
 			profiles:     profile.NewInMemoryRepository(),
 			snapshots:    leaderboard.NewInMemorySnapshotStore(),
+			marketdata:   marketdata.NewInMemoryRepository(),
+			social:       social.NewInMemoryRepository(),
 		}
 	case "postgres":
 		pool, err := db.ConnectPostgres(ctx, cfg.DatabaseURL)
@@ -170,6 +190,8 @@ func main() {
 			achievements: achRepo,
 			profiles:     profile.NewPostgresRepository(pool),
 			snapshots:    leaderboard.NewPostgresSnapshotStore(pool),
+			marketdata:   marketdata.NewPostgresRepository(pool),
+			social:       social.NewPostgresRepository(pool),
 		}
 		readinessChecks = append(readinessChecks, server.ReadinessCheck{
 			Name:  "postgres",
@@ -179,6 +201,52 @@ func main() {
 		slog.Error("unknown STORAGE_PROVIDER (allowed: memory, postgres)", "value", cfg.StorageProvider)
 		os.Exit(1)
 	}
+
+	// --- market-data provider (+ conservative quote cache service) ---
+	var marketProvider marketdata.Provider
+	priceProviderName := cfg.PriceProvider
+	switch cfg.PriceProvider {
+	case "mock", "":
+		marketProvider = marketdata.NewMockProvider(prices.NewMockPriceProvider())
+		priceProviderName = "mock"
+	case "twelvedata":
+		if !cfg.EnableRealMarketData {
+			slog.Error("PRICE_PROVIDER=twelvedata requires ENABLE_REAL_MARKET_DATA=true")
+			os.Exit(1)
+		}
+		p, err := marketdata.NewTwelveDataProvider(marketdata.TwelveDataConfig{
+			APIKey: cfg.TwelveDataAPIKey, BaseURL: cfg.TwelveDataBaseURL,
+			Timeout: cfg.TwelveDataRequestTimeout, CacheTTL: cfg.QuoteCacheTTL,
+			MaxPerMinute: cfg.TwelveDataMaxRequestsPerMinute,
+			DailyBudget:  cfg.TwelveDataDailyRequestBudget,
+		})
+		if err != nil {
+			slog.Error("twelve data configuration error", "error", err)
+			os.Exit(1)
+		}
+		marketProvider = p
+	case "yahoo":
+		slog.Warn("the Yahoo (finance-go) provider is PROTOTYPE ONLY; use PRICE_PROVIDER=twelvedata for Prototype 3A real data")
+		baseProvider, err := prices.NewProvider(cfg.PriceProvider)
+		if err != nil {
+			slog.Error("price provider configuration error", "error", err)
+			os.Exit(1)
+		}
+		cached := prices.NewCachedPriceProvider(baseProvider, priceCache, cfg.PriceCacheTTL)
+		marketProvider = marketdata.NewPriceProviderAdapter(cached, "yahoo", cfg.PriceCacheTTL)
+	default:
+		slog.Error("unknown PRICE_PROVIDER (allowed: mock, yahoo, twelvedata)", "value", cfg.PriceProvider)
+		os.Exit(1)
+	}
+	marketDataSvc := marketdata.NewService(repos.marketdata, marketProvider, marketdata.ServiceConfig{
+		RealMarketDataEnabled: cfg.EnableRealMarketData && priceProviderName == "twelvedata",
+		QuoteCacheTTL:         cfg.QuoteCacheTTL,
+		QuoteStaleAfter:       cfg.QuoteStaleAfter,
+		AllowStaleOnError:     cfg.QuoteAllowStaleOnProviderError,
+		SearchLimit:           10,
+		MaxQuoteBatchSize:     25,
+	})
+	var priceProvider prices.PriceProvider = marketDataSvc
 	if redisClient != nil {
 		readinessChecks = append(readinessChecks, server.ReadinessCheck{
 			Name:  "redis",
@@ -189,6 +257,12 @@ func main() {
 	// --- services ---
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTExpiry)
 	authSvc := auth.NewService(repos.users, tokens)
+	authSvc.ConfigureProviderAuth(auth.ProviderAuthConfig{
+		GoogleEnabled:  cfg.GoogleAuthEnabled,
+		AppleEnabled:   cfg.AppleAuthEnabled,
+		GoogleVerifier: auth.NewGoogleVerifier(cfg.GoogleClientID),
+		AppleVerifier:  auth.NewAppleVerifier(cfg.AppleClientID),
+	})
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
 	leaderboardSvc := leaderboard.NewService(authSvc, portfolioSvc)
@@ -206,6 +280,7 @@ func main() {
 	profileSvc.SetAchievementProvider(achievementsSvc)
 	profileSvc.SetSprintRankProvider(competitionsSvc)
 	profileSvc.SetGlobalRankProvider(leaderboardSvc)
+	profileSvc.SetTimeframeRankProvider(profileTimeframeRankAdapter{leaderboardSvc})
 	// Enrich leaderboard rows with public profile data (handle/tag/weights).
 	leaderboardSvc.SetProfileProvider(leaderboardProfileAdapter{profileSvc})
 
@@ -219,6 +294,9 @@ func main() {
 	}
 	coachSvc := coach.NewService(authSvc, portfolioSvc, coachProvider)
 	coachSvc.SetAchievementLister(achievementsSvc)
+	coachSvc.SetProfileProvider(profileSvc)
+	strategySvc := strategy.NewService(profileSvc, portfolioSvc)
+	socialSvc := social.NewService(repos.social, repos.profiles)
 
 	// --- leaderboard caches (Redis only) ---
 	if redisClient != nil {
@@ -234,6 +312,13 @@ func main() {
 	} else {
 		slog.Info("background workers disabled (ENABLE_BACKGROUND_WORKERS=false)")
 	}
+	if cfg.EnableQuoteRefreshWorker {
+		quoteWorker := marketdata.NewQuoteRefreshWorker(marketDataSvc, repos.portfolio, cfg.QuoteRefreshInterval)
+		quoteWorker.Start(ctx)
+		slog.Info("quote refresh worker enabled", "interval", cfg.QuoteRefreshInterval.String())
+	} else {
+		slog.Info("quote refresh worker disabled (ENABLE_QUOTE_REFRESH_WORKER=false)")
+	}
 
 	handler := server.New(server.Deps{
 		Auth:            authSvc,
@@ -244,10 +329,14 @@ func main() {
 		Achievements:    achievementsSvc,
 		Coach:           coachSvc,
 		Profile:         profileSvc,
+		Strategy:        strategySvc,
+		MarketData:      marketDataSvc,
+		Social:          socialSvc,
 		ReadinessChecks: readinessChecks,
 		Info: map[string]string{
 			"storage_provider": cfg.StorageProvider,
-			"price_provider":   cfg.PriceProvider,
+			"price_provider":   priceProviderName,
+			"real_market_data": strconv.FormatBool(cfg.EnableRealMarketData && priceProviderName == "twelvedata"),
 		},
 	})
 
@@ -255,10 +344,14 @@ func main() {
 		"app_env", cfg.AppEnv,
 		"port", cfg.Port,
 		"storage_provider", cfg.StorageProvider,
-		"price_provider", cfg.PriceProvider,
+		"price_provider", priceProviderName,
+		"real_market_data", cfg.EnableRealMarketData && priceProviderName == "twelvedata",
 		"redis_enabled", redisClient != nil,
 		"background_workers", cfg.EnableBackgroundWorkers,
-		"price_cache_ttl", cfg.PriceCacheTTL.String(),
+		"google_auth_enabled", cfg.GoogleAuthEnabled,
+		"apple_auth_enabled", cfg.AppleAuthEnabled,
+		"quote_refresh_interval", cfg.QuoteRefreshInterval.String(),
+		"quote_cache_ttl", cfg.QuoteCacheTTL.String(),
 	)
 	if err := http.ListenAndServe(":"+cfg.Port, handler); err != nil {
 		slog.Error("server error", "error", err)

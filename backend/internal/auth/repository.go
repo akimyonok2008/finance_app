@@ -21,21 +21,25 @@ type UserRepository interface {
 	// ListUsers returns all users. Order is unspecified; callers that need a
 	// deterministic order must sort themselves.
 	ListUsers(ctx context.Context) ([]User, error)
+	FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error)
+	CreateIdentity(identity *AuthIdentity) error
 }
 
 // InMemoryUserRepository is a goroutine-safe, process-local store used for the
 // prototype milestone. It is indexed by both id and normalized email.
 type InMemoryUserRepository struct {
-	mu      sync.RWMutex
-	byID    map[string]*User
-	byEmail map[string]*User
+	mu         sync.RWMutex
+	byID       map[string]*User
+	byEmail    map[string]*User
+	identities map[string]*AuthIdentity
 }
 
 // NewInMemoryUserRepository returns an empty in-memory repository.
 func NewInMemoryUserRepository() *InMemoryUserRepository {
 	return &InMemoryUserRepository{
-		byID:    make(map[string]*User),
-		byEmail: make(map[string]*User),
+		byID:       make(map[string]*User),
+		byEmail:    make(map[string]*User),
+		identities: make(map[string]*AuthIdentity),
 	}
 }
 
@@ -93,4 +97,30 @@ func (r *InMemoryUserRepository) ListUsers(_ context.Context) ([]User, error) {
 		out = append(out, *u)
 	}
 	return out, nil
+}
+
+func (r *InMemoryUserRepository) FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if identity, ok := r.identities[identityKey(provider, subject)]; ok {
+		copied := *identity
+		return &copied, nil
+	}
+	return nil, ErrIdentityNotFound
+}
+
+func (r *InMemoryUserRepository) CreateIdentity(identity *AuthIdentity) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := identityKey(identity.Provider, identity.ProviderSubject)
+	if _, exists := r.identities[key]; exists {
+		return ErrEmailExists
+	}
+	stored := *identity
+	r.identities[key] = &stored
+	return nil
+}
+
+func identityKey(provider AuthProvider, subject string) string {
+	return string(provider) + ":" + strings.TrimSpace(subject)
 }

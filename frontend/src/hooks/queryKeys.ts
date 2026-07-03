@@ -8,6 +8,7 @@ export const queryKeys = {
   leaderboard: ["leaderboard"] as const,
   dashboardLeaderboard: ["leaderboard", "dashboard"] as const,
   leaderboardMe: ["leaderboardMe"] as const,
+  leaderboardStanding: (timeframe: string) => ["leaderboardMe", timeframe] as const,
   achievements: ["achievements"] as const,
   competitions: ["competitions"] as const,
   currentSprintStatus: (id: string) => ["currentSprintStatus", id] as const,
@@ -15,6 +16,14 @@ export const queryKeys = {
   myProfile: ["profile", "me"] as const,
   publicProfile: (handle: string) => ["profile", handle] as const,
   exploreProfiles: (params: object) => ["exploreProfiles", params] as const,
+  instrumentSearch: (q: string) => ["instruments", "search", q] as const,
+  quotes: (symbols: string[]) => ["quotes", symbols] as const,
+  followState: (handle: string) => ["social", "followState", handle] as const,
+  friends: ["social", "friends"] as const,
+  following: ["social", "following"] as const,
+  followers: ["social", "followers"] as const,
+  dmConversations: ["dm", "conversations"] as const,
+  dmMessages: (conversationId: string) => ["dm", "messages", conversationId] as const,
 };
 
 /** Queries to invalidate after any successful position mutation. */

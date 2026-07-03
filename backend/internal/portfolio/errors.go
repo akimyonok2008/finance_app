@@ -10,6 +10,8 @@ var (
 	ErrInvalidAssetType = errors.New("asset_type must be one of: stock, etf, crypto")
 	// ErrInvalidQuantity is returned when quantity is not greater than zero.
 	ErrInvalidQuantity = errors.New("quantity must be greater than 0")
+	// ErrInvalidWeights is returned when copied strategy weights are malformed.
+	ErrInvalidWeights = errors.New("strategy weights must be positive, unique, and total 100")
 	// ErrUnsupportedSymbol is returned when a symbol has an invalid format or
 	// cannot be priced by the active provider. Maps to HTTP 400.
 	ErrUnsupportedSymbol = errors.New("unsupported or unpriceable symbol")

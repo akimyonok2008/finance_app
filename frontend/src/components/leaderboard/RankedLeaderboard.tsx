@@ -1,6 +1,7 @@
 import { Medal } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { StrategyProfileActions } from "@/components/strategy/StrategyProfileActions";
 import type { LeaderboardEntry } from "@/types/leaderboard";
 import { cn } from "@/utils/cn";
 import { formatPercent } from "@/utils/formatPercent";
@@ -12,21 +13,29 @@ function rankTone(rank: number): string {
   return "border-zinc-800 bg-zinc-950/60 text-zinc-500";
 }
 
-export function RankedLeaderboard({ entries }: { entries: LeaderboardEntry[] }) {
+export function RankedLeaderboard({
+  entries,
+  emptyTitle = "No ranked strategies yet",
+  emptyDescription = "Create a public strategy baseline to enter the board.",
+}: {
+  entries: LeaderboardEntry[];
+  emptyTitle?: string;
+  emptyDescription?: string;
+}) {
   if (entries.length === 0) {
     return (
       <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/25 px-5 py-14 text-center">
         <Medal className="mx-auto h-6 w-6 text-zinc-600" />
-        <h3 className="mt-4 font-medium text-zinc-200">No ranked strategies yet</h3>
-        <p className="mt-1 text-sm text-zinc-500">Create a public strategy baseline to enter the board.</p>
+        <h3 className="mt-4 font-medium text-zinc-200">{emptyTitle}</h3>
+        <p className="mt-1 text-sm text-zinc-500">{emptyDescription}</p>
       </div>
     );
   }
 
   return (
     <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/35">
-      <div className="hidden grid-cols-[5rem_1fr_8rem_8rem] border-b border-zinc-800 px-5 py-3 text-[11px] uppercase tracking-[0.14em] text-zinc-600 sm:grid">
-        <span>Rank</span><span>Strategy</span><span className="text-right">Index</span><span className="text-right">Return</span>
+      <div className="hidden grid-cols-[5rem_1fr_8rem_8rem_13rem] border-b border-zinc-800 px-5 py-3 text-[11px] uppercase tracking-[0.14em] text-zinc-600 lg:grid">
+        <span>Rank</span><span>Strategy</span><span className="text-right">Index</span><span className="text-right">Return</span><span className="text-right">Actions</span>
       </div>
       {entries.map((entry) => {
         const name = (
@@ -36,7 +45,7 @@ export function RankedLeaderboard({ entries }: { entries: LeaderboardEntry[] }) 
           </span>
         );
         return (
-          <article key={`${entry.rank}-${entry.display_name}`} className={cn("grid gap-3 border-b border-zinc-900/90 px-4 py-4 last:border-b-0 sm:grid-cols-[5rem_1fr_8rem_8rem] sm:items-center sm:px-5", entry.is_me && "bg-violet-400/[0.04]")}>
+          <article key={`${entry.rank}-${entry.display_name}`} className={cn("grid gap-3 border-b border-zinc-900/90 px-4 py-4 last:border-b-0 lg:grid-cols-[5rem_1fr_8rem_8rem_13rem] lg:items-center lg:px-5", entry.is_me && "bg-violet-400/[0.04]")}>
             <span className={cn("w-fit rounded-lg border px-2 py-1 font-mono text-xs font-semibold tabular-nums", rankTone(entry.rank))}>#{entry.rank}</span>
             <div className="min-w-0">
               {entry.handle ? <Link to={`/profiles/${entry.handle}`} className="hover:underline">{name}</Link> : name}
@@ -58,6 +67,18 @@ export function RankedLeaderboard({ entries }: { entries: LeaderboardEntry[] }) 
               <span className={cn("font-mono text-sm font-semibold tabular-nums", entry.ranked_return_percentage >= 0 ? "text-emerald-400" : "text-rose-400")}>
                 {formatPercent(entry.ranked_return_percentage)}
               </span>
+            </div>
+            <div className="flex justify-start lg:justify-end">
+              {entry.handle && entry.public_weights.length > 0 ? (
+                <StrategyProfileActions
+                  handle={entry.handle}
+                  displayName={entry.display_name}
+                  canCopy
+                  compact
+                />
+              ) : (
+                <span className="text-xs text-zinc-700">Private</span>
+              )}
             </div>
           </article>
         );

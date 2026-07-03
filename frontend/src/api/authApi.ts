@@ -77,6 +77,32 @@ export async function registerRequest(
   return { token, user: normalizeUser(userRaw) };
 }
 
+export async function loginWithGoogleRequest(
+  credential: string,
+): Promise<AuthSession> {
+  return providerRequest("/auth/google", { credential }, "Google sign-in failed.");
+}
+
+async function providerRequest(
+  path: string,
+  body: unknown,
+  fallback: string,
+): Promise<AuthSession> {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error || fallback);
+  }
+  const payload = data as Record<string, unknown>;
+  const token = String(payload.token ?? "");
+  const userRaw = (payload.user as Record<string, unknown>) ?? payload;
+  return { token, user: normalizeUser(userRaw) };
+}
+
 export async function mockLogin(values: LoginFormValues): Promise<AuthSession> {
   await new Promise((r) =>
     setTimeout(r, 700 + Math.random() * 200),

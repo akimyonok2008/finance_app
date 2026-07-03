@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
-import { toast } from "sonner";
-
-import { loginWithEmailRequest, mockLogin } from "@/api/authApi";
+import {
+  loginWithEmailRequest,
+  loginWithGoogleRequest,
+  mockLogin,
+} from "@/api/authApi";
 import { AuthContext } from "@/auth/AuthContext";
 import {
   clearStorage,
@@ -45,13 +47,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [persist],
   );
 
-  const loginWithGoogle = useCallback(async () => {
-    if (!MOCK_ENABLED) {
-      toast.info("Google sign-in is not connected yet.");
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 800));
-    const session = await mockLogin({ email: "google@mock.com", password: "" });
+  const loginWithGoogle = useCallback(async (credential: string) => {
+    const session = await loginWithGoogleRequest(credential);
     persist(session.token, session.user);
   }, [persist]);
 

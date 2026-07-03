@@ -136,6 +136,7 @@ function queryString(params: ExploreParams): string {
   if (params.q?.trim()) search.set("q", params.q.trim());
   if (params.symbol?.trim()) search.set("symbol", params.symbol.trim().toUpperCase());
   if (params.sort && params.sort !== "top") search.set("sort", params.sort);
+  if (params.timeframe && params.timeframe !== "ALL") search.set("timeframe", params.timeframe);
   if (params.limit) search.set("limit", String(params.limit));
   if (params.offset) search.set("offset", String(params.offset));
   const value = search.toString();
@@ -157,6 +158,16 @@ export async function getExploreProfiles(
   const paginationRaw = record(raw.pagination);
 
   return {
+    timeframe:
+      raw.timeframe === "1W" ||
+      raw.timeframe === "1M" ||
+      raw.timeframe === "3M" ||
+      raw.timeframe === "6M" ||
+      raw.timeframe === "1Y" ||
+      raw.timeframe === "ALL"
+        ? raw.timeframe
+        : params.timeframe ?? "ALL",
+    timeframe_fallback: booleanValue(raw.timeframe_fallback) ?? false,
     featured: featured.length > 0 ? featured : topPerformers.slice(0, 3),
     similar,
     top_performers: topPerformers,

@@ -12,6 +12,8 @@ import { useAuth } from "@/auth/useAuth";
 import { AuthLoadingSpinner } from "@/pages/auth/components/AuthLoadingSpinner";
 import { AuthSecurityNote } from "@/pages/auth/components/AuthSecurityNote";
 import { FloatingLabelInput } from "@/pages/auth/components/FloatingLabelInput";
+import { AuthDivider } from "@/pages/auth/components/AuthDivider";
+import { OAuthButtons } from "@/pages/auth/components/OAuthButtons";
 import { PasswordInput } from "@/pages/auth/components/PasswordInput";
 import type { LoginFormValues } from "@/types/auth";
 
@@ -28,6 +30,7 @@ const registerSchema = z.object({
 });
 
 type RegisterFormValues = z.infer<typeof registerSchema>;
+const OAUTH_ENABLED = import.meta.env.VITE_GOOGLE_AUTH_ENABLED === "true";
 
 export function RegisterCard() {
   const { login } = useAuth();
@@ -82,6 +85,17 @@ export function RegisterCard() {
             </p>
           </div>
         </div>
+
+        {OAUTH_ENABLED && (
+          <>
+            <OAuthButtons
+              disabled={isBusy}
+              onSuccess={() => navigate("/dashboard")}
+              onError={setAuthError}
+            />
+            <AuthDivider />
+          </>
+        )}
 
         <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
           <div className="space-y-4">

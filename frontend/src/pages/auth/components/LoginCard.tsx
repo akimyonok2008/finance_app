@@ -12,8 +12,8 @@ import { AuthDivider } from "@/pages/auth/components/AuthDivider";
 import { AuthLoadingSpinner } from "@/pages/auth/components/AuthLoadingSpinner";
 import { AuthSecurityNote } from "@/pages/auth/components/AuthSecurityNote";
 import { FloatingLabelInput } from "@/pages/auth/components/FloatingLabelInput";
+import { OAuthButtons } from "@/pages/auth/components/OAuthButtons";
 import { PasswordInput } from "@/pages/auth/components/PasswordInput";
-import { SocialAuthButton } from "@/pages/auth/components/SocialAuthButton";
 
 const loginSchema = z.object({
   email: z
@@ -23,22 +23,21 @@ const loginSchema = z.object({
   password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
-const MOCK_AUTH_ENABLED = import.meta.env.VITE_ENABLE_MOCK_AUTH === "true";
+const OAUTH_ENABLED = import.meta.env.VITE_GOOGLE_AUTH_ENABLED === "true";
 
 type LoginFormValues = z.infer<typeof loginSchema>;
 
 export function LoginCard() {
-  const { login, loginWithGoogle } = useAuth();
+  const { login } = useAuth();
   const navigate = useNavigate();
   const [authError, setAuthError] = useState<string | null>(null);
-  const [googleLoading, setGoogleLoading] = useState(false);
 
   const form = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
     defaultValues: { email: "", password: "" },
   });
 
-  const isBusy = form.formState.isSubmitting || googleLoading;
+  const isBusy = form.formState.isSubmitting;
 
   const onSubmit = async (values: LoginFormValues) => {
     setAuthError(null);
@@ -48,19 +47,6 @@ export function LoginCard() {
       navigate("/dashboard");
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : "Sign in failed");
-    }
-  };
-
-  const handleGoogle = async () => {
-    setAuthError(null);
-    setGoogleLoading(true);
-    try {
-      await loginWithGoogle();
-      navigate("/dashboard");
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : "Sign in failed");
-    } finally {
-      setGoogleLoading(false);
     }
   };
 
@@ -88,12 +74,12 @@ export function LoginCard() {
           </div>
         </div>
 
-        {MOCK_AUTH_ENABLED && (
+        {OAUTH_ENABLED && (
           <>
-            <SocialAuthButton
-              onClick={handleGoogle}
+            <OAuthButtons
               disabled={isBusy}
-              loading={googleLoading}
+              onSuccess={() => navigate("/dashboard")}
+              onError={setAuthError}
             />
             <AuthDivider />
           </>

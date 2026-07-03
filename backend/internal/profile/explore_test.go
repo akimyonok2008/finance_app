@@ -21,11 +21,17 @@ func (f fakeGlobalRanks) GetUserRank(_ context.Context, userID string) (int, err
 	return 0, nil
 }
 
+type fakeTimeframeRanks map[string][]TimeframeRanking
+
+func (f fakeTimeframeRanks) UserRankings(_ context.Context, timeframe string) ([]TimeframeRanking, error) {
+	return f[timeframe], nil
+}
+
 // exploreTestService seeds a small public dataset:
 //
 //	alpha_wolf (u1) public, weights shown: NVDA 40 / AAPL 35 / BTC-USD 25, rank 2
 //	beta_bear  (u2) public, weights shown: NVDA 50 / MSFT 50,             rank 1
-//	gamma_goat (u3) public, weights HIDDEN (show_public_weights=false)
+//	gamma_goat (u3) public, weights HIDDEN (show_public_weights=false) -> excluded from Explore
 //	delta_duck (u4) PRIVATE (is_public=false) -> excluded everywhere
 func exploreTestService(t *testing.T) *Service {
 	t.Helper()
@@ -83,16 +89,17 @@ func TestExploreDefaultResponse(t *testing.T) {
 	out, err := svc.Explore(context.Background(), "", defaultFilter())
 	require.NoError(t, err)
 
-	// Default sort=top: ranked profiles first (beta_bear rank1, alpha_wolf rank2),
-	// then unranked gamma_goat. delta_duck (private) is excluded.
-	require.Len(t, out.TopPerformers, 3)
+	// Default sort=top: ranked public-weight profiles first. Hidden/private
+	// profiles are excluded from Explore.
+	require.Len(t, out.TopPerformers, 2)
 	assert.Equal(t, "beta_bear", out.TopPerformers[0].Handle)
 	assert.Equal(t, "alpha_wolf", out.TopPerformers[1].Handle)
-	assert.Equal(t, "gamma_goat", out.TopPerformers[2].Handle)
 
-	assert.Len(t, out.Featured, 3)
+	assert.Equal(t, TimeframeAll, out.Timeframe)
+	assert.True(t, out.TimeframeFallback)
+	assert.Len(t, out.Featured, 2)
 	assert.NotEmpty(t, out.TrendingHoldings)
-	assert.Equal(t, 3, out.Pagination.Total)
+	assert.Equal(t, 2, out.Pagination.Total)
 	assert.False(t, out.Pagination.HasMore)
 }
 
@@ -121,7 +128,7 @@ func TestExploreExcludesPrivateProfiles(t *testing.T) {
 	for _, c := range out.TopPerformers {
 		assert.NotEqual(t, "delta_duck", c.Handle)
 	}
-	assert.Equal(t, 3, out.Pagination.Total)
+	assert.Equal(t, 2, out.Pagination.Total)
 }
 
 func TestExploreHiddenWeights(t *testing.T) {
@@ -129,14 +136,7 @@ func TestExploreHiddenWeights(t *testing.T) {
 	out, err := svc.Explore(context.Background(), "", defaultFilter())
 	require.NoError(t, err)
 
-	var gamma *PublicProfile
-	for i := range out.TopPerformers {
-		if out.TopPerformers[i].Handle == "gamma_goat" {
-			gamma = &out.TopPerformers[i]
-		}
-	}
-	require.NotNil(t, gamma, "hidden-weight profile should still appear")
-	assert.Empty(t, gamma.PublicWeights)
+	assert.NotContains(t, handlesOf(out.TopPerformers), "gamma_goat")
 
 	// gamma_goat holds NVDA & AAPL privately; those must not inflate trending.
 	nvda := findHolding(out.TrendingHoldings, "NVDA")
@@ -193,12 +193,12 @@ func TestExploreSorting(t *testing.T) {
 
 	byReturn, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Sort = SortReturn }))
 	require.NoError(t, err)
-	assert.Equal(t, []string{"alpha_wolf", "beta_bear", "gamma_goat"}, handlesOf(byReturn.TopPerformers))
+	assert.Equal(t, []string{"alpha_wolf", "beta_bear"}, handlesOf(byReturn.TopPerformers))
 
 	byRank, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Sort = SortRank }))
 	require.NoError(t, err)
-	// beta_bear rank1, alpha_wolf rank2, gamma_goat unranked (last).
-	assert.Equal(t, []string{"beta_bear", "alpha_wolf", "gamma_goat"}, handlesOf(byRank.TopPerformers))
+	// beta_bear rank1, alpha_wolf rank2.
+	assert.Equal(t, []string{"beta_bear", "alpha_wolf"}, handlesOf(byRank.TopPerformers))
 
 	byTop, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Sort = SortTop }))
 	require.NoError(t, err)
@@ -218,30 +218,56 @@ func TestExplorePagination(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, first.TopPerformers, 1)
 	assert.Equal(t, "beta_bear", first.TopPerformers[0].Handle)
-	assert.Equal(t, 3, first.Pagination.Total)
+	assert.Equal(t, 2, first.Pagination.Total)
 	assert.True(t, first.Pagination.HasMore)
 
 	second, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Limit = 1; f.Offset = 1 }))
 	require.NoError(t, err)
 	require.Len(t, second.TopPerformers, 1)
 	assert.Equal(t, "alpha_wolf", second.TopPerformers[0].Handle)
-	assert.True(t, second.Pagination.HasMore)
+	assert.False(t, second.Pagination.HasMore)
 
 	last, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Limit = 1; f.Offset = 2 }))
 	require.NoError(t, err)
-	require.Len(t, last.TopPerformers, 1)
+	assert.Empty(t, last.TopPerformers)
 	assert.False(t, last.Pagination.HasMore)
 
 	beyond, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Offset = 50 }))
 	require.NoError(t, err)
 	assert.Empty(t, beyond.TopPerformers)
-	assert.Equal(t, 3, beyond.Pagination.Total)
+	assert.Equal(t, 2, beyond.Pagination.Total)
 }
 
 func TestExploreLimitClampedToMax(t *testing.T) {
 	f, err := ParseExploreFilter(mapGet(map[string]string{"limit": "999"}))
 	require.NoError(t, err)
 	assert.Equal(t, maxExploreLimit, f.Limit)
+}
+
+func TestExploreInvalidTimeframeRejected(t *testing.T) {
+	_, err := ParseExploreFilter(mapGet(map[string]string{"timeframe": "2W"}))
+	assert.ErrorIs(t, err, ErrInvalid)
+}
+
+func TestExploreTimeframeUsesSelectedRankings(t *testing.T) {
+	svc := exploreTestService(t)
+	svc.SetTimeframeRankProvider(fakeTimeframeRanks{
+		Timeframe1W: {
+			{UserID: "u1", Rank: 1, RankedReturnPercentage: 6.4, RankedIndex: 106.4},
+		},
+	})
+
+	out, err := svc.Explore(context.Background(), "", filterWith(func(f *ExploreFilter) {
+		f.Timeframe = Timeframe1W
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, Timeframe1W, out.Timeframe)
+	assert.False(t, out.TimeframeFallback)
+	require.Len(t, out.TopPerformers, 1)
+	assert.Equal(t, "alpha_wolf", out.TopPerformers[0].Handle)
+	assert.Equal(t, 1, *out.TopPerformers[0].GlobalRank)
+	assert.InDelta(t, 6.4, out.TopPerformers[0].ReturnPercentage, 0.001)
+	assert.Equal(t, []string{"NVDA", "AAPL", "BTC-USD"}, symbolsOf(out.TrendingHoldings))
 }
 
 func TestExploreTrendingHoldings(t *testing.T) {
@@ -295,7 +321,7 @@ func TestExploreEmptyData(t *testing.T) {
 // --- helpers ---
 
 func defaultFilter() ExploreFilter {
-	return ExploreFilter{Sort: SortTop, Limit: defaultExploreLimit}
+	return ExploreFilter{Sort: SortTop, Timeframe: TimeframeAll, Limit: defaultExploreLimit}
 }
 
 func filterWith(mut func(*ExploreFilter)) ExploreFilter {

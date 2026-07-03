@@ -89,3 +89,39 @@ func (r *PostgresUserRepository) ListUsers(ctx context.Context) ([]User, error) 
 	}
 	return out, rows.Err()
 }
+
+func (r *PostgresUserRepository) FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error) {
+	var identity AuthIdentity
+	err := r.pool.QueryRow(context.Background(), `
+		SELECT id, user_id, provider, provider_subject, email, email_verified
+		FROM auth_identities
+		WHERE provider = $1 AND provider_subject = $2
+	`, string(provider), subject).Scan(
+		&identity.ID, &identity.UserID, &identity.Provider, &identity.ProviderSubject,
+		&identity.Email, &identity.EmailVerified,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrIdentityNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("auth repository: find identity: %w", err)
+	}
+	return &identity, nil
+}
+
+func (r *PostgresUserRepository) CreateIdentity(identity *AuthIdentity) error {
+	_, err := r.pool.Exec(context.Background(), `
+		INSERT INTO auth_identities (
+			id, user_id, provider, provider_subject, email, email_verified
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`, identity.ID, identity.UserID, string(identity.Provider), identity.ProviderSubject,
+		normalizeEmail(identity.Email), identity.EmailVerified)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrEmailExists
+		}
+		return fmt.Errorf("auth repository: create identity: %w", err)
+	}
+	return nil
+}

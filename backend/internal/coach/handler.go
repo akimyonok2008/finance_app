@@ -6,6 +6,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/httpx"
+	"github.com/ardakimyonok/finance_app/internal/profile"
 )
 
 // Handler exposes the Portfolio Coach over HTTP. It runs behind the JWT
@@ -52,5 +53,31 @@ func (h *Handler) Coach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) CompareProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok || userID == "" {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req CompareProfileRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.CompareProfile(r.Context(), userID, req.Handle)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrEmptyPortfolio):
+			httpx.WriteError(w, http.StatusBadRequest, "create a strategy baseline before comparing")
+		case errors.Is(err, profile.ErrNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "public profile not found")
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "could not compare profile")
+		}
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }

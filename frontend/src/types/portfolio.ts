@@ -40,6 +40,19 @@ export type PositionSummary = {
   gain_loss_percentage?: number;
   currency: string;
   base_currency?: string;
+  quote_provider?: string;
+  quote_provider_status?: string;
+  quote_is_stale?: boolean;
+  quote_fetched_at?: string;
+  quote_expires_at?: string;
+};
+
+export type QuoteStatus = {
+  provider: string;
+  provider_status: string;
+  last_fetched_at?: string;
+  stale_count: number;
+  total_quotes: number;
 };
 
 /** Aggregated portfolio performance from GET /portfolio/summary. */
@@ -53,6 +66,7 @@ export type PortfolioSummary = {
   gain_loss_percentage: number;
   portfolio_index: number;
   positions?: PositionSummary[];
+  quote_status?: QuoteStatus;
 };
 
 /**

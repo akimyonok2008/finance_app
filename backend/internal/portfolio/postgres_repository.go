@@ -107,6 +107,23 @@ func (r *PostgresRepository) ListPositionsByUser(userID string) ([]*Position, er
 	return out, rows.Err()
 }
 
+func (r *PostgresRepository) ListActiveSymbols() ([]string, error) {
+	rows, err := r.pool.Query(context.Background(), `SELECT DISTINCT symbol FROM positions ORDER BY symbol`)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio repository: list active symbols: %w", err)
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return nil, fmt.Errorf("portfolio repository: scan active symbol: %w", err)
+		}
+		out = append(out, symbol)
+	}
+	return out, rows.Err()
+}
+
 // UpdatePosition replaces the mutable fields of a position.
 func (r *PostgresRepository) UpdatePosition(p *Position) error {
 	tag, err := r.pool.Exec(context.Background(),

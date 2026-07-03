@@ -92,12 +92,12 @@ export function PerformanceChartCard({
 
   return (
     <motion.div
-      className="min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5 shadow-sm shadow-black/20 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70"
+      className="min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 shadow-sm shadow-black/20 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70 sm:p-5"
       whileHover={{ y: -2 }}
       transition={{ duration: 0.18 }}
     >
       {/* Header */}
-      <div className="mb-4 flex items-start justify-between gap-4">
+      <div className="mb-3.5 flex items-start justify-between gap-4">
         <div>
           <div className="text-xs font-medium text-zinc-500">
             Portfolio Index
@@ -120,13 +120,13 @@ export function PerformanceChartCard({
       </div>
 
       {/* Primary metric */}
-      <div className={cn("font-mono text-4xl font-medium tabular-nums tracking-tight", palette.text)}>
+      <div className={cn("font-mono text-3xl font-medium tabular-nums tracking-tight", palette.text)}>
         {index.toFixed(2)}
       </div>
       <div className="mt-1 text-sm text-slate-400">Index · baseline 100.00</div>
 
       {/* Metric chips */}
-      <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="mt-3.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <DashboardMetricCard
           label="Value"
           value={formatMoney(summary?.current_value, currency)}
@@ -150,7 +150,7 @@ export function PerformanceChartCard({
       </div>
 
       {/* Chart */}
-      <div className="mt-5 h-52 min-w-0">
+      <div className="mt-4 h-48 min-h-48 min-w-0">
         {isError ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
             <span>We could not load your portfolio summary.</span>
@@ -174,7 +174,12 @@ export function PerformanceChartCard({
             </Link>
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer
+            width="100%"
+            height="100%"
+            minWidth={1}
+            minHeight={1}
+          >
               <AreaChart
                 data={series}
                 margin={{ top: 4, right: 4, left: -20, bottom: 0 }}

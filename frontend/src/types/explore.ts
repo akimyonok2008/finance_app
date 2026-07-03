@@ -1,4 +1,5 @@
 export type ExploreSort = "top" | "return" | "rank" | "recent";
+export type ExploreTimeframe = "1W" | "1M" | "3M" | "6M" | "1Y" | "ALL";
 
 export type ExplorePublicWeight = {
   symbol: string;
@@ -49,6 +50,8 @@ export type ExplorePagination = {
 };
 
 export type ExploreResponse = {
+  timeframe: ExploreTimeframe;
+  timeframe_fallback: boolean;
   featured: ExploreProfile[];
   similar: ExploreProfile[];
   top_performers: ExploreProfile[];
@@ -60,6 +63,7 @@ export type ExploreParams = {
   q?: string;
   symbol?: string;
   sort?: ExploreSort;
+  timeframe?: ExploreTimeframe;
   limit?: number;
   offset?: number;
 };

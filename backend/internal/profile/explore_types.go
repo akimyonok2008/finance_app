@@ -15,6 +15,15 @@ const (
 )
 
 const (
+	Timeframe1W  = "1W"
+	Timeframe1M  = "1M"
+	Timeframe3M  = "3M"
+	Timeframe6M  = "6M"
+	Timeframe1Y  = "1Y"
+	TimeframeAll = "ALL"
+)
+
+const (
 	defaultExploreLimit = 20
 	maxExploreLimit     = 50
 	featuredCount       = 3
@@ -25,11 +34,12 @@ const (
 
 // ExploreFilter is the validated, normalized query for the Explore endpoint.
 type ExploreFilter struct {
-	Query  string // free-text search over handle / display name / public symbol
-	Symbol string // exact public-symbol filter, already uppercased
-	Sort   string // one of SortTop/SortReturn/SortRank/SortRecent
-	Limit  int    // page size for top_performers (1..maxExploreLimit)
-	Offset int    // page offset for top_performers
+	Query     string // free-text search over handle / display name / public symbol
+	Symbol    string // exact public-symbol filter, already uppercased
+	Sort      string // one of SortTop/SortReturn/SortRank/SortRecent
+	Timeframe string // 1W/1M/3M/6M/1Y/ALL
+	Limit     int    // page size for top_performers (1..maxExploreLimit)
+	Offset    int    // page offset for top_performers
 }
 
 // TrendingHolding summarizes how often a symbol appears across public profiles.
@@ -54,9 +64,11 @@ type ExplorePagination struct {
 // and TopPerformers reuse the public-safe PublicProfile card so the card
 // contract stays identical to GET /profiles/{handle}.
 type ExploreResponse struct {
-	Featured         []PublicProfile   `json:"featured"`
-	Similar          []PublicProfile   `json:"similar"`
-	TopPerformers    []PublicProfile   `json:"top_performers"`
-	TrendingHoldings []TrendingHolding `json:"trending_holdings"`
-	Pagination       ExplorePagination `json:"pagination"`
+	Timeframe         string            `json:"timeframe"`
+	TimeframeFallback bool              `json:"timeframe_fallback"`
+	Featured          []PublicProfile   `json:"featured"`
+	Similar           []PublicProfile   `json:"similar"`
+	TopPerformers     []PublicProfile   `json:"top_performers"`
+	TrendingHoldings  []TrendingHolding `json:"trending_holdings"`
+	Pagination        ExplorePagination `json:"pagination"`
 }

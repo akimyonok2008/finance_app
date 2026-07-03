@@ -24,6 +24,7 @@ func newTestHandler() (*Handler, *Service, http.Handler) {
 	r := chi.NewRouter()
 	r.Post("/auth/register", h.Register)
 	r.Post("/auth/login", h.Login)
+	r.Post("/auth/google", h.Google)
 	r.With(RequireAuth(tm)).Get("/me", h.Me)
 	return h, svc, r
 }
@@ -123,6 +124,65 @@ func TestHandlerLogin_Returns401ForUnknownEmail(t *testing.T) {
 	rec := doJSON(t, router, http.MethodPost, "/auth/login", body, "")
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandlerGoogle_Returns503WhenDisabled(t *testing.T) {
+	_, _, router := newTestHandler()
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/google", `{"credential":"id-token"}`, "")
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assertHasError(t, rec.Body.Bytes())
+}
+
+func TestHandlerGoogle_Returns400ForMissingCredential(t *testing.T) {
+	_, svc, router := newTestHandler()
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled:  true,
+		GoogleVerifier: fakeVerifier{},
+	})
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/google", `{"credential":"   "}`, "")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertHasError(t, rec.Body.Bytes())
+}
+
+func TestHandlerGoogle_Returns401ForInvalidCredential(t *testing.T) {
+	_, svc, router := newTestHandler()
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled:  true,
+		GoogleVerifier: fakeVerifier{err: ErrInvalidProviderToken},
+	})
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/google", `{"credential":"bad-token"}`, "")
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assertHasError(t, rec.Body.Bytes())
+}
+
+func TestHandlerGoogle_ReturnsJWTForVerifiedCredential(t *testing.T) {
+	_, svc, router := newTestHandler()
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Subject:       "google-sub-1",
+			Email:         "GoogleUser@example.com",
+			EmailVerified: true,
+			DisplayName:   "Google User",
+		}},
+	})
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/google", `{"credential":"id-token"}`, "")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp authResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Token)
+	assert.Equal(t, "googleuser@example.com", resp.User.Email)
+	assert.Equal(t, "Google User", resp.User.DisplayName)
+	assertNoPasswordLeak(t, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "google-sub-1")
 }
 
 func TestHandlerMe_Returns200WithValidToken(t *testing.T) {

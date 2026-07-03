@@ -2,6 +2,7 @@ package coach
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
+	"github.com/ardakimyonok/finance_app/internal/profile"
 )
 
 func TestAnalyze_SupportedModesPass(t *testing.T) {
@@ -142,4 +144,67 @@ func TestAnalyze_CompareTop10_UsefulComparisonWhenDataExists(t *testing.T) {
 	assert.Greater(t, c.UserLargestWeightPercentage, c.Top10MedianLargestWeightPercentage)
 	// u1 shares AAPL and MSFT with the others.
 	assert.Equal(t, 2, c.SharedSymbolsCount)
+}
+
+type fakeStrategyProfiles map[string]profile.PublicStrategy
+
+func (f fakeStrategyProfiles) PublicStrategyByHandle(_ context.Context, handle string) (profile.PublicStrategy, error) {
+	if p, ok := f[handle]; ok {
+		return p, nil
+	}
+	return profile.PublicStrategy{}, profile.ErrNotFound
+}
+
+func TestCompareProfileStructuredAndPrivacySafe(t *testing.T) {
+	svc := newCoachService([]auth.User{user("u1", "Alpha")}, map[string]*portfolio.PortfolioSummary{
+		"u1": summaryWith("u1", []testPosition{
+			{"NVDA", "stock", "USD", 120, 0},
+			{"SPY", "etf", "USD", 300, 0},
+			{"AAPL", "stock", "USD", 80, 0},
+		}),
+	})
+	svc.SetProfileProvider(fakeStrategyProfiles{
+		"alpha_wolf": {
+			Handle: "alpha_wolf", DisplayName: "AlphaWolf", AvatarKey: "fox", StrategyTag: "growth",
+			Weights: []profile.StrategyWeight{
+				{Symbol: "NVDA", AssetType: "stock", WeightPercentage: 50},
+				{Symbol: "AAPL", AssetType: "stock", WeightPercentage: 25},
+				{Symbol: "MSFT", AssetType: "stock", WeightPercentage: 25},
+			},
+		},
+	})
+
+	resp, err := svc.CompareProfile(context.Background(), "u1", "alpha_wolf")
+	require.NoError(t, err)
+	assert.Equal(t, "alpha_wolf", resp.TargetProfile.Handle)
+	assert.InDelta(t, 40.0, resp.OverlapScore, 0.001) // min(NVDA 24,50)+min(AAPL 16,25)
+	assert.Equal(t, []string{"AAPL", "NVDA"}, resp.SharedSymbols)
+	assert.NotEmpty(t, resp.WeightDifferences)
+	assert.NotEmpty(t, resp.LearningPoints)
+	assert.Equal(t, "This is educational comparison, not investment advice.", resp.Disclaimer)
+
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	for _, forbidden := range []string{
+		"quantity", "average_buy_price", "cost_basis", "current_value", "portfolio_value",
+		"user_id", "portfolio_id", "position_id", "email", "password", "baseline_value",
+	} {
+		assert.NotContains(t, string(body), `"`+forbidden+`":`)
+	}
+}
+
+func TestCompareProfileEmptyPortfolioAndMissingTarget(t *testing.T) {
+	svc := newCoachService([]auth.User{user("u1", "Alpha")}, map[string]*portfolio.PortfolioSummary{
+		"u1": summaryWith("u1", nil),
+	})
+	svc.SetProfileProvider(fakeStrategyProfiles{})
+
+	_, err := svc.CompareProfile(context.Background(), "u1", "missing")
+	assert.ErrorIs(t, err, profile.ErrNotFound)
+
+	svc.SetProfileProvider(fakeStrategyProfiles{
+		"alpha_wolf": {Handle: "alpha_wolf", Weights: []profile.StrategyWeight{{Symbol: "NVDA", AssetType: "stock", WeightPercentage: 100}}},
+	})
+	_, err = svc.CompareProfile(context.Background(), "u1", "alpha_wolf")
+	assert.ErrorIs(t, err, ErrEmptyPortfolio)
 }

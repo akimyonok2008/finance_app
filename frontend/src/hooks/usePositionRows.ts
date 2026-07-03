@@ -19,6 +19,11 @@ export type PositionRow = Position & {
   local_gain_loss?: number;
   local_cost_basis?: number;
   base_currency?: string;
+  quote_provider?: string;
+  quote_provider_status?: string;
+  quote_is_stale?: boolean;
+  quote_fetched_at?: string;
+  quote_expires_at?: string;
 };
 
 type PositionRowsResult = {
@@ -66,6 +71,11 @@ export function usePositionRows(): PositionRowsResult {
         local_gain_loss: match?.gain_loss,
         local_cost_basis: match?.cost_basis,
         base_currency: match?.base_currency ?? summaryQuery.data?.base_currency,
+        quote_provider: match?.quote_provider,
+        quote_provider_status: match?.quote_provider_status,
+        quote_is_stale: match?.quote_is_stale,
+        quote_fetched_at: match?.quote_fetched_at,
+        quote_expires_at: match?.quote_expires_at,
       };
     });
   }, [positionsQuery.data, summaryQuery.data]);

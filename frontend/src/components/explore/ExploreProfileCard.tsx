@@ -1,6 +1,7 @@
 import { ArrowUpRight, CircleUserRound, Trophy } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { StrategyProfileActions } from "@/components/strategy/StrategyProfileActions";
 import type { ExploreProfile } from "@/types/explore";
 import { formatPercent } from "@/utils/formatPercent";
 import { gainLossColor } from "@/utils/gainLoss";
@@ -79,6 +80,16 @@ export function ExploreProfileCard({ profile }: { profile: ExploreProfile }) {
           View profile <ArrowUpRight className="h-3.5 w-3.5" />
         </Link>
       </div>
+      {profile.public_weights.length > 0 && (
+        <div className="mt-4 border-t border-zinc-800 pt-4">
+          <StrategyProfileActions
+            handle={profile.handle}
+            displayName={profile.display_name}
+            canCopy
+            compact
+          />
+        </div>
+      )}
     </article>
   );
 }

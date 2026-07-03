@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -164,4 +165,136 @@ func TestRepository_FindByIDUnknownReturnsNotFound(t *testing.T) {
 	_, err := repo.FindByID("does-not-exist")
 
 	assert.True(t, errors.Is(err, ErrUserNotFound))
+}
+
+func TestProviderLogin_NewGoogleIdentityCreatesUser(t *testing.T) {
+	svc := newTestService()
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderGoogle, Subject: "google-sub-1",
+			Email: "New@Example.com", EmailVerified: true, DisplayName: "New Investor",
+		}},
+	})
+
+	user, token, err := svc.LoginWithGoogle(context.Background(), "id-token")
+
+	require.NoError(t, err)
+	assert.Equal(t, "new@example.com", user.Email)
+	assert.Equal(t, "New Investor", user.DisplayName)
+	assert.NotEmpty(t, token)
+}
+
+func TestProviderLogin_ExistingIdentityLogsInUser(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	require.NoError(t, svc.repo.CreateIdentity(&AuthIdentity{
+		ID: "identity-1", UserID: user.ID, Provider: ProviderGoogle,
+		ProviderSubject: "google-sub-1", Email: user.Email, EmailVerified: true,
+	}))
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderGoogle, Subject: "google-sub-1",
+			Email: "other@example.com", EmailVerified: true, DisplayName: "Ignored",
+		}},
+	})
+
+	loggedIn, token, err := svc.LoginWithGoogle(context.Background(), "id-token")
+
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, loggedIn.ID)
+	assert.Equal(t, user.Email, loggedIn.Email)
+	assert.NotEmpty(t, token)
+}
+
+func TestProviderLogin_VerifiedEmailLinksExistingUser(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderGoogle, Subject: "google-sub-2",
+			Email: "USER@example.com", EmailVerified: true, DisplayName: "Ignored",
+		}},
+	})
+
+	loggedIn, _, err := svc.LoginWithGoogle(context.Background(), "id-token")
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, loggedIn.ID)
+
+	identity, err := svc.repo.FindIdentity(ProviderGoogle, "google-sub-2")
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, identity.UserID)
+}
+
+func TestProviderLogin_UnverifiedEmailDoesNotLink(t *testing.T) {
+	svc := newTestService()
+	_, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderGoogle, Subject: "google-sub-3",
+			Email: "user@example.com", EmailVerified: false,
+		}},
+	})
+
+	_, _, err = svc.LoginWithGoogle(context.Background(), "id-token")
+	assert.ErrorIs(t, err, ErrProviderEmailUnverified)
+}
+
+func TestProviderLogin_DisabledProviderFailsSafely(t *testing.T) {
+	svc := newTestService()
+
+	_, _, err := svc.LoginWithGoogle(context.Background(), "id-token")
+
+	assert.ErrorIs(t, err, ErrProviderDisabled)
+}
+
+func TestProviderLogin_GoogleCreatesUserWithoutAllowlist(t *testing.T) {
+	svc := newTestService()
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderGoogle, Subject: "google-sub-dev",
+			Email: "owner@example.com", EmailVerified: true,
+		}},
+	})
+
+	user, _, err := svc.LoginWithGoogle(context.Background(), "id-token")
+
+	require.NoError(t, err)
+	assert.Equal(t, "owner@example.com", user.Email)
+}
+
+func TestProviderLogin_AppleUsesFallbackFirstAuthorizationEmail(t *testing.T) {
+	svc := newTestService()
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		AppleEnabled: true,
+		AppleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderApple, Subject: "apple-sub-1", DisplayName: "Apple User",
+		}},
+	})
+
+	user, _, err := svc.LoginWithApple(context.Background(), "identity-token", ProviderClaims{
+		Email: "relay@privaterelay.appleid.com",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "relay@privaterelay.appleid.com", user.Email)
+}
+
+type fakeVerifier struct {
+	claims ProviderClaims
+	err    error
+}
+
+func (v fakeVerifier) Verify(context.Context, string) (ProviderClaims, error) {
+	if v.err != nil {
+		return ProviderClaims{}, v.err
+	}
+	return v.claims, nil
 }

@@ -88,8 +88,38 @@ export async function getLeaderboardStanding(
     timeframe,
     eligible: Boolean(raw.eligible),
     rank: raw.rank === null || raw.rank === undefined ? null : numberValue(raw.rank),
-    total_participants: numberValue(raw.total_participants),
+    previous_rank:
+      raw.previous_rank === null || raw.previous_rank === undefined
+        ? null
+        : numberValue(raw.previous_rank),
+    rank_delta:
+      raw.rank_delta === null || raw.rank_delta === undefined
+        ? null
+        : numberValue(raw.rank_delta),
+    best_rank:
+      raw.best_rank === null || raw.best_rank === undefined
+        ? null
+        : numberValue(raw.best_rank),
+    participant_count: numberValue(raw.participant_count ?? raw.total_participants),
+    total_participants: numberValue(raw.total_participants ?? raw.participant_count),
+    percentile: numberValue(raw.percentile),
     ranked_return_percentage: numberValue(raw.ranked_return_percentage),
     ranked_index: numberValue(raw.ranked_index),
+    next_milestone:
+      raw.next_milestone && typeof raw.next_milestone === "object"
+        ? {
+            label: String((raw.next_milestone as Record<string, unknown>).label ?? ""),
+            target_rank: numberValue(
+              (raw.next_milestone as Record<string, unknown>).target_rank,
+            ),
+            rank_gap: numberValue(
+              (raw.next_milestone as Record<string, unknown>).rank_gap,
+            ),
+            return_gap_percentage: numberValue(
+              (raw.next_milestone as Record<string, unknown>).return_gap_percentage,
+            ),
+          }
+        : null,
+    reason: raw.reason ? String(raw.reason) : "",
   };
 }

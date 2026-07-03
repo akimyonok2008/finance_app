@@ -5,33 +5,102 @@ import { useSearchParams } from "react-router-dom";
 import { AppNav } from "@/components/layout/AppNav";
 import { ExploreEmptyState } from "@/components/explore/ExploreEmptyState";
 import { ExploreFilterBar } from "@/components/explore/ExploreFilterBar";
+import { FriendsPanel } from "@/components/explore/FriendsPanel";
 import { ExplorePrivacyNote } from "@/components/explore/ExplorePrivacyNote";
 import { ExploreSkeleton } from "@/components/explore/ExploreSkeleton";
 import { FeaturedStrategies } from "@/components/explore/FeaturedStrategies";
+import { MessagesPanel } from "@/components/explore/MessagesPanel";
 import { SimilarStrategies } from "@/components/explore/SimilarStrategies";
 import { TopPerformersList } from "@/components/explore/TopPerformersList";
 import { TrendingHoldingsCard } from "@/components/explore/TrendingHoldingsCard";
 import { Button } from "@/components/ui/button";
 import { useExplore } from "@/hooks/useExplore";
-import type { ExploreSort } from "@/types/explore";
+import { TimeframeTabs } from "@/pages/leaderboard/TimeframeTabs";
+import type { ExploreSort, ExploreTimeframe } from "@/types/explore";
 
 const PAGE_SIZE = 20;
 const SORTS: ExploreSort[] = ["top", "return", "rank", "recent"];
+const TIMEFRAMES: ExploreTimeframe[] = ["1W", "1M", "3M", "6M", "1Y", "ALL"];
+const EXPLORE_TABS = ["strategies", "friends", "messages"] as const;
+type ExploreTab = (typeof EXPLORE_TABS)[number];
 
 export function ExplorePage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab") as ExploreTab | null;
+  const activeTab =
+    tabParam && EXPLORE_TABS.includes(tabParam) ? tabParam : "strategies";
+
+  const setActiveTab = (tab: ExploreTab) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", tab);
+    if (tab !== "messages") {
+      next.delete("conversationId");
+      next.delete("handle");
+    }
+    setSearchParams(next);
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-50">
+      <main className="mx-auto w-full max-w-7xl px-4 pb-16 pt-4 sm:px-6 lg:px-8">
+        <AppNav />
+
+        <header className="mb-6">
+          <h1 className="text-2xl font-medium tracking-tight sm:text-3xl">Explore</h1>
+          <p className="mt-2 max-w-2xl text-sm text-zinc-400">
+            Discover strategies, manage friends, and message mutual connections.
+          </p>
+          <p className="mt-2 text-xs text-zinc-600">
+            Public surfaces show strategy, not wealth.
+          </p>
+        </header>
+
+        <div className="mb-6 flex flex-wrap gap-2 rounded-xl border border-zinc-800 bg-zinc-900/35 p-1">
+          {EXPLORE_TABS.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className={`rounded-lg px-3 py-2 text-sm font-medium capitalize transition ${
+                activeTab === tab
+                  ? "bg-zinc-100 text-zinc-950"
+                  : "text-zinc-400 hover:bg-zinc-800/70 hover:text-zinc-100"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "strategies" ? (
+          <StrategyExplorePanel />
+        ) : activeTab === "friends" ? (
+          <FriendsPanel />
+        ) : (
+          <MessagesPanel />
+        )}
+      </main>
+    </div>
+  );
+}
+
+function StrategyExplorePanel() {
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") ?? "";
   const symbol = searchParams.get("symbol") ?? "";
   const sortParam = searchParams.get("sort") as ExploreSort | null;
   const sort = sortParam && SORTS.includes(sortParam) ? sortParam : "top";
+  const timeframeParam = searchParams.get("timeframe") as ExploreTimeframe | null;
+  const timeframe =
+    timeframeParam && TIMEFRAMES.includes(timeframeParam) ? timeframeParam : "ALL";
   const offset = Math.max(0, Number(searchParams.get("offset")) || 0);
 
   const [draftQuery, setDraftQuery] = useState(q);
   const [draftSymbol, setDraftSymbol] = useState(symbol);
 
   const params = useMemo(
-    () => ({ q, symbol, sort, limit: PAGE_SIZE, offset }),
-    [q, symbol, sort, offset],
+    () => ({ q, symbol, sort, timeframe, limit: PAGE_SIZE, offset }),
+    [q, symbol, sort, timeframe, offset],
   );
   const query = useExplore(params);
   const profiles = query.data?.top_performers ?? [];
@@ -50,27 +119,35 @@ export function ExplorePage() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-50">
-      <main className="mx-auto w-full max-w-7xl px-4 pb-16 pt-4 sm:px-6 lg:px-8">
-        <AppNav
-          actions={
-            <button
-              type="button"
-              onClick={() => query.refetch()}
-              disabled={query.isFetching}
-              aria-label="Refresh Explore"
-              className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800/70 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 disabled:opacity-50"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${query.isFetching ? "animate-spin" : ""}`} />
-            </button>
-          }
-        />
+    <section className="space-y-5">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <h2 className="text-lg font-semibold text-zinc-100">Strategies</h2>
+          <p className="mt-1 max-w-2xl text-sm text-zinc-400">
+            Discover public portfolios by performance, symbols, and weights without seeing anyone's net worth.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => query.refetch()}
+          disabled={query.isFetching}
+          aria-label="Refresh Explore"
+          className="self-start rounded-lg border border-zinc-800 p-2 text-zinc-400 transition hover:bg-zinc-800/70 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${query.isFetching ? "animate-spin" : ""}`} />
+        </button>
+      </div>
 
-        <header className="mb-6">
-          <h1 className="text-2xl font-medium tracking-tight sm:text-3xl">Explore Strategies</h1>
-          <p className="mt-2 max-w-2xl text-sm text-zinc-400">Discover public portfolios by performance, symbols, and weights without seeing anyone’s net worth.</p>
-          <p className="mt-2 text-xs text-zinc-600">Profiles show strategy weights, not quantities or values.</p>
-        </header>
+        <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-100">Discovery timeframe</h2>
+            <p className="mt-1 text-xs text-zinc-500">Find strategies by selected ranked window.</p>
+          </div>
+          <TimeframeTabs
+            value={timeframe}
+            onChange={(value) => updateParams({ timeframe: value, offset: 0 })}
+          />
+        </div>
 
         <ExploreFilterBar
           query={draftQuery}
@@ -83,9 +160,15 @@ export function ExplorePage() {
           onClear={() => {
             setDraftQuery("");
             setDraftSymbol("");
-            setSearchParams({});
+            updateParams({ q: "", symbol: "", sort: "top", offset: 0 });
           }}
         />
+
+        {query.data?.timeframe_fallback && (
+          <div className="mb-5 rounded-xl border border-amber-300/15 bg-amber-300/[0.04] px-4 py-3 text-xs text-amber-100">
+            Using since-baseline ranking until enough timeframe history is available.
+          </div>
+        )}
 
         {query.isLoading ? (
           <ExploreSkeleton />
@@ -112,7 +195,7 @@ export function ExplorePage() {
                 selectedSymbol={symbol}
                 onSelectSymbol={(value) => {
                   setDraftSymbol(value);
-                  updateParams({ symbol: value, offset: 0 });
+                  updateParams({ symbol: value, timeframe, offset: 0 });
                 }}
               />
             </div>
@@ -130,8 +213,7 @@ export function ExplorePage() {
             </div>
           </div>
         )}
-      </main>
-    </div>
+    </section>
   );
 }
 

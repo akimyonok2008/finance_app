@@ -41,12 +41,26 @@ export type LeaderboardQueryParams = {
   timeframe: LeaderboardTimeframe;
 };
 
+export type LeaderboardMilestone = {
+  label: string;
+  target_rank: number;
+  rank_gap: number;
+  return_gap_percentage: number;
+};
+
 /** GET /leaderboard/me — the caller's own standing for a timeframe. */
 export type LeaderboardStanding = {
   timeframe: LeaderboardTimeframe;
   eligible: boolean;
   rank: number | null;
+  previous_rank: number | null;
+  rank_delta: number | null;
+  best_rank: number | null;
+  participant_count: number;
   total_participants: number;
+  percentile: number;
   ranked_return_percentage: number;
   ranked_index: number;
+  next_milestone: LeaderboardMilestone | null;
+  reason: string;
 };

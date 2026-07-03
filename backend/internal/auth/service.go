@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"strings"
 
@@ -15,13 +17,31 @@ const minPasswordLength = 8
 // uniqueness checks, and token issuance. It depends only on the repository
 // interface and the token manager.
 type Service struct {
-	repo   UserRepository
-	tokens *TokenManager
+	repo           UserRepository
+	tokens         *TokenManager
+	googleEnabled  bool
+	appleEnabled   bool
+	googleVerifier ProviderVerifier
+	appleVerifier  ProviderVerifier
 }
 
 // NewService wires a Service with its repository and token manager.
 func NewService(repo UserRepository, tokens *TokenManager) *Service {
 	return &Service{repo: repo, tokens: tokens}
+}
+
+type ProviderAuthConfig struct {
+	GoogleEnabled  bool
+	AppleEnabled   bool
+	GoogleVerifier ProviderVerifier
+	AppleVerifier  ProviderVerifier
+}
+
+func (s *Service) ConfigureProviderAuth(cfg ProviderAuthConfig) {
+	s.googleEnabled = cfg.GoogleEnabled
+	s.appleEnabled = cfg.AppleEnabled
+	s.googleVerifier = cfg.GoogleVerifier
+	s.appleVerifier = cfg.AppleVerifier
 }
 
 // Register validates the input, hashes the password, persists the user, and
@@ -85,6 +105,119 @@ func (s *Service) Login(email, password string) (*User, string, error) {
 		return nil, "", ErrInvalidCredentials
 	}
 
+	token, err := s.tokens.Generate(user.ID, user.Email)
+	if err != nil {
+		return nil, "", err
+	}
+	return user, token, nil
+}
+
+func (s *Service) LoginWithGoogle(ctx context.Context, credential string) (*User, string, error) {
+	if !s.googleEnabled {
+		return nil, "", ErrProviderDisabled
+	}
+	if s.googleVerifier == nil {
+		return nil, "", ErrProviderNotConfigured
+	}
+	claims, err := s.googleVerifier.Verify(ctx, credential)
+	if err != nil {
+		return nil, "", err
+	}
+	claims.Provider = ProviderGoogle
+	return s.loginWithProviderClaims(claims)
+}
+
+func (s *Service) LoginWithApple(ctx context.Context, identityToken string, fallback ProviderClaims) (*User, string, error) {
+	if !s.appleEnabled {
+		return nil, "", ErrProviderDisabled
+	}
+	if s.appleVerifier == nil {
+		return nil, "", ErrProviderNotConfigured
+	}
+	claims, err := s.appleVerifier.Verify(ctx, identityToken)
+	if err != nil {
+		return nil, "", err
+	}
+	claims.Provider = ProviderApple
+	if claims.Email == "" && fallback.Email != "" {
+		claims.Email = fallback.Email
+		claims.EmailVerified = true
+	}
+	if claims.DisplayName == "" {
+		claims.DisplayName = fallback.DisplayName
+	}
+	return s.loginWithProviderClaims(claims)
+}
+
+func (s *Service) loginWithProviderClaims(claims ProviderClaims) (*User, string, error) {
+	if claims.Subject == "" {
+		return nil, "", ErrInvalidProviderToken
+	}
+	if identity, err := s.repo.FindIdentity(claims.Provider, claims.Subject); err == nil {
+		user, err := s.repo.FindByID(identity.UserID)
+		if err != nil {
+			return nil, "", err
+		}
+		return s.issue(user)
+	} else if !errors.Is(err, ErrIdentityNotFound) {
+		return nil, "", err
+	}
+
+	email := normalizeEmail(claims.Email)
+	if email == "" {
+		return nil, "", ErrInvalidProviderToken
+	}
+	if !claims.EmailVerified {
+		return nil, "", ErrProviderEmailUnverified
+	}
+
+	user, err := s.repo.FindByEmail(email)
+	if errors.Is(err, ErrUserNotFound) {
+		user, err = s.createProviderUser(email, claims.DisplayName, claims.AvatarKey)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	identity := &AuthIdentity{
+		ID: uuid.NewString(), UserID: user.ID, Provider: claims.Provider,
+		ProviderSubject: claims.Subject, Email: email, EmailVerified: claims.EmailVerified,
+	}
+	if err := s.repo.CreateIdentity(identity); err != nil && !errors.Is(err, ErrEmailExists) {
+		return nil, "", err
+	}
+	return s.issue(user)
+}
+
+func (s *Service) createProviderUser(email, displayName, avatarKey string) (*User, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		displayName = strings.Split(email, "@")[0]
+	}
+	if len([]rune(displayName)) < 2 {
+		displayName = "Investor"
+	}
+	if avatarKey = strings.TrimSpace(avatarKey); avatarKey == "" {
+		avatarKey = "default"
+	}
+	randomPassword := make([]byte, 32)
+	if _, err := rand.Read(randomPassword); err != nil {
+		return nil, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(base64.RawURLEncoding.EncodeToString(randomPassword)), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	user := &User{
+		ID: uuid.NewString(), Email: email, DisplayName: displayName,
+		AvatarKey: avatarKey, PasswordHash: string(hash),
+	}
+	if err := s.repo.Create(user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *Service) issue(user *User) (*User, string, error) {
 	token, err := s.tokens.Generate(user.ID, user.Email)
 	if err != nil {
 		return nil, "", err

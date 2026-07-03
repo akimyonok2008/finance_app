@@ -46,13 +46,18 @@ func newEnv() (http.Handler, *auth.TokenManager) {
 	r.Group(func(r chi.Router) {
 		r.Use(auth.RequireAuth(tm))
 		r.Get("/leaderboard", h.GetLeaderboard)
+		r.Get("/leaderboard/me", h.GetMyStanding)
 	})
 	return r, tm
 }
 
 func get(t *testing.T, router http.Handler, token string) *httptest.ResponseRecorder {
+	return getPath(t, router, "/leaderboard", token)
+}
+
+func getPath(t *testing.T, router http.Handler, path string, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/leaderboard", nil)
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -115,4 +120,39 @@ func TestLeaderboard_ResponseHidesForbiddenFields(t *testing.T) {
 	// The hashed secret value itself must never appear.
 	assert.NotContains(t, body, "hash1")
 	assert.NotContains(t, body, "alpha@example.com")
+}
+
+func TestLeaderboardMe_ReturnsEnhancedStanding(t *testing.T) {
+	router, tm := newEnv()
+	token, err := tm.Generate("u2", "bull@example.com")
+	require.NoError(t, err)
+
+	rec := getPath(t, router, "/leaderboard/me?timeframe=ALL", token)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Timeframe              leaderboard.Timeframe `json:"timeframe"`
+		Eligible               bool                  `json:"eligible"`
+		Rank                   *int                  `json:"rank"`
+		BestRank               *int                  `json:"best_rank"`
+		ParticipantCount       int                   `json:"participant_count"`
+		TotalParticipants      int                   `json:"total_participants"`
+		Percentile             float64               `json:"percentile"`
+		RankedReturnPercentage float64               `json:"ranked_return_percentage"`
+		RankedIndex            float64               `json:"ranked_index"`
+		Reason                 string                `json:"reason"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Rank)
+	require.NotNil(t, body.BestRank)
+	assert.Equal(t, leaderboard.TimeframeAll, body.Timeframe)
+	assert.True(t, body.Eligible)
+	assert.Equal(t, 2, *body.Rank)
+	assert.Equal(t, 2, *body.BestRank)
+	assert.Equal(t, 2, body.ParticipantCount)
+	assert.Equal(t, 2, body.TotalParticipants)
+	assert.InDelta(t, 50.0, body.Percentile, 0.01)
+	assert.InDelta(t, 8.1, body.RankedReturnPercentage, 0.001)
+	assert.InDelta(t, 108.1, body.RankedIndex, 0.001)
+	assert.Empty(t, body.Reason)
 }
