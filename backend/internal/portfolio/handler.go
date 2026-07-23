@@ -63,6 +63,7 @@ type positionView struct {
 	Quantity      float64 `json:"quantity"`
 	BaselinePrice float64 `json:"baseline_price"`
 	Currency      string  `json:"currency"`
+	Status        string  `json:"status"`
 }
 
 // positionRequest is the create payload: no price, no currency — the baseline
@@ -87,6 +88,7 @@ func toPositionView(p *Position) positionView {
 		Quantity:      p.Quantity,
 		BaselinePrice: p.AverageBuyPrice,
 		Currency:      p.Currency,
+		Status:        positionStatus(p),
 	}
 }
 
@@ -155,6 +157,20 @@ func (h *Handler) ListPositions(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, views)
 }
 
+// ListClosedPositions handles GET /portfolio/positions/closed.
+func (h *Handler) ListClosedPositions(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userID(w, r)
+	if !ok {
+		return
+	}
+	positions, err := h.svc.ListClosedPositions(r.Context(), userID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, positions)
+}
+
 // UpdatePosition handles PUT /portfolio/positions/{positionId}.
 func (h *Handler) UpdatePosition(w http.ResponseWriter, r *http.Request) {
 	userID, ok := userID(w, r)
@@ -175,6 +191,22 @@ func (h *Handler) UpdatePosition(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, toPositionView(pos))
 }
 
+// ClosePosition handles POST /portfolio/positions/{positionId}/close.
+func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userID(w, r)
+	if !ok {
+		return
+	}
+	positionID := chi.URLParam(r, "positionId")
+	closed, err := h.svc.ClosePosition(r.Context(), userID, positionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	h.evaluatePortfolio(r.Context(), userID)
+	httpx.WriteJSON(w, http.StatusOK, closed)
+}
+
 // DeletePosition handles DELETE /portfolio/positions/{positionId}.
 func (h *Handler) DeletePosition(w http.ResponseWriter, r *http.Request) {
 	userID, ok := userID(w, r)
@@ -182,10 +214,11 @@ func (h *Handler) DeletePosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	positionID := chi.URLParam(r, "positionId")
-	if err := h.svc.DeletePosition(userID, positionID); err != nil {
+	if err := h.svc.DeletePosition(r.Context(), userID, positionID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
+	h.evaluatePortfolio(r.Context(), userID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -203,6 +236,20 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 	// Viewing the summary may unlock green_portfolio / index_110.
 	h.evaluatePortfolio(r.Context(), uid)
 	httpx.WriteJSON(w, http.StatusOK, summary)
+}
+
+// Archives handles GET /portfolio/archives?timeframe=1M.
+func (h *Handler) Archives(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userID(w, r)
+	if !ok {
+		return
+	}
+	archives, err := h.svc.Archives(r.Context(), uid, r.URL.Query().Get("timeframe"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, archives)
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -229,6 +276,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrPositionNotFound):
 		httpx.WriteError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrPositionClosed):
+		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrPriceProvider):
 		httpx.WriteError(w, http.StatusBadGateway, "could not fetch prices from provider")
 	default:

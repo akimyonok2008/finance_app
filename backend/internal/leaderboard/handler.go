@@ -45,6 +45,7 @@ type standingView struct {
 	Percentile             float64        `json:"percentile"`
 	RankedReturnPercentage float64        `json:"ranked_return_percentage"`
 	RankedIndex            float64        `json:"ranked_index"`
+	Paused                 bool           `json:"paused"`
 	NextMilestone          *milestoneView `json:"next_milestone"`
 	Reason                 string         `json:"reason"`
 }
@@ -81,6 +82,7 @@ func (h *Handler) GetMyStanding(w http.ResponseWriter, r *http.Request) {
 		Percentile:             st.Percentile,
 		RankedReturnPercentage: st.RankedReturnPercentage,
 		RankedIndex:            st.RankedIndex,
+		Paused:                 st.Paused,
 		Reason:                 st.Reason,
 	}
 	if st.Ranked {

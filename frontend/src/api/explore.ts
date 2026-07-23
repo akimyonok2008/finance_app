@@ -168,7 +168,7 @@ export async function getExploreProfiles(
         ? raw.timeframe
         : params.timeframe ?? "ALL",
     timeframe_fallback: booleanValue(raw.timeframe_fallback) ?? false,
-    featured: featured.length > 0 ? featured : topPerformers.slice(0, 3),
+    featured,
     similar,
     top_performers: topPerformers,
     trending_holdings: Array.isArray(raw.trending_holdings)

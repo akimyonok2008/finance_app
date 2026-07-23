@@ -1,0 +1,169 @@
+package benchmark
+
+import (
+	"context"
+	"math"
+	"testing"
+	"time"
+)
+
+func mustTime(s string) time.Time {
+	t, err := time.Parse(dateLayout, s)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+func newTestEngine(returns map[string]float64) *BenchmarkConstructionService {
+	return NewBenchmarkConstructionService(
+		NewMockHistoricalPriceProvider(returns),
+		Recipes,
+		NewSnapshotRecipeResolver(DefaultRecipeSnapshots()),
+	)
+}
+
+func TestSingleSymbolRecipeReturn(t *testing.T) {
+	engine := newTestEngine(map[string]float64{"VOO": 4.5})
+	start := mustTime("2026-01-01")
+	end := mustTime("2026-03-31")
+
+	got, err := engine.CalculateReturnPct(context.Background(), "VOO", start, end)
+	if err != nil {
+		t.Fatalf("CalculateReturnPct: %v", err)
+	}
+	// A smooth linear path from 100 to 104.5, daily rebalanced (single asset),
+	// reproduces ~4.5% within rounding tolerance.
+	if math.Abs(got-4.5) > 0.05 {
+		t.Errorf("expected ~4.5%%, got %.4f", got)
+	}
+}
+
+func TestTwoAssetRecipeReturnBetweenComponents(t *testing.T) {
+	engine := newTestEngine(map[string]float64{"SPY": 10, "BND": 0})
+	start := mustTime("2026-01-01")
+	end := mustTime("2026-04-01")
+
+	got, err := engine.CalculateReturnPct(context.Background(), "BALANCED_60_40", start, end)
+	if err != nil {
+		t.Fatalf("CalculateReturnPct: %v", err)
+	}
+	// 60% at +10% and 40% at 0% should land between 0 and 10, near 6.
+	if got <= 0 || got >= 10 {
+		t.Errorf("expected return between 0 and 10, got %.4f", got)
+	}
+}
+
+func TestNestedRecipeFlattening(t *testing.T) {
+	engine := newTestEngine(DefaultMockReturns())
+	recipe := Recipes["ALL_WEATHER"]
+	flattened, err := engine.flattenRecipe(context.Background(), recipe, mustTime("2026-06-01"), 1)
+	if err != nil {
+		t.Fatalf("flattenRecipe: %v", err)
+	}
+	if err := validateWeights(flattened); err != nil {
+		t.Fatalf("flattened weights invalid: %v", err)
+	}
+	// GLD appears directly (0.15) and inside CMDTY (0.075 * 0.25 = 0.01875).
+	var gld float64
+	seen := map[string]bool{}
+	for _, c := range flattened {
+		if seen[c.Symbol] {
+			t.Fatalf("duplicate symbol after merge: %s", c.Symbol)
+		}
+		seen[c.Symbol] = true
+		if c.Symbol == "GLD" {
+			gld = c.Weight
+		}
+	}
+	if math.Abs(gld-(0.15+0.075*0.25)) > 1e-9 {
+		t.Errorf("expected merged GLD weight %.6f, got %.6f", 0.15+0.075*0.25, gld)
+	}
+}
+
+func TestDynamicRecipeResolved(t *testing.T) {
+	engine := newTestEngine(DefaultMockReturns())
+	got, err := engine.CalculateReturnPct(context.Background(), "BUFFETT_13F",
+		mustTime("2026-01-01"), mustTime("2026-06-30"))
+	if err != nil {
+		t.Fatalf("dynamic recipe should resolve: %v", err)
+	}
+	if got == 0 {
+		t.Errorf("expected non-zero return for resolved 13F basket")
+	}
+}
+
+func TestDynamicRecipeWithoutResolverErrors(t *testing.T) {
+	engine := NewBenchmarkConstructionService(
+		NewMockHistoricalPriceProvider(DefaultMockReturns()), Recipes, nil,
+	)
+	_, err := engine.CalculateReturnPct(context.Background(), "BUFFETT_13F",
+		mustTime("2026-01-01"), mustTime("2026-06-30"))
+	if err == nil {
+		t.Fatalf("expected error for dynamic recipe with no resolver")
+	}
+}
+
+func TestUnknownRecipeErrors(t *testing.T) {
+	engine := newTestEngine(DefaultMockReturns())
+	_, err := engine.CalculateReturnPct(context.Background(), "NOPE",
+		mustTime("2026-01-01"), mustTime("2026-02-01"))
+	if err == nil {
+		t.Fatalf("expected error for unknown recipe")
+	}
+}
+
+func TestAllCatalogRecipesResolveAndScore(t *testing.T) {
+	engine := newTestEngine(DefaultMockReturns())
+	start := mustTime("2026-01-01")
+	end := mustTime("2026-12-31")
+	for id := range Recipes {
+		if _, err := engine.CalculateReturnPct(context.Background(), id, start, end); err != nil {
+			t.Errorf("recipe %s failed to score: %v", id, err)
+		}
+	}
+}
+
+func TestSubtractPeriod(t *testing.T) {
+	end := mustTime("2026-07-22")
+	cases := map[PeriodCode]string{
+		Period30D: "2026-06-22",
+		Period90D: "2026-04-23",
+		Period6M:  "2026-01-22",
+		Period1Y:  "2025-07-22",
+	}
+	for period, want := range cases {
+		got, err := SubtractPeriod(end, period)
+		if err != nil {
+			t.Fatalf("SubtractPeriod(%s): %v", period, err)
+		}
+		if toDateKey(got) != want {
+			t.Errorf("SubtractPeriod(%s) = %s, want %s", period, toDateKey(got), want)
+		}
+	}
+}
+
+func TestCalculateIndexReturnPct(t *testing.T) {
+	points := []IndexPoint{
+		{Date: "2026-01-01", Index: 100},
+		{Date: "2026-02-01", Index: 107},
+	}
+	got, err := CalculateIndexReturnPct(points)
+	if err != nil {
+		t.Fatalf("CalculateIndexReturnPct: %v", err)
+	}
+	if got != 7 {
+		t.Errorf("expected 7, got %.4f", got)
+	}
+}
+
+func TestValidateWeightsCatalog(t *testing.T) {
+	for id, recipe := range Recipes {
+		if recipe.Dynamic {
+			continue
+		}
+		if err := validateWeights(recipe.Components); err != nil {
+			t.Errorf("recipe %s has invalid weights: %v", id, err)
+		}
+	}
+}

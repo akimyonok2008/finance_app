@@ -106,3 +106,20 @@ func TestCopyRejectsSelfCopyAndInvalidWeights(t *testing.T) {
 	_, err = svc.CopyPreview(context.Background(), "caller", "missing")
 	assert.True(t, errors.Is(err, ErrNotFound))
 }
+
+func TestCompareProfileUsesPublicWeights(t *testing.T) {
+	svc, pf := copyTestService()
+	ctx := context.Background()
+	_, err := pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "NVDA", AssetType: "stock", Quantity: 1})
+	require.NoError(t, err)
+	_, err = pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	require.NoError(t, err)
+
+	resp, err := svc.CompareProfile(ctx, "caller", "alpha_wolf")
+	require.NoError(t, err)
+	assert.Equal(t, "alpha_wolf", resp.TargetProfile.Handle)
+	assert.Contains(t, resp.SharedSymbols, "NVDA")
+	assert.Greater(t, resp.OverlapScore, 0.0)
+	assert.NotEmpty(t, resp.WeightDifferences)
+	assert.Equal(t, "This is educational comparison, not investment advice.", resp.Disclaimer)
+}

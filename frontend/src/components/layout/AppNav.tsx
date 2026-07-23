@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   LogOut,
   Medal,
+  Trophy,
   WalletCards,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -21,6 +22,7 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/leaderboard", label: "Leaderboard", icon: Medal },
+  { to: "/achievements", label: "Achievements", icon: Trophy },
   { to: "/portfolio", label: "Portfolio", icon: WalletCards },
   { to: "/explore", label: "Explore", icon: Compass },
   { to: "/profile", label: "Profile", icon: CircleUserRound },

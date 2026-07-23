@@ -117,9 +117,13 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
   }
 
   return (
-    <Card className={cn("sticky top-6")}>
+    <Card
+      className={cn(
+        "sticky top-6 overflow-hidden border-cyan-300/15 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.075),transparent_38%),rgba(24,24,27,0.55)] shadow-xl shadow-black/15",
+      )}
+    >
       <CardHeader>
-        <CardTitle>Add Position</CardTitle>
+        <CardTitle className="portfolio-display text-xl">Add Position</CardTitle>
         <CardDescription>
           Add a holding to track.
         </CardDescription>

@@ -38,9 +38,9 @@ export function DeletePositionDialog({ position, open, onOpenChange }: Props) {
         <AlertDialogHeader>
           <AlertDialogTitle>Delete position?</AlertDialogTitle>
           <AlertDialogDescription>
-            This removes
-            {position ? ` ${position.symbol}` : " the position"} from your
-            portfolio. This action cannot be undone.
+            This removes {position ? ` ${position.symbol}` : " the position"} as
+            mistake cleanup only. It does not mark the asset as sold and cannot
+            be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

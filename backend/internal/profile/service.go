@@ -10,6 +10,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/dna"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -45,6 +46,25 @@ type TimeframeRankProvider interface {
 	UserRankings(ctx context.Context, timeframe string) ([]TimeframeRanking, error)
 }
 
+type PerformanceHistoryProvider interface {
+	Archives(ctx context.Context, userID, timeframe string) (*portfolio.PortfolioArchives, error)
+}
+
+// RankedPerformance is the persistent ranked standing surfaced on public
+// profiles. It is privacy-safe: index and return percentage only.
+type RankedPerformance struct {
+	RankedIndex            float64
+	RankedReturnPercentage float64
+	Paused                 bool
+}
+
+// RankedPerformanceProvider supplies a user's persistent ranked performance so
+// public profiles show the trusted ranked index rather than a mutable
+// current-basket figure. Optional; when unset the summary index is used.
+type RankedPerformanceProvider interface {
+	CurrentRankedPerformance(ctx context.Context, userID string) (RankedPerformance, error)
+}
+
 type Service struct {
 	repo           Repository
 	users          UserProvider
@@ -53,14 +73,22 @@ type Service struct {
 	sprintRanks    SprintRankProvider
 	globalRanks    GlobalRankProvider
 	timeframeRanks TimeframeRankProvider
+	history        PerformanceHistoryProvider
+	ranked         RankedPerformanceProvider
+	dna            *dna.Service
 	now            func() time.Time
 }
+
+// SetRankedPerformanceProvider attaches the ranked-performance source used for
+// public profile performance.
+func (s *Service) SetRankedPerformanceProvider(p RankedPerformanceProvider) { s.ranked = p }
 
 func NewService(repo Repository, users UserProvider, summaries SummaryProvider) *Service {
 	return &Service{
 		repo:      repo,
 		users:     users,
 		summaries: summaries,
+		dna:       dna.NewService(),
 		now:       func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -113,6 +141,10 @@ func (s *Service) SetGlobalRankProvider(provider GlobalRankProvider) {
 
 func (s *Service) SetTimeframeRankProvider(provider TimeframeRankProvider) {
 	s.timeframeRanks = provider
+}
+
+func (s *Service) SetPerformanceHistoryProvider(provider PerformanceHistoryProvider) {
+	s.history = provider
 }
 
 func (s *Service) GetMe(ctx context.Context, userID string) (OwnerProfile, error) {

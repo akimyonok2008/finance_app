@@ -237,7 +237,7 @@ func TestDeletePosition_OwnSucceeds(t *testing.T) {
 	pos, err := svc.AddPosition(ctx(), "user-1", validInput())
 	require.NoError(t, err)
 
-	require.NoError(t, svc.DeletePosition("user-1", pos.ID))
+	require.NoError(t, svc.DeletePosition(ctx(), "user-1", pos.ID))
 	list, _ := svc.ListPositions("user-1")
 	assert.Empty(t, list)
 }
@@ -247,7 +247,7 @@ func TestDeletePosition_OtherUsersFails(t *testing.T) {
 	pos, err := svc.AddPosition(ctx(), "user-1", validInput())
 	require.NoError(t, err)
 
-	err = svc.DeletePosition("user-2", pos.ID)
+	err = svc.DeletePosition(ctx(), "user-2", pos.ID)
 	assert.ErrorIs(t, err, ErrPositionNotFound)
 }
 

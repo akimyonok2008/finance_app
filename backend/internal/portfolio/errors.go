@@ -23,6 +23,9 @@ var (
 	// belong to the requesting user. The same error is used for both cases so
 	// the API never reveals the existence of another user's positions.
 	ErrPositionNotFound = errors.New("position not found")
+	// ErrPositionClosed is returned when an action requires an open position but
+	// the position has already been closed.
+	ErrPositionClosed = errors.New("position is already closed")
 	// ErrPortfolioNotFound is an internal repository signal that a user has no
 	// portfolio yet; the service responds by creating the default portfolio.
 	ErrPortfolioNotFound = errors.New("portfolio not found")

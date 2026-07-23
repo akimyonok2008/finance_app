@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ardakimyonok/finance_app/internal/benchmark"
 	"github.com/ardakimyonok/finance_app/internal/db"
 )
 
@@ -36,74 +38,37 @@ func seedPGUser(t *testing.T, pool *pgxpool.Pool) string {
 	return id
 }
 
-func TestPostgresAchievementRepository_SeedsAndLists(t *testing.T) {
-	ctx := context.Background()
-	repo, err := NewPostgresAchievementRepository(ctx, testPool(t))
-	require.NoError(t, err)
-
-	list, err := repo.ListAchievements(ctx)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(list), 5)
-
-	byKey := map[string]bool{}
-	for _, a := range list {
-		byKey[a.Key] = true
-	}
-	for _, k := range []string{KeyFirstPortfolio, KeyFirstSprint, KeyGreenPortfolio, KeyIndex110, KeyTop10Sprint} {
-		assert.Truef(t, byKey[k], "catalogue must contain %s", k)
-	}
-}
-
-func TestPostgresAchievementRepository_SeedingIsIdempotent(t *testing.T) {
-	ctx := context.Background()
-	pool := testPool(t)
-	_, err := NewPostgresAchievementRepository(ctx, pool)
-	require.NoError(t, err)
-	repo, err := NewPostgresAchievementRepository(ctx, pool) // second construction
-	require.NoError(t, err)
-
-	list, err := repo.ListAchievements(ctx)
-	require.NoError(t, err)
-	keys := map[string]int{}
-	for _, a := range list {
-		keys[a.Key]++
-	}
-	for k, n := range keys {
-		assert.Equalf(t, 1, n, "achievement %s must not be duplicated by re-seeding", k)
-	}
-}
-
-func TestPostgresAchievementRepository_UnlockIdempotentAndListable(t *testing.T) {
+func TestPostgresAchievementRepository_AwardAndList(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
 	repo, err := NewPostgresAchievementRepository(ctx, pool)
 	require.NoError(t, err)
+
 	userID := seedPGUser(t, pool)
+	award := AwardedAchievement{
+		UserID:     userID,
+		BadgeKey:   "bogle_badge_90d",
+		UnlockedAt: time.Now().UTC().Truncate(time.Second),
+		Evidence: benchmark.AchievementEvidence{
+			Period:             benchmark.Period90D,
+			StartDate:          "2026-04-23",
+			EndDate:            "2026-07-22",
+			PortfolioReturnPct: 7,
+			BenchmarkReturnPct: 4.5,
+			EdgePoints:         2.5,
+			BenchmarkRecipeID:  "VOO",
+		},
+	}
+	require.NoError(t, repo.Award(ctx, award))
+	// Idempotent second award keeps the first record.
+	require.NoError(t, repo.Award(ctx, award))
 
-	ach, err := repo.GetAchievementByKey(ctx, KeyFirstPortfolio)
+	awarded, err := repo.ListAwarded(ctx, userID)
 	require.NoError(t, err)
+	require.Len(t, awarded, 1)
 
-	has, err := repo.HasAchievement(ctx, userID, ach.ID)
-	require.NoError(t, err)
-	assert.False(t, has)
-
-	require.NoError(t, repo.UnlockAchievement(ctx, userID, ach.ID))
-	require.NoError(t, repo.UnlockAchievement(ctx, userID, ach.ID)) // idempotent
-
-	has, err = repo.HasAchievement(ctx, userID, ach.ID)
-	require.NoError(t, err)
-	assert.True(t, has)
-
-	list, err := repo.ListUserAchievements(ctx, userID)
-	require.NoError(t, err)
-	require.Len(t, list, 1)
-	assert.Equal(t, ach.ID, list[0].AchievementID)
-}
-
-func TestPostgresAchievementRepository_GetByMissingKey(t *testing.T) {
-	ctx := context.Background()
-	repo, err := NewPostgresAchievementRepository(ctx, testPool(t))
-	require.NoError(t, err)
-	_, err = repo.GetAchievementByKey(ctx, "nope_"+uuid.NewString())
-	assert.ErrorIs(t, err, ErrAchievementNotFound)
+	got, ok := awarded["bogle_badge_90d"]
+	require.True(t, ok)
+	assert.Equal(t, 2.5, got.Evidence.EdgePoints)
+	assert.Equal(t, "VOO", got.Evidence.BenchmarkRecipeID)
 }

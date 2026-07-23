@@ -26,7 +26,7 @@ const (
 const (
 	defaultExploreLimit = 20
 	maxExploreLimit     = 50
-	featuredCount       = 3
+	featuredCount       = 5
 	maxSimilar          = 5
 	maxTrendingHoldings = 12
 	trendingTopN        = 10

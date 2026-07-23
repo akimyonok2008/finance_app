@@ -1,119 +1,49 @@
-# Finance App
+# Alarvest
 
-A privacy-first, gamified real-portfolio tracker. Users enter real holdings,
-track percentage performance, create a locked strategy baseline, earn
-achievements, compare ranked performance, and review public portfolio
-composition without exposing wealth or position quantities.
+Alarvest is a full-stack portfolio strategy tracker. Users manually enter
+holdings, follow percentage performance, compare privacy-filtered public
+strategies, earn benchmark badges, and connect with other users. It is a
+tracking and education product: it does not connect to a broker or place
+trades.
 
-The product direction is "Strava or Duolingo for investing," not a paper
-trading simulator.
+## Current product
 
-## Current Status
+- Email/password authentication and optional Google Identity Services login
+- One owner-only portfolio per user, with active positions, quantity edits,
+  close history, archive snapshots, and base-currency summaries
+- Persistent ranked-performance state designed to neutralize the effect of
+  adding, resizing, closing, deleting, or copying positions
+- Global `ALL` and snapshot-backed `1W`, `1M`, `3M`, `6M`, and `1Y`
+  leaderboards
+- Twenty permanent benchmark achievements and a seven-dimension Portfolio DNA
+  profile
+- Opt-in public profiles, public allocation weights, Explore discovery,
+  following, mutual-follower friendships, and one-to-one messages
+- Compare and copy-weight templates that never execute trades
+- In-memory or PostgreSQL storage, optional Redis leaderboard caching, mock
+  prices by default, and optional Twelve Data quotes
+- Responsive React interface for Dashboard, Portfolio, Leaderboard,
+  Achievements, Explore, Friends/Messages, and Profiles
 
-The repository contains a working full-stack app intended for personal use.
-This configuration is intended for personal use, not public launch.
+## Architecture
 
-- React + TypeScript frontend with registration, login, a central dashboard
-  hub, responsive portfolio management with symbol autocomplete and quote
-  freshness badges, unified strategy leaderboard, an Explore hub for strategies,
-  friends, and private messages, profiles, public-weight copy templates, and
-  Portfolio Coach comparisons.
-- Go REST API with JWT authentication, email/password auth, optional Google
-  provider sign-in, portfolio calculations, strategy
-  baselines, snapshot-backed timeframe leaderboards, personal standing,
-  achievements, public profiles, mutual-only DMs, optional Twelve Data market
-  data for USA stocks/ETFs, cached quotes, instrument search, and
-  privacy-filtered Top 10 portfolio comparisons.
-- Optional PostgreSQL persistence and Redis caching. For personal use,
-  `STORAGE_PROVIDER=postgres` is recommended so accounts, positions, profiles,
-  instruments, quotes, OAuth identities, social state, and messages survive
-  restarts.
-- Deterministic mock price and FX providers for local development and tests.
-- Prototype 3A real market data is optional and disabled by default. Set
-  `ENABLE_REAL_MARKET_DATA=true`, `PRICE_PROVIDER=twelvedata`, and
-  `TWELVE_DATA_API_KEY` to use Twelve Data conservatively.
+```text
+frontend/  React 19, TypeScript, Vite, TanStack Query, Tailwind
+backend/   Go 1.26 REST API, chi, JWT, pgx, optional Redis
+```
 
-## Prototype 3 Handoff
+The browser calls only the Go API. Provider keys remain on the backend.
+PostgreSQL migrations run automatically when PostgreSQL storage is selected.
 
-Prototype 3 closes with these implemented workstreams:
+## Run locally
 
-- **Real portfolio core**: authenticated manual position entry, immutable
-  baseline prices, quantity-only edits, FX-normalized owner summaries, and
-  owner-only Dashboard/Portfolio views.
-- **Market data foundation**: backend-owned instrument search and quotes,
-  local seeded instruments for mock mode, Twelve Data stock/ETF search and quote
-  support behind server-side caching/rate limits, quote freshness metadata, and
-  no frontend provider keys.
-- **Ranked strategy layer**: global leaderboard with timeframes, personal
-  standing DTO, public profile enrichment, achievements, and public-safe
-  strategy weight display.
-- **Explore/social MVP**: public profile discovery, following/followers/friends,
-  mutual-only one-to-one DMs, and no public feed or unauthenticated social data.
-- **Portfolio Coach and copy flows**: private coach analysis, public Top 10 and
-  profile comparison, copy-preview, and copy-from-public-weights into a fresh
-  local baseline. No trades are executed.
-- **Authentication**: email/password remains the default; Google Identity
-  Services can be enabled with matching frontend/backend client IDs. Apple is
-  not part of the active Prototype 3 product surface.
-
-Key files for the next developer:
-
-- Backend wiring: `backend/cmd/api/main.go`,
-  `backend/internal/server/router.go`, `backend/internal/config/config.go`
-- Market data: `backend/internal/marketdata/`,
-  `frontend/src/components/portfolio/SymbolAutocomplete.tsx`,
-  `frontend/src/components/portfolio/QuoteFreshnessBadge.tsx`
-- Leaderboard/personal standing: `backend/internal/leaderboard/`,
-  `frontend/src/components/leaderboard/YourStandingCard.tsx`
-- Profiles, Explore, social, DMs: `backend/internal/profile/`,
-  `backend/internal/social/`, `frontend/src/pages/Explore/`
-- Portfolio Coach and copy flows: `backend/internal/coach/`,
-  `backend/internal/strategy/`, `frontend/src/pages/PortfolioPage.tsx`
-- Google auth: `backend/internal/auth/`, `frontend/src/pages/auth/`
-
-## Privacy Model
-
-The app separates absolute financial privacy from public composition:
-
-- **Private owner views** such as Dashboard and Portfolio may show the
-  authenticated user's full positions and monetary totals.
-- **Strategy leaderboards** expose only opted-in profile details, rank,
-  percentage return, ranked index, badges, and optional public percentage
-  weights.
-- **Portfolio Coach Top 10 comparisons** may show or use public composition:
-  symbols, asset types, and percentage weights.
-- **Compare/Copy flows** may use public symbols, asset types, and percentage
-  weights only. Copying creates the user's own fresh baseline; it is not trading
-  and never copies quantities or values.
-- **Friends and DMs** are authenticated only. Users can follow public profiles;
-  DMs are available only between mutual followers and show safe profile metadata
-  plus message text.
-
-No public or comparison surface may expose quantities, average buy prices,
-current position prices, portfolio value, cost basis, absolute gain/loss,
-starting value, portfolio/user IDs, emails, or brokerage identifiers.
-
-Public weights describe portfolio allocation percentages only. They must not be
-presented as monetary values or used to infer another user's wealth.
-
-## What This App Is Not
-
-Finance App does not place trades, connect to brokerages, import tax lots,
-handle dividends/corporate actions, provide investment advice, process
-payments, or claim public SaaS readiness. Market data is consumed for a
-personal tracker through the backend only; public redistribution/compliance
-hardening is outside the current scope.
-
-## Run Locally
-
-Start the backend in zero-infrastructure mode:
+Zero-infrastructure development uses in-memory storage and deterministic mock
+market/FX data:
 
 ```bash
 cd backend
 go run ./cmd/api
 ```
-
-In another terminal, start the frontend:
 
 ```bash
 cd frontend
@@ -121,111 +51,115 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`, create an account, and add a supported demo
-position.
+Open `http://localhost:5173`. The API listens on `http://localhost:8080`.
 
-Frontend defaults are documented in `frontend/.env.example`. Mock auth is
-disabled by default and can be explicitly enabled with
-`VITE_ENABLE_MOCK_AUTH=true`; the normal flow uses the Go auth endpoints.
-
-To run with persistent PostgreSQL storage:
+To run the complete local stack:
 
 ```bash
-cd backend
-docker compose up -d
-STORAGE_PROVIDER=postgres \
-DATABASE_URL="postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" \
-go run ./cmd/api
+docker compose up --build
 ```
 
-For persistent real-market-data development, put the values in `backend/.env`
-instead of typing them every time:
+Copy `backend/.env.example` and `frontend/.env.example` to their local `.env`
+files when changing defaults. Durable development normally uses:
 
 ```env
 STORAGE_PROVIDER=postgres
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable
+REDIS_URL=redis://localhost:6379/0
+```
+
+Real Twelve Data quotes are opt-in:
+
+```env
 ENABLE_REAL_MARKET_DATA=true
 PRICE_PROVIDER=twelvedata
-TWELVE_DATA_API_KEY=your_twelve_data_key
-GOOGLE_AUTH_ENABLED=true
-GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+TWELVE_DATA_API_KEY=replace-me
 ```
 
-Use the same Google Web Client ID in `frontend/.env` as
-`VITE_GOOGLE_CLIENT_ID`, and add `http://localhost:5173` as an Authorized
-JavaScript origin in Google Cloud. This Google Identity Services flow does not
-need a redirect URI.
+## Privacy boundary
 
-Then start:
+Dashboard and Portfolio are owner-only and may contain quantities, prices,
+values, cost basis, and absolute gain/loss. Public surfaces use percentage
+performance and opt-in profile data. Public allocation views may expose symbols,
+asset types, percentage weights, exposure aggregates, concentration, DNA, and
+closed-position percentage returns; they do not expose quantities, monetary
+values, buy prices, cost basis, email, or brokerage identifiers.
 
-```bash
-cd backend
-docker compose up -d
-go run ./cmd/api
-```
+Leaderboard cards intentionally omit holdings. Composition is available only
+through an opted-in public profile or Explore. A user must make both their
+profile and weights public to appear in Explore.
 
-## Demo Market Data
+## Performance semantics
 
-Supported mock symbols:
+Two performance models currently coexist:
 
-```text
-AAPL, MSFT, NVDA, SPY, BTC-USD, ETH-USD, THYAO.IS, GARAN.IS, ASELS.IS
-```
+1. **Ranked performance** stores a checkpoint index and a valuation segment.
+   Portfolio mutations checkpoint the live index and start a new segment, so
+   changing capital or composition is intended to have zero immediate effect on
+   ranked return. Empty portfolios are paused and excluded while preserving
+   their index.
+2. **Portfolio summary/archive performance** compares the current basket with
+   its stored position baselines and realized close results. This index is used
+   in owner summaries, archives, public history, and achievement evaluation. It
+   is not account-level time-weighted return and can change when the portfolio
+   is resized.
 
-Supported currencies: `USD`, `TRY`, `EUR`, `GBP`.
+The Dashboard graph is currently a deterministic seven-point presentation
+derived from the current summary index. The Portfolio Archive tab is the UI
+surface that displays stored archive points.
 
-Position prices retain their quote currency while position value, gain/loss,
-return, and the portfolio total are normalized to the user's base currency.
+## Current limitations and blockers
 
-## Known Limitations
+- Manual tracking only: no broker connection, order execution, cash ledger,
+  deposits, dividends, fees, tax lots, splits, or corporate-action accounting.
+- Portfolio writes and ranked checkpoints are separate repository operations,
+  not one database transaction. A rare checkpoint failure after a successful
+  position write can leave them inconsistent.
+- Redis `ALL` leaderboard data is eventually consistent. A paused user can
+  remain in a previously populated cache until it is refreshed or cleared.
+- Window leaderboards require a post-tracking snapshot at or before the cutoff;
+  there is no interpolation.
+- Achievement history uses portfolio archives, and Twelve Data history uses
+  close prices rather than adjusted/total-return data. The Berkshire recipe is
+  a hard-coded filing snapshot. Permanent awards can be produced from mock
+  benchmark data in a mock-configured environment.
+- Weekly competition APIs are implemented, but the active frontend redirects
+  `/sprint` and `/arena` to Leaderboard. Completed sprint results are repriced
+  rather than finalized and persisted.
+- The FX provider is a static development provider for USD, TRY, EUR, and GBP.
+- Google login is optional. Apple authentication code is not routed, and no
+  Apple frontend flow exists.
+- No token refresh/revocation, WebSockets, unread counts, notifications,
+  moderation, message editing/deletion, or public unauthenticated social pages.
+- This repository is a personal-use prototype, not production or regulatory
+  readiness.
 
-- Manual portfolio entry only; there is no brokerage integration.
-- Google sign-in requires a provider client ID configured on both the frontend
-  and backend; password auth stays available.
-- Google OAuth setup is local-origin sensitive: `http://localhost:5173` and
-  `http://127.0.0.1:5173` are different origins. The docs and Vite defaults use
-  `http://localhost:5173`.
-- Local development uses deterministic mock prices and FX rates by default.
-- Twelve Data support is a conservative personal-use/free-tier foundation for
-  USA stocks and ETFs first. It is cached server-side; the frontend never calls
-  Twelve Data directly.
-- The dashboard has no historical portfolio API, so its index path is
-  illustrative and labeled as such.
-- Timeframe leaderboard windows require index snapshots. `ALL` works
-  immediately; `1W`, `1M`, `3M`, `6M`, and `1Y` exclude users until enough
-  snapshot history has accrued.
-- DMs are polling-based and mutual-follow gated; there are no WebSockets,
-  notifications, group chats, attachments, reactions, or moderation tools yet.
-- This is still a personal/local prototype. Public launch requires the blocker
-  work listed below.
+## Legacy, transitional, and planned
 
-## Backup / Restore
-
-For a local personal Postgres database:
-
-```bash
-cd backend
-docker compose up -d
-pg_dump "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" > finance_app_backup.sql
-psql "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" < finance_app_backup.sql
-```
-
-Use a fresh dump before major code or migration experiments.
-
-## Public Launch Blockers
-
-Before any public launch, the app still needs legal/compliance review, market
-data redistribution rights, production secrets management, real monitoring and
-alerting, abuse/moderation controls for social features, account deletion/data
-export workflows, hardened OAuth operations, and a real deployment/security
-review.
+- **Legacy/unreachable:** Arena and sprint frontend components remain in the
+  source tree, but their routes redirect to Leaderboard. Legacy achievement
+  tables remain for migration compatibility; current awards use benchmark
+  achievement storage.
+- **Transitional:** public profile history and achievement evaluation still use
+  the archive index while leaderboard headlines use persistent ranked
+  performance.
+- **Removed:** the Portfolio Coach implementation and UI are not part of the
+  current application.
+- **Not implemented:** brokerage execution, AI advice, Apple login, live FX,
+  finalized competitions, and production-scale social infrastructure.
 
 ## Verification
 
 ```bash
-cd backend && go test ./...
-cd frontend && npm run lint && npm run build
+cd backend
+go test ./...
+go vet ./...
+
+cd ../frontend
+npm install
+npm run lint
+npm run build
 ```
 
-See [backend/README.md](backend/README.md) and
-[frontend/README.md](frontend/README.md) for architecture and feature details.
+See [backend/README.md](backend/README.md) for API and calculation details and
+[frontend/README.md](frontend/README.md) for routes and UI integration.

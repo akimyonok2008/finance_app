@@ -14,12 +14,15 @@ import (
 // TODO: prune points older than the longest supported window (1Y) to bound
 // growth; for the prototype we keep them all.
 type SnapshotStore interface {
-	// Record stores a user's portfolio index at a point in time.
+	// Record stores a user's ranked index at a point in time.
 	Record(ctx context.Context, userID string, index float64, at time.Time) error
-	// IndexAtOrBefore returns the most recent recorded index at or before cutoff.
-	// found=false means there is no history that old (caller falls back to the
-	// since-baseline value).
-	IndexAtOrBefore(ctx context.Context, userID string, cutoff time.Time) (index float64, found bool, err error)
+	// IndexAtOrBefore returns the most recent recorded index at or before cutoff
+	// and at or after notBefore. notBefore is the user's ranking-epoch timestamp:
+	// legacy snapshots recorded before the epoch are ignored so timeframe returns
+	// are never computed against a manipulable pre-epoch index. A zero notBefore
+	// disables the lower bound. found=false means there is no eligible history that
+	// old (the user is excluded from that timeframe rather than mis-ranked).
+	IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (index float64, found bool, err error)
 }
 
 type indexPoint struct {
@@ -48,16 +51,22 @@ func (s *InMemorySnapshotStore) Record(_ context.Context, userID string, index f
 	return nil
 }
 
-func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string, cutoff time.Time) (float64, bool, error) {
+func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string, cutoff, notBefore time.Time) (float64, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	pts := s.byUserID[userID]
 	cutoff = cutoff.UTC()
-	// Walk newest→oldest; first point at/before cutoff wins.
+	notBefore = notBefore.UTC()
+	hasFloor := !notBefore.IsZero()
+	// Walk newest→oldest; first point at/before cutoff (and at/after the epoch) wins.
 	for i := len(pts) - 1; i >= 0; i-- {
-		if !pts[i].at.After(cutoff) {
-			return pts[i].index, true, nil
+		if pts[i].at.After(cutoff) {
+			continue
 		}
+		if hasFloor && pts[i].at.Before(notBefore) {
+			return 0, false, nil // only pre-epoch history remains: ignore it
+		}
+		return pts[i].index, true, nil
 	}
 	return 0, false, nil
 }

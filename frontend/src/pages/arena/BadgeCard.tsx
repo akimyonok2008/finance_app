@@ -8,6 +8,21 @@ import {
 import type { Achievement } from "@/types/arena";
 import { cn } from "@/utils/cn";
 
+function difficultyStyle(difficulty: string): string {
+  switch (difficulty) {
+    case "easy":
+      return "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300";
+    case "medium":
+      return "border-sky-500/25 bg-sky-500/[0.06] text-sky-300";
+    case "hard":
+      return "border-amber-500/25 bg-amber-500/[0.06] text-amber-300";
+    case "elite":
+      return "border-violet-500/25 bg-violet-500/[0.06] text-violet-300";
+    default:
+      return "border-zinc-700 text-zinc-400";
+  }
+}
+
 export function BadgeCard({
   achievement,
   index = 0,
@@ -59,9 +74,31 @@ export function BadgeCard({
               <Sparkles className="h-3.5 w-3.5 text-zinc-600" />
             )}
           </div>
-          <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {achievement.difficulty && (
+              <span
+                className={cn(
+                  "rounded-full border px-1.5 py-0.5 text-[10px] uppercase tracking-wide",
+                  difficultyStyle(achievement.difficulty),
+                )}
+              >
+                {achievement.difficulty}
+              </span>
+            )}
+            {achievement.period && (
+              <span className="rounded-full border border-zinc-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+                {achievement.period}
+              </span>
+            )}
+          </div>
+          <p className="mt-1.5 text-xs leading-relaxed text-zinc-500">
             {achievement.description}
           </p>
+          {achievement.inspiredBy && (
+            <p className="mt-1 text-[11px] italic text-zinc-600">
+              Inspired by {achievement.inspiredBy}
+            </p>
+          )}
         </div>
       </div>
 
@@ -80,9 +117,16 @@ export function BadgeCard({
             style={{ width: `${progress}%` }}
           />
         </div>
-        {achievement.isUnlocked && achievement.unlockedAt && (
-          <div className="mt-2 text-[11px] text-zinc-500">
-            {formatUnlockedDate(achievement.unlockedAt)}
+        {achievement.isUnlocked && (
+          <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+            {achievement.unlockedAt && (
+              <span>{formatUnlockedDate(achievement.unlockedAt)}</span>
+            )}
+            {typeof achievement.edgePoints === "number" && (
+              <span className="font-mono text-emerald-400">
+                +{achievement.edgePoints.toFixed(1)} pts vs benchmark
+              </span>
+            )}
           </div>
         )}
         {!achievement.isUnlocked && (

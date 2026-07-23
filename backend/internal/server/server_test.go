@@ -14,10 +14,12 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/benchmark"
 	"github.com/ardakimyonok/finance_app/internal/clock"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/server"
@@ -35,6 +37,21 @@ type summaryProvider struct{ s *portfolio.Service }
 
 func (p summaryProvider) GetSummary(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error) {
 	return p.s.Summary(ctx, userID)
+}
+
+type rankedPerformanceAdapter struct{ s *performance.Service }
+
+func (a rankedPerformanceAdapter) CurrentRankedPerformance(ctx context.Context, userID string) (leaderboard.RankedPerformance, error) {
+	rp, err := a.s.CurrentRankedPerformance(ctx, userID)
+	if err != nil {
+		return leaderboard.RankedPerformance{}, err
+	}
+	return leaderboard.RankedPerformance{
+		RankedIndex:            rp.RankedIndex,
+		RankedReturnPercentage: rp.RankedReturnPercentage,
+		Paused:                 rp.Status == performance.StatusPaused,
+		TrackingStartedAt:      rp.TrackingStartedAt,
+	}, nil
 }
 
 type positionProvider struct{ s *portfolio.Service }
@@ -57,6 +74,24 @@ func (r rankProvider) GetUserRank(ctx context.Context, competitionID, userID str
 	return r.s.GetUserRank(ctx, competitionID, userID)
 }
 
+type achievementPerformanceProvider struct{ s *portfolio.Service }
+
+func (a achievementPerformanceProvider) GetPortfolioIndexSeries(ctx context.Context, userID string, start, end time.Time) ([]benchmark.IndexPoint, error) {
+	archives, err := a.s.Archives(ctx, userID, portfolio.ArchiveTimeframe1Y)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]benchmark.IndexPoint, 0, len(archives.Points))
+	for _, p := range archives.Points {
+		captured, err := time.Parse(time.RFC3339, p.CapturedAt)
+		if err != nil || captured.Before(start) || captured.After(end) {
+			continue
+		}
+		out = append(out, benchmark.IndexPoint{Date: captured.UTC().Format("2006-01-02"), Index: p.PortfolioIndex})
+	}
+	return out, nil
+}
+
 // newFullServer builds the complete application with in-memory storage,
 // exactly as main.go wires it (minus Postgres/Redis).
 func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler {
@@ -66,18 +101,26 @@ func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler
 	fxp := fx.NewMockFXProvider()
 	priceProvider := prices.NewMockPriceProvider()
 	portfolioSvc := portfolio.NewService(portfolio.NewInMemoryRepository(), priceProvider, fxp)
-	leaderboardSvc := leaderboard.NewService(authSvc, portfolioSvc)
+	performanceSvc := performance.NewService(performance.NewInMemoryRepository())
+	performanceSvc.SetValuator(portfolioSvc)
+	portfolioSvc.SetCheckpointer(performanceSvc)
+	leaderboardSvc := leaderboard.NewService(authSvc, rankedPerformanceAdapter{performanceSvc})
 	competitionsSvc := competitions.NewService(
 		competitions.NewInMemoryCompetitionRepository(),
 		userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxp, clock.RealClock{},
 	)
+	benchmarkEngine := benchmark.NewBenchmarkConstructionService(
+		benchmark.NewMockHistoricalPriceProvider(benchmark.DefaultMockReturns()),
+		benchmark.Recipes,
+		benchmark.NewSnapshotRecipeResolver(benchmark.DefaultRecipeSnapshots()),
+	)
 	achievementsSvc := achievements.NewService(
 		achievements.NewInMemoryAchievementRepository(),
-		positionProvider{portfolioSvc}, summaryProvider{portfolioSvc},
-		rankProvider{competitionsSvc},
+		achievementPerformanceProvider{portfolioSvc},
+		benchmarkEngine,
+		benchmark.NewRulesEngine(benchmark.DefaultEvaluators()),
 	)
-	achievementsSvc.SetCurrentCompetitionProvider(competitionsSvc)
 
 	return server.New(server.Deps{
 		Auth:            authSvc,

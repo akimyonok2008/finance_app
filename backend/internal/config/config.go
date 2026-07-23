@@ -27,8 +27,6 @@ const (
 	defaultTwelveTimeout    = 10
 	defaultBaseCurrency     = "USD"
 	defaultEnableBackground = false
-	defaultAIProvider       = "mock"
-	defaultAITimeoutSecs    = 20
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -58,16 +56,6 @@ type Config struct {
 	QuoteStaleAfter                time.Duration
 	QuoteAllowStaleOnProviderError bool
 
-	// AI Portfolio Coach. Defaults are safe and key-free: the mock provider
-	// runs locally with no external API. A real provider is only used when
-	// AIEnableRealProvider is true AND AIProvider names a non-mock provider.
-	AIProvider           string // "mock" (default); future: "openai", "gemini"
-	AIModel              string
-	AIAPIKey             string
-	AIBaseURL            string
-	AITimeout            time.Duration
-	AIEnableRealProvider bool
-
 	GoogleAuthEnabled bool
 	GoogleClientID    string
 	AppleAuthEnabled  bool
@@ -81,7 +69,7 @@ type Config struct {
 // Load reads configuration from environment variables, falling back to
 // development-friendly defaults when a variable is missing or invalid.
 func Load() Config {
-	loadDotEnvFiles(".env", "backend/.env")
+	loadDotEnvFiles(envFileCandidates()...)
 
 	return Config{
 		AppEnv:          getEnv("APP_ENV", defaultAppEnv),
@@ -109,13 +97,6 @@ func Load() Config {
 		QuoteStaleAfter:                time.Duration(getEnvInt("QUOTE_STALE_AFTER_SECONDS", 900)) * time.Second,
 		QuoteAllowStaleOnProviderError: getEnvBool("QUOTE_ALLOW_STALE_ON_PROVIDER_ERROR", true),
 
-		AIProvider:           getEnv("AI_PROVIDER", defaultAIProvider),
-		AIModel:              getEnv("AI_MODEL", ""),
-		AIAPIKey:             getEnv("AI_API_KEY", ""),
-		AIBaseURL:            getEnv("AI_BASE_URL", ""),
-		AITimeout:            time.Duration(getEnvInt("AI_TIMEOUT_SECONDS", defaultAITimeoutSecs)) * time.Second,
-		AIEnableRealProvider: getEnvBool("AI_ENABLE_REAL_PROVIDER", false),
-
 		GoogleAuthEnabled: getEnvBool("GOOGLE_AUTH_ENABLED", false),
 		GoogleClientID:    getEnv("GOOGLE_CLIENT_ID", ""),
 		AppleAuthEnabled:  getEnvBool("APPLE_AUTH_ENABLED", false),
@@ -125,6 +106,18 @@ func Load() Config {
 		ApplePrivateKey:   getEnv("APPLE_PRIVATE_KEY", ""),
 		AppleRedirectURI:  getEnv("APPLE_REDIRECT_URI", ""),
 	}
+}
+
+func envFileCandidates() []string {
+	paths := []string{}
+	if custom := strings.TrimSpace(os.Getenv("FINANCE_APP_ENV_FILE")); custom != "" {
+		paths = append(paths, custom)
+	}
+	return append(paths,
+		".env",         // cd backend && go run ./cmd/api
+		"../.env",      // cd backend with shared root config
+		"backend/.env", // go run ./backend/cmd/api from repo root
+	)
 }
 
 // UsingDefaultSecret reports whether the insecure development secret is in use,

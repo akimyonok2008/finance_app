@@ -1,5 +1,3 @@
-import { LockKeyhole } from "lucide-react";
-
 import type { PublicWeight } from "@/types/profile";
 
 export function PublicWeightsCard({ weights }: { weights: PublicWeight[] }) {
@@ -26,10 +24,6 @@ export function PublicWeightsCard({ weights }: { weights: PublicWeight[] }) {
           ))}
         </div>
       )}
-      <div className="mt-4 flex items-start gap-2 border-t border-zinc-800 pt-4 text-[11px] leading-5 text-zinc-500">
-        <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        Weights are public. Quantities, values, cost basis, and buy prices are private.
-      </div>
     </section>
   );
 }

@@ -2,114 +2,73 @@ package achievements
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ardakimyonok/finance_app/internal/benchmark"
 )
 
 // PostgresAchievementRepository is the durable implementation of
-// AchievementRepository. The badge catalogue is seeded idempotently on
-// construction (ON CONFLICT key DO NOTHING), so restarts never duplicate it.
+// AchievementRepository. Badge definitions live in code (benchmark.Badges); this
+// table stores only per-user unlocks and their evidence.
 type PostgresAchievementRepository struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgresAchievementRepository wires the repository and seeds the catalogue.
-func NewPostgresAchievementRepository(ctx context.Context, pool *pgxpool.Pool) (*PostgresAchievementRepository, error) {
-	r := &PostgresAchievementRepository{pool: pool}
-	for _, a := range seedDefinitions(time.Now().UTC()) {
-		_, err := pool.Exec(ctx,
-			`INSERT INTO achievements (id, key, name, description, icon_key)
-			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (key) DO NOTHING`,
-			uuid.NewString(), a.Key, a.Name, a.Description, a.IconKey,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("achievement repository: seed %s: %w", a.Key, err)
-		}
-	}
-	return r, nil
+// NewPostgresAchievementRepository wires the repository. Definitions are not
+// seeded — the catalogue is code-defined.
+func NewPostgresAchievementRepository(_ context.Context, pool *pgxpool.Pool) (*PostgresAchievementRepository, error) {
+	return &PostgresAchievementRepository{pool: pool}, nil
 }
 
-func (r *PostgresAchievementRepository) ListAchievements(ctx context.Context) ([]Achievement, error) {
+func (r *PostgresAchievementRepository) ListAwarded(ctx context.Context, userID string) (map[string]AwardedAchievement, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, key, name, description, icon_key, created_at FROM achievements ORDER BY created_at, key`)
+		`SELECT user_id, badge_key, unlocked_at, evidence
+		 FROM user_benchmark_achievements
+		 WHERE user_id = $1`, userID)
 	if err != nil {
-		return nil, fmt.Errorf("achievement repository: list: %w", err)
+		return nil, fmt.Errorf("achievement repository: list awarded: %w", err)
 	}
 	defer rows.Close()
 
-	var out []Achievement
+	out := make(map[string]AwardedAchievement)
 	for rows.Next() {
-		var a Achievement
-		if err := rows.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.IconKey, &a.CreatedAt); err != nil {
-			return nil, fmt.Errorf("achievement repository: scan: %w", err)
+		var (
+			a           AwardedAchievement
+			evidenceRaw []byte
+		)
+		if err := rows.Scan(&a.UserID, &a.BadgeKey, &a.UnlockedAt, &evidenceRaw); err != nil {
+			return nil, fmt.Errorf("achievement repository: scan awarded: %w", err)
 		}
-		out = append(out, a)
+		if len(evidenceRaw) > 0 {
+			var ev benchmark.AchievementEvidence
+			if err := json.Unmarshal(evidenceRaw, &ev); err != nil {
+				return nil, fmt.Errorf("achievement repository: decode evidence: %w", err)
+			}
+			a.Evidence = ev
+		}
+		out[a.BadgeKey] = a
 	}
 	return out, rows.Err()
 }
 
-func (r *PostgresAchievementRepository) GetAchievementByKey(ctx context.Context, key string) (*Achievement, error) {
-	var a Achievement
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, key, name, description, icon_key, created_at FROM achievements WHERE key = $1`, key,
-	).Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.IconKey, &a.CreatedAt)
+// Award is idempotent via ON CONFLICT DO NOTHING, preserving the original unlock
+// time and evidence.
+func (r *PostgresAchievementRepository) Award(ctx context.Context, a AwardedAchievement) error {
+	evidenceRaw, err := json.Marshal(a.Evidence)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrAchievementNotFound
-		}
-		return nil, fmt.Errorf("achievement repository: get by key: %w", err)
+		return fmt.Errorf("achievement repository: encode evidence: %w", err)
 	}
-	return &a, nil
-}
-
-// UnlockAchievement is idempotent via ON CONFLICT DO NOTHING, preserving the
-// original unlock time.
-func (r *PostgresAchievementRepository) UnlockAchievement(ctx context.Context, userID, achievementID string) error {
-	_, err := r.pool.Exec(ctx,
-		`INSERT INTO user_achievements (user_id, achievement_id)
-		 VALUES ($1, $2)
-		 ON CONFLICT (user_id, achievement_id) DO NOTHING`,
-		userID, achievementID,
+	_, err = r.pool.Exec(ctx,
+		`INSERT INTO user_benchmark_achievements (user_id, badge_key, unlocked_at, evidence)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (user_id, badge_key) DO NOTHING`,
+		a.UserID, a.BadgeKey, a.UnlockedAt, evidenceRaw,
 	)
 	if err != nil {
-		return fmt.Errorf("achievement repository: unlock: %w", err)
+		return fmt.Errorf("achievement repository: award: %w", err)
 	}
 	return nil
-}
-
-func (r *PostgresAchievementRepository) HasAchievement(ctx context.Context, userID, achievementID string) (bool, error) {
-	var exists bool
-	err := r.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = $2)`,
-		userID, achievementID,
-	).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("achievement repository: has: %w", err)
-	}
-	return exists, nil
-}
-
-func (r *PostgresAchievementRepository) ListUserAchievements(ctx context.Context, userID string) ([]UserAchievement, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT user_id, achievement_id, unlocked_at FROM user_achievements WHERE user_id = $1`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("achievement repository: list user achievements: %w", err)
-	}
-	defer rows.Close()
-
-	var out []UserAchievement
-	for rows.Next() {
-		var ua UserAchievement
-		if err := rows.Scan(&ua.UserID, &ua.AchievementID, &ua.UnlockedAt); err != nil {
-			return nil, fmt.Errorf("achievement repository: scan user achievement: %w", err)
-		}
-		out = append(out, ua)
-	}
-	return out, rows.Err()
 }

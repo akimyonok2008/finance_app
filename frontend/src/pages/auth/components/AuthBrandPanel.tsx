@@ -60,17 +60,17 @@ export function AuthBrandPanel() {
           <div className="grid h-9 w-9 place-items-center rounded-lg border border-zinc-800 bg-zinc-900/60">
             <ShieldCheck className="h-4 w-4 text-zinc-300" />
           </div>
-          <span className="text-sm font-semibold tracking-wide text-zinc-200">
-            Portfolio Arena
+          <span className="brand-wordmark text-xl font-semibold text-zinc-100">
+            Alarvest
           </span>
         </motion.div>
 
         <div>
           <h2 className="text-3xl font-medium tracking-tight text-zinc-50">
-            Private portfolio tracking.
+            Track your portfolio. Rank your strategy.
           </h2>
           <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Compete on performance, never wealth.
+            The leaderboard for real portfolios.
           </p>
         </div>
 

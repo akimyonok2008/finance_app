@@ -1,6 +1,9 @@
 package portfolio
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Repository is the persistence boundary for portfolios and positions. Business
 // logic depends only on this interface, so the in-memory implementation can be
@@ -19,6 +22,12 @@ type Repository interface {
 	ListActiveSymbols() ([]string, error)
 	UpdatePosition(p *Position) error
 	DeletePosition(id string) error
+	// ReplaceOpenPositions atomically deletes the user's open positions and
+	// inserts the given replacements in a single unit of work, so a whole-portfolio
+	// strategy copy can never leave the portfolio half-replaced.
+	ReplaceOpenPositions(userID string, newPositions []*Position) error
+	CreateArchiveSnapshot(s *PortfolioArchiveSnapshot) error
+	ListArchiveSnapshots(userID string, from, to string) ([]*PortfolioArchiveSnapshot, error)
 }
 
 // InMemoryRepository is a goroutine-safe, process-local store for the prototype.
@@ -28,6 +37,7 @@ type InMemoryRepository struct {
 	userPortfolio map[string]string     // userID -> portfolio id
 	positions     map[string]*Position  // keyed by position id
 	positionOrder []string              // preserves insertion order for stable listing
+	archives      []*PortfolioArchiveSnapshot
 }
 
 // NewInMemoryRepository returns an empty in-memory repository.
@@ -36,6 +46,7 @@ func NewInMemoryRepository() *InMemoryRepository {
 		portfolios:    make(map[string]*Portfolio),
 		userPortfolio: make(map[string]string),
 		positions:     make(map[string]*Position),
+		archives:      make([]*PortfolioArchiveSnapshot, 0),
 	}
 }
 
@@ -66,6 +77,9 @@ func (r *InMemoryRepository) CreatePosition(p *Position) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	stored := *p
+	if stored.Status == "" {
+		stored.Status = PositionStatusOpen
+	}
 	r.positions[stored.ID] = &stored
 	r.positionOrder = append(r.positionOrder, stored.ID)
 	return nil
@@ -103,7 +117,7 @@ func (r *InMemoryRepository) ListActiveSymbols() ([]string, error) {
 	seen := map[string]bool{}
 	out := make([]string, 0)
 	for _, p := range r.positions {
-		if !seen[p.Symbol] {
+		if positionStatus(p) == PositionStatusOpen && !seen[p.Symbol] {
 			seen[p.Symbol] = true
 			out = append(out, p.Symbol)
 		}
@@ -123,6 +137,38 @@ func (r *InMemoryRepository) UpdatePosition(p *Position) error {
 	return nil
 }
 
+func (r *InMemoryRepository) CreateArchiveSnapshot(s *PortfolioArchiveSnapshot) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stored := copyArchiveSnapshot(s)
+	r.archives = append(r.archives, stored)
+	return nil
+}
+
+func (r *InMemoryRepository) ListArchiveSnapshots(userID string, from, to string) ([]*PortfolioArchiveSnapshot, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	fromTime, err := timeFromRFC3339(from)
+	if err != nil {
+		return nil, err
+	}
+	toTime, err := timeFromRFC3339(to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*PortfolioArchiveSnapshot, 0)
+	for _, s := range r.archives {
+		if s.UserID != userID {
+			continue
+		}
+		if s.CapturedAt.Before(fromTime) || s.CapturedAt.After(toTime) {
+			continue
+		}
+		out = append(out, copyArchiveSnapshot(s))
+	}
+	return out, nil
+}
+
 // DeletePosition removes the position by id, or returns ErrPositionNotFound.
 func (r *InMemoryRepository) DeletePosition(id string) error {
 	r.mu.Lock()
@@ -138,4 +184,50 @@ func (r *InMemoryRepository) DeletePosition(id string) error {
 		}
 	}
 	return nil
+}
+
+// ReplaceOpenPositions atomically swaps the user's open positions under a single
+// lock so no reader ever observes a half-replaced portfolio.
+func (r *InMemoryRepository) ReplaceOpenPositions(userID string, newPositions []*Position) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Delete existing open positions for the user.
+	kept := make([]string, 0, len(r.positionOrder))
+	for _, id := range r.positionOrder {
+		p, ok := r.positions[id]
+		if ok && p.UserID == userID && positionStatus(p) == PositionStatusOpen {
+			delete(r.positions, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	r.positionOrder = kept
+	// Insert replacements, preserving insertion order.
+	for _, p := range newPositions {
+		stored := *p
+		if stored.Status == "" {
+			stored.Status = PositionStatusOpen
+		}
+		r.positions[stored.ID] = &stored
+		r.positionOrder = append(r.positionOrder, stored.ID)
+	}
+	return nil
+}
+
+func copyArchiveSnapshot(s *PortfolioArchiveSnapshot) *PortfolioArchiveSnapshot {
+	if s == nil {
+		return nil
+	}
+	copied := *s
+	copied.Positions = append([]PositionSummary(nil), s.Positions...)
+	copied.ClosedPositions = append([]ClosedPositionSummary(nil), s.ClosedPositions...)
+	return &copied
+}
+
+func timeFromRFC3339(v string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t, nil
 }

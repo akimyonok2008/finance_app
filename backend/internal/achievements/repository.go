@@ -6,87 +6,51 @@ import (
 	"time"
 )
 
-// AchievementRepository is the persistence boundary for badge definitions and
-// per-user unlocks. The service depends only on this interface.
+// AchievementRepository is the persistence boundary for awarded benchmark
+// badges. Badge definitions themselves live in code (benchmark.Badges), so the
+// repository only tracks per-user unlocks and their evidence.
 type AchievementRepository interface {
-	ListAchievements(ctx context.Context) ([]Achievement, error)
-	GetAchievementByKey(ctx context.Context, key string) (*Achievement, error)
-	UnlockAchievement(ctx context.Context, userID, achievementID string) error
-	HasAchievement(ctx context.Context, userID, achievementID string) (bool, error)
-	ListUserAchievements(ctx context.Context, userID string) ([]UserAchievement, error)
+	// ListAwarded returns the user's awarded badges keyed by badge key.
+	ListAwarded(ctx context.Context, userID string) (map[string]AwardedAchievement, error)
+	// Award persists an unlock idempotently: awarding an already-awarded badge
+	// keeps the original unlock time and evidence.
+	Award(ctx context.Context, a AwardedAchievement) error
 }
 
-// InMemoryAchievementRepository seeds the badge catalogue and tracks unlocks.
+// InMemoryAchievementRepository tracks awarded badges in memory.
 type InMemoryAchievementRepository struct {
-	mu           sync.RWMutex
-	achievements []Achievement
-	byKey        map[string]Achievement
-	// unlocked: userID -> achievementID -> unlockedAt
-	unlocked map[string]map[string]time.Time
+	mu sync.RWMutex
+	// awarded: userID -> badgeKey -> record
+	awarded map[string]map[string]AwardedAchievement
 }
 
-// NewInMemoryAchievementRepository returns a repository seeded with the default
-// badge catalogue.
+// NewInMemoryAchievementRepository returns an empty in-memory repository.
 func NewInMemoryAchievementRepository() *InMemoryAchievementRepository {
-	now := time.Now().UTC()
-	defs := seedDefinitions(now)
-	byKey := make(map[string]Achievement, len(defs))
-	for _, a := range defs {
-		byKey[a.Key] = a
-	}
-	return &InMemoryAchievementRepository{
-		achievements: defs,
-		byKey:        byKey,
-		unlocked:     make(map[string]map[string]time.Time),
-	}
+	return &InMemoryAchievementRepository{awarded: make(map[string]map[string]AwardedAchievement)}
 }
 
-func (r *InMemoryAchievementRepository) ListAchievements(_ context.Context) ([]Achievement, error) {
+func (r *InMemoryAchievementRepository) ListAwarded(_ context.Context, userID string) (map[string]AwardedAchievement, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]Achievement, len(r.achievements))
-	copy(out, r.achievements)
+	out := make(map[string]AwardedAchievement, len(r.awarded[userID]))
+	for k, v := range r.awarded[userID] {
+		out[k] = v
+	}
 	return out, nil
 }
 
-func (r *InMemoryAchievementRepository) GetAchievementByKey(_ context.Context, key string) (*Achievement, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	a, ok := r.byKey[key]
-	if !ok {
-		return nil, ErrAchievementNotFound
-	}
-	return &a, nil
-}
-
-// UnlockAchievement is idempotent: unlocking an already-unlocked badge keeps the
-// original unlock time and does not duplicate.
-func (r *InMemoryAchievementRepository) UnlockAchievement(_ context.Context, userID, achievementID string) error {
+func (r *InMemoryAchievementRepository) Award(_ context.Context, a AwardedAchievement) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.unlocked[userID] == nil {
-		r.unlocked[userID] = make(map[string]time.Time)
+	if r.awarded[a.UserID] == nil {
+		r.awarded[a.UserID] = make(map[string]AwardedAchievement)
 	}
-	if _, exists := r.unlocked[userID][achievementID]; exists {
-		return nil
+	if _, exists := r.awarded[a.UserID][a.BadgeKey]; exists {
+		return nil // idempotent
 	}
-	r.unlocked[userID][achievementID] = time.Now().UTC()
+	if a.UnlockedAt.IsZero() {
+		a.UnlockedAt = time.Now().UTC()
+	}
+	r.awarded[a.UserID][a.BadgeKey] = a
 	return nil
-}
-
-func (r *InMemoryAchievementRepository) HasAchievement(_ context.Context, userID, achievementID string) (bool, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, ok := r.unlocked[userID][achievementID]
-	return ok, nil
-}
-
-func (r *InMemoryAchievementRepository) ListUserAchievements(_ context.Context, userID string) ([]UserAchievement, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]UserAchievement, 0, len(r.unlocked[userID]))
-	for achID, at := range r.unlocked[userID] {
-		out = append(out, UserAchievement{UserID: userID, AchievementID: achID, UnlockedAt: at})
-	}
-	return out, nil
 }

@@ -37,6 +37,88 @@ export type ProfileBadge = {
   unlocked_at?: string;
 };
 
+export type PerformanceHistoryPoint = {
+  captured_at: string;
+  portfolio_index: number;
+  return_percentage: number;
+};
+
+export type PublicClosedPosition = {
+  symbol: string;
+  asset_type?: string;
+  closed_at?: string;
+  return_percentage: number;
+};
+
+export type ProfileDNAScores = {
+  growth: number;
+  income: number;
+  commodities: number;
+  defensive: number;
+  international: number;
+  concentration: number;
+  volatility: number;
+};
+
+export type ProfileDNAExplanations = {
+  growth: string[];
+  income: string[];
+  commodities: string[];
+  defensive: string[];
+  international: string[];
+  concentration: string[];
+  volatility: string[];
+};
+
+export type ProfilePerformanceDrivers = {
+  summary: string;
+  positive_drivers: string[];
+  negative_drivers: string[];
+  open_contribution_points: number;
+  closed_contribution_points: number;
+};
+
+export type ProfileBenchmark = {
+  symbol: string;
+  name: string;
+  index: number;
+  edge_points: number;
+};
+
+export type ProfileBenchmarkContext = {
+  investor_index: number;
+  benchmarks: ProfileBenchmark[];
+  note?: string;
+};
+
+export type ProfileContributor = {
+  symbol: string;
+  name?: string;
+  contribution_points: number;
+};
+
+export type ProfileOpenClosedPerformance = {
+  open_return_percentage: number;
+  closed_return_percentage: number;
+  open_contribution_points: number;
+  closed_contribution_points: number;
+  has_closed_positions: boolean;
+  composition_visible: boolean;
+};
+
+export type ProfileInsights = {
+  investment_style: string;
+  style_summary: string;
+  focus_areas: string[];
+  dna: ProfileDNAScores;
+  dna_explanations: ProfileDNAExplanations;
+  performance_drivers: ProfilePerformanceDrivers;
+  benchmark_context: ProfileBenchmarkContext;
+  contributors: ProfileContributor[];
+  detractors: ProfileContributor[];
+  open_closed_performance: ProfileOpenClosedPerformance;
+};
+
 export type PublicProfile = {
   handle: string;
   display_name: string;
@@ -49,10 +131,13 @@ export type PublicProfile = {
   global_rank?: number | null;
   sprint_rank?: number | null;
   badges: ProfileBadge[];
+  performance_history: PerformanceHistoryPoint[];
+  public_closed_positions: PublicClosedPosition[];
   public_weights: PublicWeight[];
   asset_type_exposure: Exposure[];
   currency_exposure: Exposure[];
   concentration?: Concentration;
+  insights: ProfileInsights;
 };
 
 export type MyProfile = {
@@ -69,9 +154,7 @@ export type MyProfile = {
 };
 
 export type UpdateProfileRequest = {
-  handle?: string;
   display_name?: string;
-  avatar_key?: string;
   bio?: string;
   strategy_tag?: string;
   is_public?: boolean;

@@ -164,7 +164,7 @@ func TestExploreSearch(t *testing.T) {
 	none, err := svc.Explore(ctx, "", filterWith(func(f *ExploreFilter) { f.Query = "zzzznomatch" }))
 	require.NoError(t, err)
 	assert.Empty(t, none.TopPerformers)
-	assert.Empty(t, none.Featured)
+	assert.NotEmpty(t, none.Featured, "search results must not rewrite featured discovery")
 }
 
 func TestExploreSymbolFilter(t *testing.T) {

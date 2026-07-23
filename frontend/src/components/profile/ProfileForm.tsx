@@ -18,8 +18,6 @@ import { cn } from "@/utils/cn";
 
 const schema = z.object({
   display_name: z.string().trim().min(2, "Use at least 2 characters").max(40, "Use at most 40 characters"),
-  handle: z.string().trim().min(3, "Use at least 3 characters").max(30, "Use at most 30 characters").regex(/^[a-z0-9_-]+$/, "Use lower-case letters, numbers, _ or - only"),
-  avatar_key: z.string().trim().max(40, "Use at most 40 characters"),
   bio: z.string().trim().max(160, "Use at most 160 characters"),
   strategy_tag: z.enum(STRATEGY_TAGS),
   is_public: z.boolean(),
@@ -61,8 +59,6 @@ export function ProfileForm({ profile, onSubmit, isSaving, serverError }: { prof
     resolver: zodResolver(schema),
     values: {
       display_name: profile.display_name,
-      handle: profile.handle,
-      avatar_key: profile.avatar_key ?? "",
       bio: profile.bio ?? "",
       strategy_tag: STRATEGY_TAGS.includes(profile.strategy_tag as (typeof STRATEGY_TAGS)[number])
         ? (profile.strategy_tag as (typeof STRATEGY_TAGS)[number])
@@ -82,17 +78,6 @@ export function ProfileForm({ profile, onSubmit, isSaving, serverError }: { prof
           <Label htmlFor="display_name">Display name</Label>
           <Input id="display_name" className="mt-2" aria-invalid={!!errors.display_name} {...register("display_name")} />
           <FieldError message={errors.display_name?.message} />
-        </div>
-        <div>
-          <Label htmlFor="handle">Handle</Label>
-          <Input id="handle" className="mt-2 font-mono" autoCapitalize="none" aria-invalid={!!errors.handle} {...register("handle")} />
-          <p className="mt-1.5 text-xs text-zinc-600">Used in your public profile URL.</p>
-          <FieldError message={errors.handle?.message} />
-        </div>
-        <div>
-          <Label htmlFor="avatar_key">Avatar key</Label>
-          <Input id="avatar_key" className="mt-2" aria-invalid={!!errors.avatar_key} {...register("avatar_key")} />
-          <FieldError message={errors.avatar_key?.message} />
         </div>
         <div>
           <Label htmlFor="bio">Bio</Label>

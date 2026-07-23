@@ -17,6 +17,7 @@ type CardSpec = {
   icon: LucideIcon;
   valueClassName?: string;
   hint?: string;
+  tone: "cyan" | "emerald" | "rose" | "violet" | "amber";
 };
 
 function SummaryCard({ spec, index }: { spec: CardSpec; index: number }) {
@@ -27,12 +28,30 @@ function SummaryCard({ spec, index }: { spec: CardSpec; index: number }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, delay: index * 0.05 }}
     >
-      <Card className="p-5">
+      <Card
+        className={cn(
+          "relative overflow-hidden p-5 transition duration-200 hover:-translate-y-0.5",
+          spec.tone === "cyan" && "border-cyan-300/15 bg-[radial-gradient(circle_at_top_right,rgba(34,211,238,0.11),transparent_48%),rgba(24,24,27,0.52)] hover:border-cyan-300/25",
+          spec.tone === "emerald" && "border-emerald-300/15 bg-[radial-gradient(circle_at_top_right,rgba(52,211,153,0.1),transparent_48%),rgba(24,24,27,0.52)] hover:border-emerald-300/25",
+          spec.tone === "rose" && "border-rose-300/15 bg-[radial-gradient(circle_at_top_right,rgba(251,113,133,0.1),transparent_48%),rgba(24,24,27,0.52)] hover:border-rose-300/25",
+          spec.tone === "violet" && "border-violet-300/15 bg-[radial-gradient(circle_at_top_right,rgba(167,139,250,0.11),transparent_48%),rgba(24,24,27,0.52)] hover:border-violet-300/25",
+          spec.tone === "amber" && "border-amber-300/15 bg-[radial-gradient(circle_at_top_right,rgba(251,191,36,0.1),transparent_48%),rgba(24,24,27,0.52)] hover:border-amber-300/25",
+        )}
+      >
         <div className="flex items-center justify-between">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
             {spec.label}
           </span>
-          <span className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 bg-white/[0.03] text-slate-400">
+          <span
+            className={cn(
+              "grid h-9 w-9 place-items-center rounded-xl border bg-zinc-950/35",
+              spec.tone === "cyan" && "border-cyan-300/15 text-cyan-300/80",
+              spec.tone === "emerald" && "border-emerald-300/15 text-emerald-300/80",
+              spec.tone === "rose" && "border-rose-300/15 text-rose-300/80",
+              spec.tone === "violet" && "border-violet-300/15 text-violet-300/80",
+              spec.tone === "amber" && "border-amber-300/15 text-amber-300/80",
+            )}
+          >
             <Icon className="h-4 w-4" />
           </span>
         </div>
@@ -96,8 +115,9 @@ export function PortfolioSummaryCards() {
           ? summary.portfolio_index.toFixed(2)
           : "—",
       icon: Activity,
-      valueClassName: "text-zinc-100",
+      valueClassName: "text-cyan-100",
       hint: "Baseline 100.00",
+      tone: "cyan",
     },
     {
       key: "gain",
@@ -109,18 +129,23 @@ export function PortfolioSummaryCards() {
         summary?.gain_loss !== undefined
           ? formatMoney(summary.gain_loss, currency)
           : undefined,
+      tone: (gainPct ?? 0) < 0 ? "rose" : "emerald",
     },
     {
       key: "value",
       label: "Current Value",
       value: formatMoney(summary?.current_value, currency),
       icon: Wallet,
+      valueClassName: "text-violet-100",
+      tone: "violet",
     },
     {
       key: "cost",
       label: "Cost Basis",
       value: formatMoney(summary?.total_cost_basis, currency),
       icon: Coins,
+      valueClassName: "text-amber-100",
+      tone: "amber",
     },
   ];
 

@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
-	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
 // --- test doubles ------------------------------------------------------------
@@ -24,35 +23,38 @@ func (f fakeUsers) ListUsers(_ context.Context) ([]auth.User, error) {
 	return f.users, f.err
 }
 
-type fakeSummaries struct {
-	byUser map[string]*portfolio.PortfolioSummary
+// fakeRanked stands in for the ranked-performance provider.
+type fakeRanked struct {
+	byUser map[string]RankedPerformance
 	errs   map[string]error
 }
 
-func (f fakeSummaries) Summary(_ context.Context, userID string) (*portfolio.PortfolioSummary, error) {
+func (f fakeRanked) CurrentRankedPerformance(_ context.Context, userID string) (RankedPerformance, error) {
 	if err, ok := f.errs[userID]; ok {
-		return nil, err
+		return RankedPerformance{}, err
 	}
-	s, ok := f.byUser[userID]
+	rp, ok := f.byUser[userID]
 	if !ok {
-		return nil, errors.New("no summary")
+		return RankedPerformance{}, errors.New("no ranked performance")
 	}
-	return s, nil
+	return rp, nil
 }
 
 func user(id, name string) auth.User {
 	return auth.User{ID: id, Email: name + "@example.com", DisplayName: name, AvatarKey: "fox", PasswordHash: "secret-hash"}
 }
 
-func summary(pct, index float64) *portfolio.PortfolioSummary {
-	return &portfolio.PortfolioSummary{GainLossPercentage: pct, PortfolioIndex: index}
+// summary builds a RankedPerformance from a return percentage and index (the
+// helper name is retained so existing tests read unchanged).
+func summary(pct, index float64) RankedPerformance {
+	return RankedPerformance{RankedReturnPercentage: pct, RankedIndex: index}
 }
 
 // --- tests -------------------------------------------------------------------
 
 func TestBuild_RanksByGainLossDescending(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(8.1, 108.1),
 		"u2": summary(12.4, 112.4),
 		"u3": summary(-3.0, 97.0),
@@ -70,7 +72,7 @@ func TestBuild_RanksByGainLossDescending(t *testing.T) {
 
 func TestBuild_AssignsSequentialRanks(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(8.1, 108.1),
 		"u2": summary(12.4, 112.4),
 		"u3": summary(5.0, 105.0),
@@ -86,7 +88,7 @@ func TestBuild_AssignsSequentialRanks(t *testing.T) {
 }
 
 func TestBuild_EmptyUserListReturnsEmptyBoard(t *testing.T) {
-	svc := NewService(fakeUsers{users: nil}, fakeSummaries{})
+	svc := NewService(fakeUsers{users: nil}, fakeRanked{})
 
 	board, err := svc.Build(context.Background())
 	require.NoError(t, err)
@@ -95,7 +97,7 @@ func TestBuild_EmptyUserListReturnsEmptyBoard(t *testing.T) {
 
 func TestBuild_EmptyPortfolioIsZeroAndHundred(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(0, 100), // empty portfolio convention
 	}}
 	svc := NewService(users, sums)
@@ -110,7 +112,7 @@ func TestBuild_EmptyPortfolioIsZeroAndHundred(t *testing.T) {
 func TestBuild_TieBrokenByDisplayNameAscending(t *testing.T) {
 	// Insertion order intentionally non-alphabetical to prove sorting is applied.
 	users := fakeUsers{users: []auth.User{user("u3", "CryptoTiger"), user("u1", "AlphaBull"), user("u2", "BetaWolf")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(10, 110),
 		"u2": summary(10, 110),
 		"u3": summary(8, 108),
@@ -128,8 +130,8 @@ func TestBuild_TieBrokenByDisplayNameAscending(t *testing.T) {
 
 func TestBuild_SkipsUsersWhoseSummaryFails(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
-	sums := fakeSummaries{
-		byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{
+		byUser: map[string]RankedPerformance{
 			"u1": summary(8.1, 108.1),
 			"u3": summary(5.0, 105.0),
 		},
@@ -147,8 +149,8 @@ func TestBuild_SkipsUsersWhoseSummaryFails(t *testing.T) {
 
 func TestBuildResult_ReportsSkippedCount(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
-	sums := fakeSummaries{
-		byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{
+		byUser: map[string]RankedPerformance{
 			"u1": summary(8.1, 108.1),
 			"u3": summary(5.0, 105.0),
 		},
@@ -170,7 +172,7 @@ func cacheUsers() fakeUsers {
 
 func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
 	// Summaries deliberately disagree with the cache so we can tell which path ran.
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(1.0, 101), "u2": summary(2.0, 102),
 	}}
 	svc := NewService(cacheUsers(), sums)
@@ -192,7 +194,7 @@ func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
 }
 
 func TestBuild_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(8.1, 108.1), "u2": summary(12.4, 112.4),
 	}}
 	svc := NewService(cacheUsers(), sums)
@@ -206,7 +208,7 @@ func TestBuild_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
 }
 
 func TestRefreshCache_PopulatesScores(t *testing.T) {
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(8.1, 108.1), "u2": summary(12.4, 112.4),
 	}}
 	svc := NewService(cacheUsers(), sums)
@@ -226,7 +228,7 @@ func TestRefreshCache_PopulatesScores(t *testing.T) {
 }
 
 func TestBuild_ListUsersErrorIsReturned(t *testing.T) {
-	svc := NewService(fakeUsers{err: errors.New("db down")}, fakeSummaries{})
+	svc := NewService(fakeUsers{err: errors.New("db down")}, fakeRanked{})
 
 	_, err := svc.Build(context.Background())
 	assert.Error(t, err)
@@ -236,7 +238,7 @@ func TestBuild_ListUsersErrorIsReturned(t *testing.T) {
 
 func TestBuild_ResponseOmitsForbiddenFields(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(12.4, 112.4)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(12.4, 112.4)}}
 	svc := NewService(users, sums)
 
 	board, err := svc.Build(context.Background())

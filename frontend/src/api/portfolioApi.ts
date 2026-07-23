@@ -1,6 +1,9 @@
 import { apiRequest } from "@/api/client";
 import type {
   CreatePositionInput,
+  ClosedPosition,
+  PortfolioArchives,
+  PortfolioArchiveTimeframe,
   PortfolioSummary,
   Position,
   UpdatePositionInput,
@@ -8,6 +11,10 @@ import type {
 
 export function getPositions(signal?: AbortSignal): Promise<Position[]> {
   return apiRequest<Position[]>("/portfolio/positions", { signal });
+}
+
+export function getClosedPositions(signal?: AbortSignal): Promise<ClosedPosition[]> {
+  return apiRequest<ClosedPosition[]>("/portfolio/positions/closed", { signal });
 }
 
 export function getPortfolioSummary(
@@ -35,6 +42,22 @@ export function updatePosition(
   });
 }
 
+export function closePosition(id: string): Promise<ClosedPosition> {
+  return apiRequest<ClosedPosition>(`/portfolio/positions/${id}/close`, {
+    method: "POST",
+    body: {},
+  });
+}
+
 export function deletePosition(id: string): Promise<void> {
   return apiRequest<void>(`/portfolio/positions/${id}`, { method: "DELETE" });
+}
+
+export function getPortfolioArchives(
+  timeframe: PortfolioArchiveTimeframe,
+  signal?: AbortSignal,
+): Promise<PortfolioArchives> {
+  return apiRequest<PortfolioArchives>(`/portfolio/archives?timeframe=${timeframe}`, {
+    signal,
+  });
 }

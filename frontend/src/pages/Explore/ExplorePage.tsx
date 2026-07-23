@@ -1,17 +1,15 @@
-import { RefreshCw } from "lucide-react";
+import { Compass, MessageCircle, RefreshCw, Sparkles, UsersRound } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { AppNav } from "@/components/layout/AppNav";
-import { ExploreEmptyState } from "@/components/explore/ExploreEmptyState";
 import { ExploreFilterBar } from "@/components/explore/ExploreFilterBar";
+import { ExploreSearchResults } from "@/components/explore/ExploreSearchResults";
 import { FriendsPanel } from "@/components/explore/FriendsPanel";
-import { ExplorePrivacyNote } from "@/components/explore/ExplorePrivacyNote";
 import { ExploreSkeleton } from "@/components/explore/ExploreSkeleton";
 import { FeaturedStrategies } from "@/components/explore/FeaturedStrategies";
 import { MessagesPanel } from "@/components/explore/MessagesPanel";
 import { SimilarStrategies } from "@/components/explore/SimilarStrategies";
-import { TopPerformersList } from "@/components/explore/TopPerformersList";
 import { TrendingHoldingsCard } from "@/components/explore/TrendingHoldingsCard";
 import { Button } from "@/components/ui/button";
 import { useExplore } from "@/hooks/useExplore";
@@ -23,6 +21,11 @@ const SORTS: ExploreSort[] = ["top", "return", "rank", "recent"];
 const TIMEFRAMES: ExploreTimeframe[] = ["1W", "1M", "3M", "6M", "1Y", "ALL"];
 const EXPLORE_TABS = ["strategies", "friends", "messages"] as const;
 type ExploreTab = (typeof EXPLORE_TABS)[number];
+const TAB_ICONS = {
+  strategies: Compass,
+  friends: UsersRound,
+  messages: MessageCircle,
+} satisfies Record<ExploreTab, typeof Compass>;
 
 export function ExplorePage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -41,34 +44,46 @@ export function ExplorePage() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-50">
+    <div className="explore-shell min-h-screen bg-zinc-950 text-zinc-50">
       <main className="mx-auto w-full max-w-7xl px-4 pb-16 pt-4 sm:px-6 lg:px-8">
         <AppNav />
 
-        <header className="mb-6">
-          <h1 className="text-2xl font-medium tracking-tight sm:text-3xl">Explore</h1>
-          <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-            Discover strategies, manage friends, and message mutual connections.
-          </p>
-          <p className="mt-2 text-xs text-zinc-600">
-            Public surfaces show strategy, not wealth.
-          </p>
+        <header className="relative mb-5 overflow-hidden rounded-2xl border border-violet-300/10 bg-[radial-gradient(circle_at_top_left,rgba(167,139,250,0.11),transparent_34%),radial-gradient(circle_at_85%_20%,rgba(56,189,248,0.07),transparent_25%),rgba(24,24,27,0.38)] px-5 py-6 shadow-[0_24px_80px_rgba(0,0,0,0.18)] sm:px-7">
+          <div className="pointer-events-none absolute right-8 top-5 h-24 w-24 rounded-full border border-violet-300/[0.06]" />
+          <div className="relative">
+            <div className="flex items-center gap-2 text-[9px] font-medium uppercase tracking-[0.2em] text-violet-200/55">
+              <Sparkles className="h-3 w-3" />
+              Strategy network
+            </div>
+            <h1 className="explore-display mt-2 text-3xl font-semibold tracking-tight text-zinc-50 sm:text-4xl">
+              Discover distinct investment thinking.
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">
+              Find public strategies, study comparable approaches, and connect with investors you follow.
+            </p>
+          </div>
         </header>
 
-        <div className="mb-6 flex flex-wrap gap-2 rounded-xl border border-zinc-800 bg-zinc-900/35 p-1">
+        <div className="mb-7 inline-flex max-w-full gap-1 overflow-x-auto rounded-xl border border-zinc-800/90 bg-zinc-900/55 p-1 shadow-[0_10px_30px_rgba(0,0,0,0.14)]">
           {EXPLORE_TABS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => setActiveTab(tab)}
-              className={`rounded-lg px-3 py-2 text-sm font-medium capitalize transition ${
-                activeTab === tab
-                  ? "bg-zinc-100 text-zinc-950"
-                  : "text-zinc-400 hover:bg-zinc-800/70 hover:text-zinc-100"
-              }`}
-            >
-              {tab}
-            </button>
+            (() => {
+              const Icon = TAB_ICONS[tab];
+              return (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setActiveTab(tab)}
+                  className={`flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium capitalize transition ${
+                    activeTab === tab
+                      ? "bg-zinc-100 text-zinc-950 shadow-sm"
+                      : "text-zinc-400 hover:bg-zinc-800/70 hover:text-zinc-100"
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {tab}
+                </button>
+              );
+            })()
           ))}
         </div>
 
@@ -103,7 +118,7 @@ function StrategyExplorePanel() {
     [q, symbol, sort, timeframe, offset],
   );
   const query = useExplore(params);
-  const profiles = query.data?.top_performers ?? [];
+  const searchProfiles = query.data?.top_performers ?? [];
   const filtered = q.length > 0 || symbol.length > 0 || sort !== "top";
 
   const updateParams = (updates: Record<string, string | number | undefined>) => {
@@ -120,11 +135,11 @@ function StrategyExplorePanel() {
 
   return (
     <section className="space-y-5">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+      <div className="flex flex-col justify-between gap-3 border-b border-zinc-800/80 pb-4 sm:flex-row sm:items-start">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-100">Strategies</h2>
+          <h2 className="explore-display text-xl font-semibold text-zinc-100">Strategy discovery</h2>
           <p className="mt-1 max-w-2xl text-sm text-zinc-400">
-            Discover public portfolios by performance, symbols, and weights without seeing anyone's net worth.
+            Curated profiles remain stable while search gives you direct, independent results.
           </p>
         </div>
         <button
@@ -138,7 +153,7 @@ function StrategyExplorePanel() {
         </button>
       </div>
 
-        <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div className="mb-5 flex flex-col justify-between gap-3 rounded-xl border border-zinc-800/70 bg-zinc-900/25 px-4 py-3 sm:flex-row sm:items-center">
           <div>
             <h2 className="text-sm font-semibold text-zinc-100">Discovery timeframe</h2>
             <p className="mt-1 text-xs text-zinc-500">Find strategies by selected ranked window.</p>
@@ -164,12 +179,6 @@ function StrategyExplorePanel() {
           }}
         />
 
-        {query.data?.timeframe_fallback && (
-          <div className="mb-5 rounded-xl border border-amber-300/15 bg-amber-300/[0.04] px-4 py-3 text-xs text-amber-100">
-            Using since-baseline ranking until enough timeframe history is available.
-          </div>
-        )}
-
         {query.isLoading ? (
           <ExploreSkeleton />
         ) : query.isError ? (
@@ -178,52 +187,33 @@ function StrategyExplorePanel() {
             <p className="mt-2 text-sm text-zinc-500">Try refreshing or changing filters.</p>
             <Button variant="outline" className="mt-5" onClick={() => query.refetch()}><RefreshCw /> Retry</Button>
           </div>
-        ) : profiles.length === 0 && (query.data?.featured.length ?? 0) === 0 ? (
-          <div className="space-y-5">
-            <ExploreEmptyState filtered={filtered} />
-            <ExplorePrivacyNote />
-          </div>
         ) : (
-          <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_300px]">
-            <div className="order-1 space-y-8 xl:col-start-1 xl:row-start-1">
-              <FeaturedStrategies profiles={query.data?.featured ?? []} />
-              <SimilarStrategies profiles={query.data?.similar ?? []} />
-            </div>
-            <div className="order-2 xl:col-start-2 xl:row-start-1">
-              <TrendingHoldingsCard
-                holdings={query.data?.trending_holdings ?? []}
-                selectedSymbol={symbol}
-                onSelectSymbol={(value) => {
-                  setDraftSymbol(value);
-                  updateParams({ symbol: value, timeframe, offset: 0 });
-                }}
+          <div className="space-y-7">
+            {filtered ? (
+              <ExploreSearchResults
+                profiles={searchProfiles}
+                query={q}
+                symbol={symbol}
               />
-            </div>
-            <div className="order-3 xl:col-start-1 xl:row-start-2">
-              {profiles.length > 0 ? <TopPerformersList profiles={profiles} /> : <ExploreEmptyState filtered={filtered} />}
-              <Pagination
-                offset={offset}
-                hasMore={query.data?.pagination?.has_more ?? false}
-                onPrevious={() => updateParams({ offset: Math.max(0, offset - PAGE_SIZE) })}
-                onNext={() => updateParams({ offset: offset + PAGE_SIZE })}
-              />
-            </div>
-            <div className="order-4 xl:col-start-2 xl:row-start-2">
-              <ExplorePrivacyNote />
+            ) : null}
+            <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
+              <div className="min-w-0 space-y-7">
+                <FeaturedStrategies profiles={query.data?.featured ?? []} />
+                <SimilarStrategies profiles={query.data?.similar ?? []} />
+              </div>
+              <aside className="lg:sticky lg:top-4">
+                <TrendingHoldingsCard
+                  holdings={query.data?.trending_holdings ?? []}
+                  selectedSymbol={symbol}
+                  onSelectSymbol={(value) => {
+                    setDraftSymbol(value);
+                    updateParams({ symbol: value, timeframe, offset: 0 });
+                  }}
+                />
+              </aside>
             </div>
           </div>
         )}
     </section>
-  );
-}
-
-function Pagination({ offset, hasMore, onPrevious, onNext }: { offset: number; hasMore: boolean; onPrevious: () => void; onNext: () => void }) {
-  if (offset === 0 && !hasMore) return null;
-  return (
-    <div className="mt-5 flex items-center justify-between">
-      <Button variant="outline" size="sm" disabled={offset === 0} onClick={onPrevious}>Previous</Button>
-      <span className="font-mono text-xs tabular-nums text-zinc-600">Page {Math.floor(offset / PAGE_SIZE) + 1}</span>
-      <Button variant="outline" size="sm" disabled={!hasMore} onClick={onNext}>Next</Button>
-    </div>
   );
 }

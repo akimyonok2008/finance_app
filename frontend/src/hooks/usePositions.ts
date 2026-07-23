@@ -6,14 +6,18 @@ import {
 import { toast } from "sonner";
 
 import {
+  closePosition,
   createPosition,
   deletePosition,
+  getClosedPositions,
+  getPortfolioArchives,
   getPositions,
   updatePosition,
 } from "@/api/portfolioApi";
 import { POSITION_MUTATION_INVALIDATIONS, queryKeys } from "@/hooks/queryKeys";
 import type {
   CreatePositionInput,
+  PortfolioArchiveTimeframe,
   UpdatePositionInput,
 } from "@/types/portfolio";
 
@@ -21,6 +25,20 @@ export function usePositions() {
   return useQuery({
     queryKey: queryKeys.positions,
     queryFn: ({ signal }) => getPositions(signal),
+  });
+}
+
+export function useClosedPositions() {
+  return useQuery({
+    queryKey: queryKeys.closedPositions,
+    queryFn: ({ signal }) => getClosedPositions(signal),
+  });
+}
+
+export function usePortfolioArchives(timeframe: PortfolioArchiveTimeframe) {
+  return useQuery({
+    queryKey: queryKeys.portfolioArchives(timeframe),
+    queryFn: ({ signal }) => getPortfolioArchives(timeframe, signal),
   });
 }
 
@@ -32,6 +50,20 @@ function useInvalidatePortfolio() {
       queryClient.invalidateQueries({ queryKey });
     }
   };
+}
+
+export function useClosePosition() {
+  const invalidate = useInvalidatePortfolio();
+  return useMutation({
+    mutationFn: (id: string) => closePosition(id),
+    onSuccess: () => {
+      invalidate();
+      toast.success("Position closed");
+    },
+    onError: (err: Error) => {
+      toast.error(err.message);
+    },
+  });
 }
 
 export function useCreatePosition() {

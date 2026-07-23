@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowUpRight, Gauge, Medal, Target } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, Medal, Target } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import type { LeaderboardStanding } from "@/types/leaderboard";
@@ -35,13 +35,12 @@ export function YourStandingCard({
 }: YourStandingCardProps) {
   if (isLoading) {
     return (
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/35 p-5">
+      <section className="rounded-2xl border border-sky-300/15 bg-zinc-900/35 p-5">
         <Skeleton className="h-4 w-32" />
-        <div className="mt-5 grid gap-3 sm:grid-cols-4">
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
+        <Skeleton className="mt-5 h-24 rounded-xl" />
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <Skeleton className="h-16 rounded-xl" />
+          <Skeleton className="h-16 rounded-xl" />
         </div>
       </section>
     );
@@ -66,9 +65,9 @@ export function YourStandingCard({
 
   if (!standing || !standing.eligible) {
     return (
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/35 p-5">
+      <section className="rounded-2xl border border-sky-300/15 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.07),transparent_45%),rgba(24,24,27,0.42)] p-5">
         <div className="flex items-center gap-2">
-          <Medal className="h-4 w-4 text-zinc-500" />
+          <Medal className="h-4 w-4 text-sky-300" />
           <h2 className="text-sm font-semibold text-zinc-100">Your Standing</h2>
         </div>
         <p className="mt-3 text-sm text-zinc-400">
@@ -88,7 +87,7 @@ export function YourStandingCard({
   const DeltaIcon = delta !== null && delta < 0 ? ArrowDownRight : ArrowUpRight;
 
   return (
-    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/35 p-5">
+    <section className="rounded-2xl border border-sky-300/15 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.075),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(129,140,248,0.04),transparent_35%),rgba(24,24,27,0.46)] p-5 shadow-lg shadow-black/15">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
           <div className="flex items-center gap-2">
@@ -99,27 +98,41 @@ export function YourStandingCard({
             {standing.timeframe} rank among {standing.participant_count} strategies
           </p>
         </div>
-        <div className="font-mono text-xs tabular-nums text-zinc-500">
+        <div className="rounded-full border border-sky-300/15 bg-sky-300/[0.05] px-2.5 py-1 font-mono text-[11px] tabular-nums text-sky-100/70">
           Percentile {standing.percentile.toFixed(1)}
         </div>
       </div>
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/35 px-4 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Current</p>
-          <p className="mt-2 font-mono text-2xl font-semibold tabular-nums text-zinc-100">
+      <div className="mt-5 rounded-xl border border-sky-300/10 bg-zinc-950/45 px-4 py-4">
+        <p className="text-[10px] uppercase tracking-[0.16em] text-zinc-600">Current rank</p>
+        <div className="mt-2 flex items-end justify-between gap-4">
+          <p className="font-mono text-4xl font-medium tabular-nums text-amber-50">
             #{standing.rank}
           </p>
+          <div className="pb-1 text-right text-xs text-zinc-500">
+            <p>
+              Index <span className="font-mono text-zinc-300">{standing.ranked_index.toFixed(2)}</span>
+            </p>
+            <p className="mt-1">
+              Return{" "}
+              <span className={cn("font-mono", standing.ranked_return_percentage >= 0 ? "text-emerald-300" : "text-rose-300")}>
+                {formatPercent(standing.ranked_return_percentage)}
+              </span>
+            </p>
+          </div>
         </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-3">
         <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/35 px-4 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Movement</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-600">Movement</p>
           <p className={cn("mt-2 flex items-center gap-1 font-mono text-lg tabular-nums", deltaTone)}>
             {delta !== null && delta !== 0 && <DeltaIcon className="h-4 w-4" />}
             {rankDeltaLabel(delta)}
           </p>
         </div>
         <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/35 px-4 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Position</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-600">Position</p>
           <p className="mt-2 font-mono text-lg tabular-nums text-zinc-100">
             Top {topShare(standing)}
           </p>
@@ -127,35 +140,14 @@ export function YourStandingCard({
             <p className="mt-1 text-xs text-zinc-500">Best #{standing.best_rank}</p>
           )}
         </div>
-        <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/35 px-4 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Milestone</p>
-          <p className="mt-2 flex items-center gap-1 text-sm text-zinc-200">
-            <Target className="h-3.5 w-3.5 text-zinc-500" />
-            {standing.next_milestone
-              ? `${gapLabel(standing.next_milestone.return_gap_percentage)} to ${standing.next_milestone.label}`
-              : "Top rank reached"}
-          </p>
-        </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-zinc-500">
-        <span className="flex items-center gap-1">
-          <Gauge className="h-3.5 w-3.5" />
-          Index{" "}
-          <span className="font-mono tabular-nums text-zinc-300">
-            {standing.ranked_index.toFixed(2)}
-          </span>
-        </span>
+      <div className="mt-3 flex items-start gap-2 rounded-xl border border-zinc-800/80 bg-zinc-950/30 px-3 py-3 text-xs leading-5 text-zinc-400">
+        <Target className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-300/65" />
         <span>
-          Return{" "}
-          <span
-            className={cn(
-              "font-mono tabular-nums",
-              standing.ranked_return_percentage >= 0 ? "text-emerald-300" : "text-rose-300",
-            )}
-          >
-            {formatPercent(standing.ranked_return_percentage)}
-          </span>
+          {standing.next_milestone
+            ? `${gapLabel(standing.next_milestone.return_gap_percentage)} to ${standing.next_milestone.label}`
+            : "Top rank reached"}
         </span>
       </div>
     </section>

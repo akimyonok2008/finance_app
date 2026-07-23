@@ -67,6 +67,10 @@ export async function getAchievements(): Promise<Achievement[]> {
     targetProgress: 1,
     isUnlocked: achievement.unlocked,
     unlockedAt: achievement.unlocked_at ?? undefined,
+    difficulty: achievement.difficulty,
+    period: achievement.period,
+    inspiredBy: achievement.inspired_by,
+    edgePoints: achievement.evidence?.edge_points,
   }));
 }
 

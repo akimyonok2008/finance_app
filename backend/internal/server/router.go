@@ -8,7 +8,6 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
-	"github.com/ardakimyonok/finance_app/internal/coach"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
@@ -27,7 +26,6 @@ type Deps struct {
 	Leaderboard  *leaderboard.Service
 	Competitions *competitions.Service
 	Achievements *achievements.Service
-	Coach        *coach.Service
 	Profile      *profile.Service
 	Strategy     *strategy.Service
 	MarketData   *marketdata.Service
@@ -56,7 +54,6 @@ func New(d Deps) http.Handler {
 	leaderboardHandler := leaderboard.NewHandler(d.Leaderboard)
 	competitionHandler := competitions.NewHandler(d.Competitions, d.Achievements)
 	achievementHandler := achievements.NewHandler(d.Achievements)
-	coachHandler := coach.NewHandler(d.Coach)
 	strategyHandler := strategy.NewHandler(d.Strategy)
 	var marketDataHandler *marketdata.Handler
 	if d.MarketData != nil {
@@ -111,8 +108,11 @@ func New(d Deps) http.Handler {
 
 		r.Get("/portfolio", portfolioHandler.GetPortfolio)
 		r.Get("/portfolio/summary", portfolioHandler.Summary)
+		r.Get("/portfolio/archives", portfolioHandler.Archives)
 		r.Post("/portfolio/positions", portfolioHandler.AddPosition)
+		r.Get("/portfolio/positions/closed", portfolioHandler.ListClosedPositions)
 		r.Get("/portfolio/positions", portfolioHandler.ListPositions)
+		r.Post("/portfolio/positions/{positionId}/close", portfolioHandler.ClosePosition)
 		r.Put("/portfolio/positions/{positionId}", portfolioHandler.UpdatePosition)
 		r.Delete("/portfolio/positions/{positionId}", portfolioHandler.DeletePosition)
 
@@ -127,11 +127,9 @@ func New(d Deps) http.Handler {
 		r.Get("/achievements", achievementHandler.ListAchievements)
 		r.Post("/achievements/evaluate", achievementHandler.Evaluate)
 
-		r.Post("/portfolio/coach", coachHandler.Coach)
-		r.Post("/coach/compare-profile", coachHandler.CompareProfile)
-
 		r.Post("/strategy-portfolio/copy-preview", strategyHandler.CopyPreview)
 		r.Post("/strategy-portfolio/copy-from-profile", strategyHandler.CopyFromProfile)
+		r.Post("/strategy-portfolio/compare-profile", strategyHandler.CompareProfile)
 
 		if profileHandler != nil {
 			r.Get("/profiles/me", profileHandler.GetMe)

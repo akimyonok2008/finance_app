@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Pencil, Trash2 } from "lucide-react";
+import { Archive, Pencil, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -32,6 +32,7 @@ type Props = {
   isError: boolean;
   errorMessage?: string;
   onEdit: (position: PositionRow) => void;
+  onClose: (position: PositionRow) => void;
   onDelete: (position: PositionRow) => void;
 };
 
@@ -44,6 +45,7 @@ export function PositionsTable({
   isError,
   errorMessage,
   onEdit,
+  onClose,
   onDelete,
 }: Props) {
   if (isLoading) {
@@ -69,7 +71,7 @@ export function PositionsTable({
   }
 
   return (
-    <Card className="hidden overflow-hidden lg:block">
+    <Card className="hidden overflow-hidden border-indigo-300/10 bg-[radial-gradient(circle_at_top_right,rgba(129,140,248,0.045),transparent_30%),rgba(24,24,27,0.52)] shadow-xl shadow-black/15 lg:block">
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
@@ -100,9 +102,9 @@ export function PositionsTable({
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.98 }}
                   transition={{ type: "spring", stiffness: 260, damping: 24 }}
-                  className="border-b border-white/[0.06] transition-colors hover:bg-white/[0.03]"
+                  className="border-b border-white/[0.06] transition-colors hover:bg-indigo-300/[0.035]"
                 >
-                  <TableCell className="font-medium tracking-wide">
+                  <TableCell className="font-mono font-medium tracking-wide text-cyan-100">
                     <div className="flex items-center gap-2">
                       <span>{row.symbol}</span>
                       <QuoteFreshnessBadge
@@ -153,6 +155,15 @@ export function PositionsTable({
                         onClick={() => onEdit(row)}
                       >
                         <Pencil />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Close ${row.symbol}`}
+                        className="text-slate-400 hover:text-amber-300"
+                        onClick={() => onClose(row)}
+                      >
+                        <Archive />
                       </Button>
                       <Button
                         variant="ghost"

@@ -4,7 +4,9 @@
  */
 export const queryKeys = {
   positions: ["positions"] as const,
+  closedPositions: ["positions", "closed"] as const,
   portfolioSummary: ["portfolioSummary"] as const,
+  portfolioArchives: (timeframe: string) => ["portfolioArchives", timeframe] as const,
   leaderboard: ["leaderboard"] as const,
   dashboardLeaderboard: ["leaderboard", "dashboard"] as const,
   leaderboardMe: ["leaderboardMe"] as const,
@@ -29,8 +31,11 @@ export const queryKeys = {
 /** Queries to invalidate after any successful position mutation. */
 export const POSITION_MUTATION_INVALIDATIONS = [
   queryKeys.positions,
+  queryKeys.closedPositions,
   queryKeys.portfolioSummary,
+  ["portfolioArchives"],
   queryKeys.leaderboard,
   queryKeys.leaderboardMe,
   queryKeys.achievements,
+  queryKeys.myProfile,
 ] as const;

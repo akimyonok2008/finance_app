@@ -61,6 +61,8 @@ export type LeaderboardStanding = {
   percentile: number;
   ranked_return_percentage: number;
   ranked_index: number;
+  /** True when the portfolio is empty: ranked tracking is paused, index preserved. */
+  paused: boolean;
   next_milestone: LeaderboardMilestone | null;
   reason: string;
 };

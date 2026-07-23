@@ -1,11 +1,11 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ShieldCheck } from "lucide-react";
+import { ArrowLeft, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { useAuth } from "@/auth/useAuth";
 import { AuthDivider } from "@/pages/auth/components/AuthDivider";
@@ -58,6 +58,13 @@ export function LoginCard() {
       className="w-full max-w-md"
     >
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-6 shadow-xl shadow-black/30 sm:p-8">
+        <Link
+          to="/"
+          className="mb-6 inline-flex items-center gap-2 text-sm text-zinc-500 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to home
+        </Link>
 
         {/* Logo */}
         <div className="mb-6 flex flex-col items-center gap-3">
@@ -65,6 +72,9 @@ export function LoginCard() {
             <ShieldCheck className="h-5 w-5 text-zinc-300" />
           </div>
           <div className="text-center">
+            <p className="brand-wordmark mb-3 text-3xl font-semibold text-zinc-50">
+              Alarvest
+            </p>
             <h1 className="text-xl font-semibold tracking-tight text-zinc-50">
               Welcome back
             </h1>
@@ -142,12 +152,12 @@ export function LoginCard() {
         {/* Register link */}
         <p className="mt-5 text-center text-sm text-zinc-500">
           Don&apos;t have an account?{" "}
-          <a
-            href="/register"
+          <Link
+            to="/register"
             className="font-medium text-zinc-300 underline underline-offset-2 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/40"
           >
             Create one
-          </a>
+          </Link>
         </p>
 
         <AuthSecurityNote />

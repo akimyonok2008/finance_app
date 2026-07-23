@@ -1,54 +1,66 @@
 package achievements
 
-import "time"
+import (
+	"time"
 
-// Achievement keys.
-const (
-	KeyFirstPortfolio = "first_portfolio"
-	KeyFirstSprint    = "first_sprint"
-	KeyGreenPortfolio = "green_portfolio"
-	KeyIndex110       = "index_110"
-	KeyTop10Sprint    = "top_10_sprint"
+	"github.com/ardakimyonok/finance_app/internal/benchmark"
 )
 
-// Achievement is a badge definition.
-type Achievement struct {
-	ID          string    `json:"id"`
-	Key         string    `json:"key"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	IconKey     string    `json:"icon_key"`
-	CreatedAt   time.Time `json:"created_at"`
+// AwardedAchievement records that a user unlocked a benchmark badge, with the
+// privacy-safe evidence that justified it.
+type AwardedAchievement struct {
+	UserID     string                        `json:"user_id"`
+	BadgeKey   string                        `json:"badge_key"`
+	UnlockedAt time.Time                     `json:"unlocked_at"`
+	Evidence   benchmark.AchievementEvidence `json:"evidence"`
 }
 
-// UserAchievement records that a user unlocked an achievement.
-type UserAchievement struct {
-	UserID        string    `json:"user_id"`
-	AchievementID string    `json:"achievement_id"`
-	UnlockedAt    time.Time `json:"unlocked_at"`
-}
-
-// AchievementResponse is the public, privacy-safe projection. It carries no
-// internal ids — only the user-facing fields plus unlock state.
+// AchievementResponse is the public, privacy-safe projection of a badge and the
+// user's unlock state. It carries no internal ids, monetary values, or holdings
+// — only user-facing catalogue metadata plus (when unlocked) percentage-based
+// evidence.
 type AchievementResponse struct {
-	Key         string     `json:"key"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	IconKey     string     `json:"icon_key"`
-	Unlocked    bool       `json:"unlocked"`
-	UnlockedAt  *time.Time `json:"unlocked_at,omitempty"`
+	Key         string                         `json:"key"`
+	Name        string                         `json:"name"`
+	Description string                         `json:"description"`
+	IconKey     string                         `json:"icon_key"`
+	Difficulty  string                         `json:"difficulty"`
+	Period      string                         `json:"period"`
+	InspiredBy  string                         `json:"inspired_by,omitempty"`
+	Unlocked    bool                           `json:"unlocked"`
+	UnlockedAt  *time.Time                     `json:"unlocked_at,omitempty"`
+	Evidence    *benchmark.AchievementEvidence `json:"evidence,omitempty"`
+	Progress    *AchievementProgress           `json:"progress,omitempty"`
 }
 
-// seedDefinitions returns the initial badge catalogue in a stable order.
-func seedDefinitions(now time.Time) []Achievement {
-	def := func(key, name, desc, icon string) Achievement {
-		return Achievement{ID: key, Key: key, Name: name, Description: desc, IconKey: icon, CreatedAt: now}
-	}
-	return []Achievement{
-		def(KeyFirstPortfolio, "First Portfolio", "Added your first portfolio position.", "portfolio"),
-		def(KeyFirstSprint, "First Sprint", "Joined your first weekly sprint.", "sprint"),
-		def(KeyGreenPortfolio, "Green Portfolio", "Your portfolio performance is positive.", "green"),
-		def(KeyIndex110, "Index 110", "Reached a portfolio index of 110 or higher.", "index"),
-		def(KeyTop10Sprint, "Top 10 Sprint", "Ranked in the top 10 of a sprint leaderboard.", "trophy"),
+// AchievementProgress is the live, privacy-safe state for a locked benchmark
+// badge. It exposes percentage returns and time coverage only—never holdings,
+// values, quantities, account ids, or monetary gain/loss.
+type AchievementProgress struct {
+	State                     string   `json:"state"`
+	ProgressPercentage        float64  `json:"progress_percentage"`
+	HistoryCoveragePercentage float64  `json:"history_coverage_percentage"`
+	PortfolioReturnPercentage *float64 `json:"portfolio_return_percentage,omitempty"`
+	BenchmarkReturnPercentage *float64 `json:"benchmark_return_percentage,omitempty"`
+	CurrentEdgePoints         *float64 `json:"current_edge_points,omitempty"`
+	StartDate                 string   `json:"start_date,omitempty"`
+	EndDate                   string   `json:"end_date,omitempty"`
+	Reason                    string   `json:"reason"`
+}
+
+// iconKeyForDifficulty maps a difficulty tier to a stable icon key the frontend
+// can style. Kept deterministic so responses never churn.
+func iconKeyForDifficulty(d benchmark.Difficulty) string {
+	switch d {
+	case benchmark.DifficultyEasy:
+		return "medal"
+	case benchmark.DifficultyMedium:
+		return "award"
+	case benchmark.DifficultyHard:
+		return "trophy"
+	case benchmark.DifficultyElite:
+		return "crown"
+	default:
+		return "trophy"
 	}
 }

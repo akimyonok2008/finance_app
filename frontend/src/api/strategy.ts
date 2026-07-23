@@ -2,6 +2,7 @@ import { apiRequest } from "@/api/client";
 import type {
   CopyFromProfileResponse,
   CopyPreviewResponse,
+  CompareProfileResponse,
   StrategySourceProfile,
   StrategyWeight,
 } from "@/types/strategy";
@@ -74,4 +75,56 @@ export async function copyFromProfile(
       body: { handle, weights },
     }),
   );
+}
+
+export async function compareProfile(handle: string): Promise<CompareProfileResponse> {
+  const raw = record(
+    await apiRequest<unknown>("/strategy-portfolio/compare-profile", {
+      method: "POST",
+      body: { handle },
+    }),
+  );
+  const concentration = record(raw.concentration_comparison);
+  return {
+    target_profile: normalizeSource(raw.target_profile),
+    summary: stringValue(raw.summary) ?? "",
+    overlap_score: numberValue(raw.overlap_score),
+    shared_symbols: Array.isArray(raw.shared_symbols)
+      ? raw.shared_symbols.filter((item): item is string => typeof item === "string")
+      : [],
+    weight_differences: Array.isArray(raw.weight_differences)
+      ? raw.weight_differences
+          .map((item) => {
+            const diff = record(item);
+            return {
+              symbol: stringValue(diff.symbol) ?? "",
+              my_weight_percentage: numberValue(diff.my_weight_percentage),
+              target_weight_percentage: numberValue(diff.target_weight_percentage),
+              difference_percentage: numberValue(diff.difference_percentage),
+              asset_type: stringValue(diff.asset_type),
+            };
+          })
+          .filter((item) => item.symbol.length > 0)
+      : [],
+    concentration_comparison: {
+      my_position_count: numberValue(concentration.my_position_count),
+      target_position_count: numberValue(concentration.target_position_count),
+      my_top3_weight_percentage: numberValue(concentration.my_top3_weight_percentage),
+      target_top3_weight_percentage: numberValue(concentration.target_top3_weight_percentage),
+    },
+    learning_points: Array.isArray(raw.learning_points)
+      ? raw.learning_points
+          .map((item) => {
+            const point = record(item);
+            return {
+              title: stringValue(point.title) ?? "",
+              body: stringValue(point.body) ?? "",
+            };
+          })
+          .filter((item) => item.title.length > 0 || item.body.length > 0)
+      : [],
+    disclaimer:
+      stringValue(raw.disclaimer) ??
+      "This is educational comparison, not investment advice.",
+  };
 }

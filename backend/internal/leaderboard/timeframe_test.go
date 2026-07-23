@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
-	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
 type fakeProfiles struct{ byUser map[string]ProfilePublicInfo }
@@ -28,7 +27,7 @@ func TestParseTimeframe(t *testing.T) {
 
 func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(20, 120), // current index 120
 		"u2": summary(5, 105),  // current index 105
 	}}
@@ -53,7 +52,7 @@ func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 
 func TestBuildTimeframe_ExcludesUsersWithoutOldEnoughSnapshot(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(20, 120)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
 	svc := NewService(users, sums)
 	svc.SetSnapshotStore(NewInMemorySnapshotStore()) // empty history
 
@@ -62,9 +61,43 @@ func TestBuildTimeframe_ExcludesUsersWithoutOldEnoughSnapshot(t *testing.T) {
 	assert.Empty(t, board)
 }
 
+func TestBuild_ExcludesPausedUsers(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
+		"u1": {RankedIndex: 130, RankedReturnPercentage: 30},
+		"u2": {RankedIndex: 150, RankedReturnPercentage: 50, Paused: true}, // empty portfolio
+	}}
+	svc := NewService(users, sums)
+
+	board, err := svc.Build(context.Background())
+	require.NoError(t, err)
+	require.Len(t, board, 1, "paused (empty-portfolio) user must be excluded from active ranking")
+	assert.Equal(t, "Alpha", board[0].DisplayName)
+}
+
+func TestBuildTimeframe_IgnoresPreEpochSnapshots(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	epoch := now.Add(-3 * 24 * time.Hour) // ranking epoch 3 days ago
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
+		"u1": {RankedIndex: 120, RankedReturnPercentage: 20, TrackingStartedAt: epoch},
+	}}
+	svc := NewService(users, sums)
+	svc.now = func() time.Time { return now }
+
+	store := NewInMemorySnapshotStore()
+	svc.SetSnapshotStore(store)
+	// Only a legacy snapshot from before the epoch exists (a week ago).
+	require.NoError(t, store.Record(context.Background(), "u1", 300, now.Add(-7*24*time.Hour)))
+
+	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
+	require.NoError(t, err)
+	assert.Empty(t, board, "pre-epoch legacy snapshot must be ignored -> not enough ranked history")
+}
+
 func TestBuild_EnrichesPublicProfilesOnly(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(10, 110),
 		"u2": summary(5, 105),
 	}}
@@ -94,7 +127,7 @@ func TestBuild_EnrichesPublicProfilesOnly(t *testing.T) {
 
 func TestBuild_WeightsHiddenWhenShowWeightsFalse(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(10, 110)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(10, 110)}}
 	svc := NewService(users, sums)
 	svc.SetProfileProvider(fakeProfiles{byUser: map[string]ProfilePublicInfo{
 		"u1": {Handle: "alpha", StrategyTag: "growth", IsPublic: true, ShowWeights: false,
@@ -111,7 +144,7 @@ func TestBuild_WeightsHiddenWhenShowWeightsFalse(t *testing.T) {
 
 func TestUserStanding(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary(8, 108),
 		"u2": summary(12, 112),
 		"u3": summary(-3, 97),
@@ -143,7 +176,7 @@ func TestUserStanding(t *testing.T) {
 
 func TestUserStanding_WindowedIneligibleWhenHistoryMissing(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(8, 108)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(8, 108)}}
 	svc := NewService(users, sums)
 	svc.SetSnapshotStore(NewInMemorySnapshotStore())
 
@@ -156,7 +189,7 @@ func TestUserStanding_WindowedIneligibleWhenHistoryMissing(t *testing.T) {
 
 func TestRefreshCache_RecordsSnapshotsWithoutCache(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeSummaries{byUser: map[string]*portfolio.PortfolioSummary{"u1": summary(15, 115)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(15, 115)}}
 	svc := NewService(users, sums)
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
@@ -167,7 +200,7 @@ func TestRefreshCache_RecordsSnapshotsWithoutCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, skipped)
 
-	idx, found, err := store.IndexAtOrBefore(context.Background(), "u1", now)
+	idx, found, err := store.IndexAtOrBefore(context.Background(), "u1", now, time.Time{})
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, 115.0, idx)

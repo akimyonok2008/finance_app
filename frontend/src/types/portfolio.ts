@@ -15,6 +15,23 @@ export type Position = {
   quantity: number;
   baseline_price: number;
   currency: string;
+  status?: "open" | "closed";
+};
+
+export type ClosedPosition = {
+  id: string;
+  symbol: string;
+  asset_type: AssetType;
+  quantity: number;
+  baseline_price: number;
+  baseline_currency: string;
+  close_price: number;
+  close_price_currency: string;
+  closed_at: string;
+  realized_gain_loss_base: number;
+  realized_gain_loss_percentage: number;
+  closed_cost_basis_base?: number;
+  base_currency: string;
 };
 
 /**
@@ -66,7 +83,42 @@ export type PortfolioSummary = {
   gain_loss_percentage: number;
   portfolio_index: number;
   positions?: PositionSummary[];
+  closed_positions?: ClosedPosition[];
+  active_cost_basis_base?: number;
+  active_current_value_base?: number;
+  unrealized_gain_loss_base?: number;
+  closed_cost_basis_base?: number;
+  realized_gain_loss_base?: number;
   quote_status?: QuoteStatus;
+};
+
+export type PortfolioArchiveTimeframe = "1W" | "1M" | "3M" | "6M" | "1Y";
+
+export type PortfolioArchivePoint = {
+  captured_at: string;
+  portfolio_index: number;
+  gain_loss_percentage: number;
+};
+
+export type PortfolioArchiveSnapshot = {
+  captured_at: string;
+  portfolio_index: number;
+  gain_loss_percentage?: number;
+  total_cost_basis?: number;
+  current_value?: number;
+  unrealized_gain_loss_base?: number;
+  realized_gain_loss_base?: number;
+  positions?: PositionSummary[];
+  closed_positions?: ClosedPosition[];
+};
+
+export type PortfolioArchives = {
+  timeframe: PortfolioArchiveTimeframe;
+  from: string;
+  to: string;
+  points: PortfolioArchivePoint[];
+  earliest_snapshot?: PortfolioArchiveSnapshot;
+  latest_snapshot?: PortfolioArchiveSnapshot;
 };
 
 /**
@@ -83,6 +135,14 @@ export type CreatePositionInput = {
 export type UpdatePositionInput = {
   quantity: number;
 };
+
+export const PORTFOLIO_ARCHIVE_TIMEFRAMES: PortfolioArchiveTimeframe[] = [
+  "1W",
+  "1M",
+  "3M",
+  "6M",
+  "1Y",
+];
 
 export const ASSET_TYPES: AssetType[] = ["stock", "etf", "crypto"];
 

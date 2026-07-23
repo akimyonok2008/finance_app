@@ -3,8 +3,7 @@ import { Copy, GitCompare } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 
-import { compareProfile } from "@/api/coach";
-import { copyFromProfile, copyPreview } from "@/api/strategy";
+import { compareProfile, copyFromProfile, copyPreview } from "@/api/strategy";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,8 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { queryKeys } from "@/hooks/queryKeys";
-import type { CompareProfileResponse } from "@/types/coach";
-import type { CopyPreviewResponse } from "@/types/strategy";
+import type { CompareProfileResponse, CopyPreviewResponse } from "@/types/strategy";
 import { cn } from "@/utils/cn";
 
 type StrategyProfileActionsProps = {

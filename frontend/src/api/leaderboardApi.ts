@@ -105,6 +105,7 @@ export async function getLeaderboardStanding(
     percentile: numberValue(raw.percentile),
     ranked_return_percentage: numberValue(raw.ranked_return_percentage),
     ranked_index: numberValue(raw.ranked_index),
+    paused: Boolean(raw.paused),
     next_milestone:
       raw.next_milestone && typeof raw.next_milestone === "object"
         ? {

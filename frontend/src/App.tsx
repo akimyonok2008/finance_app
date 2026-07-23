@@ -1,19 +1,74 @@
+import { lazy, Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 
 import { AuthProvider } from "@/auth/AuthProvider";
 import { ProtectedRoute } from "@/auth/ProtectedRoute";
-import { DashboardPage } from "@/pages/Dashboard/DashboardPage";
-import { LoginPage } from "@/pages/auth/LoginPage";
-import { RegisterPage } from "@/pages/auth/RegisterPage";
-import { PortfolioPage } from "@/pages/PortfolioPage";
-import { LeaderboardPage } from "@/pages/leaderboard/LeaderboardPage";
-import { MyProfilePage } from "@/pages/Profile/MyProfilePage";
-import { PublicProfilePage } from "@/pages/Profile/PublicProfilePage";
-import { ExplorePage } from "@/pages/Explore/ExplorePage";
-import { FriendsPage } from "@/pages/FriendsPage";
-import { MessagesPage } from "@/pages/MessagesPage";
+import { useAuth } from "@/auth/useAuth";
+
+const DashboardPage = lazy(() =>
+  import("@/pages/Dashboard/DashboardPage").then(({ DashboardPage }) => ({
+    default: DashboardPage,
+  })),
+);
+const LoginPage = lazy(() =>
+  import("@/pages/auth/LoginPage").then(({ LoginPage }) => ({
+    default: LoginPage,
+  })),
+);
+const RegisterPage = lazy(() =>
+  import("@/pages/auth/RegisterPage").then(({ RegisterPage }) => ({
+    default: RegisterPage,
+  })),
+);
+const PortfolioPage = lazy(() =>
+  import("@/pages/PortfolioPage").then(({ PortfolioPage }) => ({
+    default: PortfolioPage,
+  })),
+);
+const LeaderboardPage = lazy(() =>
+  import("@/pages/leaderboard/LeaderboardPage").then(({ LeaderboardPage }) => ({
+    default: LeaderboardPage,
+  })),
+);
+const MyProfilePage = lazy(() =>
+  import("@/pages/Profile/MyProfilePage").then(({ MyProfilePage }) => ({
+    default: MyProfilePage,
+  })),
+);
+const PublicProfilePage = lazy(() =>
+  import("@/pages/Profile/PublicProfilePage").then(({ PublicProfilePage }) => ({
+    default: PublicProfilePage,
+  })),
+);
+const ExplorePage = lazy(() =>
+  import("@/pages/Explore/ExplorePage").then(({ ExplorePage }) => ({
+    default: ExplorePage,
+  })),
+);
+const FriendsPage = lazy(() =>
+  import("@/pages/FriendsPage").then(({ FriendsPage }) => ({
+    default: FriendsPage,
+  })),
+);
+const MessagesPage = lazy(() =>
+  import("@/pages/MessagesPage").then(({ MessagesPage }) => ({
+    default: MessagesPage,
+  })),
+);
+const LandingPage = lazy(() =>
+  import("@/pages/LandingPage").then(({ LandingPage }) => ({
+    default: LandingPage,
+  })),
+);
+const AchievementsPage = lazy(() =>
+  import("@/pages/achievements/AchievementsPage").then(
+    ({ AchievementsPage }) => ({
+      default: AchievementsPage,
+    }),
+  ),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,116 +80,135 @@ const queryClient = new QueryClient({
   },
 });
 
+function PublicHomeRoute() {
+  const { isAuthenticated, isBootstrapping } = useAuth();
+
+  if (isBootstrapping) return null;
+  if (isAuthenticated) return <Navigate to="/dashboard" replace />;
+
+  return <LandingPage />;
+}
+
+function RouteFallback() {
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-50">
+      <div className="mx-auto flex min-h-screen max-w-7xl items-center justify-center px-4">
+        <div className="h-6 w-6 animate-spin rounded-full border border-zinc-800 border-t-zinc-300" />
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
         <QueryClientProvider client={queryClient}>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
+          <Suspense fallback={<RouteFallback />}>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
 
-            <Route
-              path="/dashboard"
-              element={
-                <ProtectedRoute>
-                  <DashboardPage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/dashboard"
+                element={
+                  <ProtectedRoute>
+                    <DashboardPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/portfolio"
-              element={
-                <ProtectedRoute>
-                  <PortfolioPage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/portfolio"
+                element={
+                  <ProtectedRoute>
+                    <PortfolioPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/leaderboard"
-              element={
-                <ProtectedRoute>
-                  <LeaderboardPage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/leaderboard"
+                element={
+                  <ProtectedRoute>
+                    <LeaderboardPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route path="/arena" element={<Navigate to="/leaderboard" replace />} />
+              <Route path="/arena" element={<Navigate to="/leaderboard" replace />} />
 
-            <Route
-              path="/coach"
-              element={<Navigate to="/portfolio?tab=coach" replace />}
-            />
+              <Route
+                path="/profile"
+                element={
+                  <ProtectedRoute>
+                    <MyProfilePage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/profile"
-              element={
-                <ProtectedRoute>
-                  <MyProfilePage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/profiles/:handle"
+                element={
+                  <ProtectedRoute>
+                    <PublicProfilePage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/profiles/:handle"
-              element={
-                <ProtectedRoute>
-                  <PublicProfilePage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/explore"
+                element={
+                  <ProtectedRoute>
+                    <ExplorePage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/explore"
-              element={
-                <ProtectedRoute>
-                  <ExplorePage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/friends"
+                element={
+                  <ProtectedRoute>
+                    <FriendsPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/friends"
-              element={
-                <ProtectedRoute>
-                  <FriendsPage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/messages"
+                element={
+                  <ProtectedRoute>
+                    <MessagesPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/messages"
-              element={
-                <ProtectedRoute>
-                  <MessagesPage />
-                </ProtectedRoute>
-              }
-            />
+              <Route
+                path="/messages/:conversationId"
+                element={
+                  <ProtectedRoute>
+                    <MessagesPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route
-              path="/messages/:conversationId"
-              element={
-                <ProtectedRoute>
-                  <MessagesPage />
-                </ProtectedRoute>
-              }
-            />
+              <Route path="/sprint" element={<Navigate to="/leaderboard" replace />} />
+              <Route path="/profile/me" element={<Navigate to="/profile" replace />} />
+              <Route
+                path="/achievements"
+                element={
+                  <ProtectedRoute>
+                    <AchievementsPage />
+                  </ProtectedRoute>
+                }
+              />
 
-            <Route path="/sprint" element={<Navigate to="/leaderboard" replace />} />
-            <Route path="/profile/me" element={<Navigate to="/profile" replace />} />
-            <Route
-              path="/achievements"
-              element={<Navigate to="/leaderboard" replace />}
-            />
+              <Route path="/" element={<PublicHomeRoute />} />
 
-            {/* Redirect root to the overview hub. */}
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-
-            {/* Fallback for unimplemented routes */}
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
-          </Routes>
+              {/* Fallback for unimplemented routes */}
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            </Routes>
+          </Suspense>
 
           <Toaster
             theme="dark"

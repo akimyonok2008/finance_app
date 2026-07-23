@@ -14,7 +14,6 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
-	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
 type stubUsers struct{ users []auth.User }
@@ -22,10 +21,10 @@ type stubUsers struct{ users []auth.User }
 func (s stubUsers) ListUsers(_ context.Context) ([]auth.User, error) { return s.users, nil }
 
 type stubSummaries struct {
-	byUser map[string]*portfolio.PortfolioSummary
+	byUser map[string]leaderboard.RankedPerformance
 }
 
-func (s stubSummaries) Summary(_ context.Context, userID string) (*portfolio.PortfolioSummary, error) {
+func (s stubSummaries) CurrentRankedPerformance(_ context.Context, userID string) (leaderboard.RankedPerformance, error) {
 	return s.byUser[userID], nil
 }
 
@@ -35,9 +34,9 @@ func newEnv() (http.Handler, *auth.TokenManager) {
 		{ID: "u1", Email: "alpha@example.com", DisplayName: "AlphaWolf_91", AvatarKey: "fox", PasswordHash: "hash1"},
 		{ID: "u2", Email: "bull@example.com", DisplayName: "SilentBull_77", AvatarKey: "bull", PasswordHash: "hash2"},
 	}}
-	sums := stubSummaries{byUser: map[string]*portfolio.PortfolioSummary{
-		"u1": {GainLossPercentage: 12.4, PortfolioIndex: 112.4},
-		"u2": {GainLossPercentage: 8.1, PortfolioIndex: 108.1},
+	sums := stubSummaries{byUser: map[string]leaderboard.RankedPerformance{
+		"u1": {RankedReturnPercentage: 12.4, RankedIndex: 112.4},
+		"u2": {RankedReturnPercentage: 8.1, RankedIndex: 108.1},
 	}}
 	svc := leaderboard.NewService(users, sums)
 	h := leaderboard.NewHandler(svc)

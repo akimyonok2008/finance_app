@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -49,6 +49,76 @@
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
+  }
+
+  .brand-wordmark {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+    letter-spacing: 0;
+  }
+
+  .leaderboard-shell {
+    font-family: "Manrope", "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .leaderboard-display {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+  }
+
+  .leaderboard-shell .font-mono {
+    font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .dashboard-shell {
+    font-family: "Manrope", "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .dashboard-display {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+  }
+
+  .dashboard-shell .font-mono {
+    font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .portfolio-shell {
+    font-family: "Manrope", "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .portfolio-display {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+  }
+
+  .portfolio-shell .font-mono {
+    font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .explore-shell {
+    font-family: "Manrope", "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .explore-display {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+  }
+
+  .explore-shell .font-mono {
+    font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .achievements-shell {
+    font-family: "Manrope", "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .achievements-display {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+  }
+
+  .achievements-card-title {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+    letter-spacing: -0.01em;
+  }
+
+  .achievements-shell .font-mono {
+    font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 
   /* Numeric values should always use tabular figures for clean alignment. */

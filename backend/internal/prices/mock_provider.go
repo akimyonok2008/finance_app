@@ -43,6 +43,14 @@ func (m *MockPriceProvider) Set(symbol string, price float64, currency string) {
 	m.quotes[normalizeSymbol(symbol)] = mockQuote{price: price, currency: currency}
 }
 
+// Unset removes a symbol's quote, making it unpriceable. Used by tests that
+// exercise price-failure behaviour.
+func (m *MockPriceProvider) Unset(symbol string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.quotes, normalizeSymbol(symbol))
+}
+
 // GetLatestPrice returns the seeded quote for symbol, or ErrPriceUnavailable.
 func (m *MockPriceProvider) GetLatestPrice(_ context.Context, symbol string) (*Price, error) {
 	sym := normalizeSymbol(symbol)

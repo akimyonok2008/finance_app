@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
-	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
 // UserProvider enumerates the users to rank. Implemented by *auth.Service.
@@ -17,10 +16,23 @@ type UserProvider interface {
 	ListUsers(ctx context.Context) ([]auth.User, error)
 }
 
-// PortfolioSummaryProvider computes a single user's portfolio summary.
-// Implemented by *portfolio.Service (its Summary method).
-type PortfolioSummaryProvider interface {
-	Summary(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error)
+// RankedPerformance is the leaderboard's view of a user's persistent ranked
+// standing — the single trusted source of global performance. It carries NO
+// absolute monetary values. Paused users (empty portfolios) preserve their index
+// but are excluded from active ranking.
+type RankedPerformance struct {
+	RankedIndex            float64
+	RankedReturnPercentage float64
+	Paused                 bool
+	TrackingStartedAt      time.Time
+}
+
+// RankedPerformanceProvider supplies a user's persistent ranked performance.
+// Implemented by an adapter over *performance.Service. This replaces the old
+// PortfolioSummaryProvider: the leaderboard no longer derives trusted ranking
+// from mutable position baselines.
+type RankedPerformanceProvider interface {
+	CurrentRankedPerformance(ctx context.Context, userID string) (RankedPerformance, error)
 }
 
 // ProfilePublicInfo is the public-facing profile data joined onto a leaderboard
@@ -47,17 +59,17 @@ const maxLeaderboardSize = 100
 // it falls back to live calculation, so the cache is never a single point of
 // failure.
 type Service struct {
-	users      UserProvider
-	portfolios PortfolioSummaryProvider
-	cache      LeaderboardCache      // optional
-	snapshots  SnapshotStore         // optional; enables trailing-window timeframes
-	profiles   ProfilePublicProvider // optional; enriches rows with handle/tag/weights
-	now        func() time.Time
+	users     UserProvider
+	ranked    RankedPerformanceProvider
+	cache     LeaderboardCache      // optional
+	snapshots SnapshotStore         // optional; enables trailing-window timeframes
+	profiles  ProfilePublicProvider // optional; enriches rows with handle/tag/weights
+	now       func() time.Time
 }
 
-// NewService wires a leaderboard Service.
-func NewService(users UserProvider, portfolios PortfolioSummaryProvider) *Service {
-	return &Service{users: users, portfolios: portfolios, now: func() time.Time { return time.Now().UTC() }}
+// NewService wires a leaderboard Service around the ranked-performance provider.
+func NewService(users UserProvider, ranked RankedPerformanceProvider) *Service {
+	return &Service{users: users, ranked: ranked, now: func() time.Time { return time.Now().UTC() }}
 }
 
 // SetCache attaches an optional ranking cache (Redis in production).
@@ -194,18 +206,23 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	now := s.now()
 	skipped := 0
 	for _, u := range users {
-		summary, err := s.portfolios.Summary(ctx, u.ID)
-		if err != nil || summary == nil {
+		rp, err := s.ranked.CurrentRankedPerformance(ctx, u.ID)
+		if err != nil {
 			skipped++
 			continue
 		}
+		if rp.Paused {
+			continue // empty portfolios are excluded from ranking, not scored
+		}
 		if s.snapshots != nil {
-			if err := s.snapshots.Record(ctx, u.ID, summary.PortfolioIndex, now); err != nil {
+			// Record the persistent RANKED index (post-epoch), never the legacy
+			// reconstructed portfolio index.
+			if err := s.snapshots.Record(ctx, u.ID, rp.RankedIndex, now); err != nil {
 				log.Printf("leaderboard: snapshot record failed for %s: %v", u.ID, err)
 			}
 		}
 		if s.cache != nil {
-			if err := s.cache.UpsertGlobalScore(ctx, u.ID, summary.GainLossPercentage); err != nil {
+			if err := s.cache.UpsertGlobalScore(ctx, u.ID, rp.RankedReturnPercentage); err != nil {
 				return skipped, err
 			}
 		}
@@ -271,9 +288,9 @@ func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
 	}
 	rows := make([]rankedUser, 0, len(users))
 	for _, user := range users {
-		summary, err := s.portfolios.Summary(ctx, user.ID)
-		if err == nil && summary != nil {
-			rows = append(rows, rankedUser{id: user.ID, displayName: user.DisplayName, returnPct: summary.GainLossPercentage})
+		rp, err := s.ranked.CurrentRankedPerformance(ctx, user.ID)
+		if err == nil && !rp.Paused {
+			rows = append(rows, rankedUser{id: user.ID, displayName: user.DisplayName, returnPct: rp.RankedReturnPercentage})
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -317,6 +334,7 @@ type Standing struct {
 	RankedReturnPercentage float64
 	RankedIndex            float64
 	Ranked                 bool
+	Paused                 bool
 	Reason                 string
 	NextMilestone          *Milestone
 }
@@ -353,7 +371,14 @@ func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe)
 		}
 	}
 	if !st.Ranked {
-		if _, windowed := tf.window(); windowed {
+		// Distinguish a paused portfolio (had ranked history, now empty — index
+		// preserved and excluded from ranking) from a user who has never ranked.
+		if rp, err := s.ranked.CurrentRankedPerformance(ctx, userID); err == nil && rp.Paused {
+			st.Paused = true
+			st.RankedIndex = rp.RankedIndex
+			st.RankedReturnPercentage = rp.RankedReturnPercentage
+			st.Reason = "Ranked tracking is paused. Your accumulated index is preserved — add a position to resume from it."
+		} else if _, windowed := tf.window(); windowed {
 			st.Reason = "Not enough ranked history for this timeframe yet."
 		} else {
 			st.Reason = "Create a strategy baseline to enter the leaderboard."
@@ -385,20 +410,25 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 	rows := make([]rankedRow, 0, len(users))
 	skipped := 0
 	for _, u := range users {
-		summary, err := s.portfolios.Summary(ctx, u.ID)
-		if err != nil || summary == nil {
+		rp, err := s.ranked.CurrentRankedPerformance(ctx, u.ID)
+		if err != nil {
 			skipped++
-			log.Printf("leaderboard: skipping user %s due to summary error: %v", u.ID, err)
+			log.Printf("leaderboard: skipping user %s due to ranked-performance error: %v", u.ID, err)
 			continue
 		}
-		// Default = since-baseline (ALL): index already encodes it.
-		retPct := summary.PortfolioIndex - 100
-		idx := summary.PortfolioIndex
+		if rp.Paused {
+			continue // empty portfolio: preserved but excluded from active ranking
+		}
+		// Default = all-time (since epoch): the ranked index already encodes it.
+		retPct := rp.RankedReturnPercentage
+		idx := rp.RankedIndex
 		if windowed {
 			if s.snapshots == nil {
 				continue
 			}
-			base, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff)
+			// Only post-epoch snapshots are eligible; legacy pre-epoch history is
+			// ignored so a windowed return can never use a manipulable old index.
+			base, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff, rp.TrackingStartedAt)
 			if err != nil {
 				skipped++
 				log.Printf("leaderboard: skipping user %s due to snapshot error: %v", u.ID, err)
@@ -407,8 +437,8 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 			if !found || base <= 0 {
 				continue
 			}
-			retPct = (summary.PortfolioIndex/base - 1) * 100
-			idx = 100 * summary.PortfolioIndex / base
+			retPct = (rp.RankedIndex/base - 1) * 100
+			idx = 100 * rp.RankedIndex / base
 		}
 		e := rankedEntry(0, u.DisplayName, u.AvatarKey, round2(retPct), round2(idx))
 		s.enrich(ctx, u.ID, &e)

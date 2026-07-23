@@ -6,13 +6,14 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/benchmark"
 	"github.com/ardakimyonok/finance_app/internal/clock"
-	"github.com/ardakimyonok/finance_app/internal/coach"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/config"
 	"github.com/ardakimyonok/finance_app/internal/db"
@@ -20,6 +21,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
+	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/profile"
@@ -64,6 +66,78 @@ func (r rankProvider) GetUserRank(ctx context.Context, competitionID, userID str
 	return r.s.GetUserRank(ctx, competitionID, userID)
 }
 
+// benchmarkHistoryAdapter maps the marketdata historical provider to the
+// benchmark engine's HistoricalPriceProvider port.
+type benchmarkHistoryAdapter struct {
+	h *marketdata.TwelveDataHistoryProvider
+}
+
+func (a benchmarkHistoryAdapter) GetAdjustedCloseSeries(ctx context.Context, symbol string, start, end time.Time) ([]benchmark.PricePoint, error) {
+	bars, err := a.h.DailySeries(ctx, symbol, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]benchmark.PricePoint, 0, len(bars))
+	for _, bar := range bars {
+		out = append(out, benchmark.PricePoint{Date: bar.Date, AdjustedClose: bar.Close})
+	}
+	return out, nil
+}
+
+// portfolioSnapshotAdapter records daily portfolio snapshots for every user,
+// giving benchmark evaluation a continuous portfolio index series.
+type portfolioSnapshotAdapter struct {
+	portfolio *portfolio.Service
+	users     *auth.Service
+}
+
+func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, error) {
+	users, err := a.users.ListUsers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	recorded := 0
+	for _, u := range users {
+		wrote, err := a.portfolio.RecordDailySnapshot(ctx, u.ID)
+		if err != nil {
+			slog.Warn("daily snapshot failed for user", "user_id", u.ID, "error", err)
+			continue
+		}
+		if wrote {
+			recorded++
+		}
+	}
+	return recorded, nil
+}
+
+// achievementPerformanceProvider adapts the portfolio archive engine to the
+// benchmark index series the achievements module needs. It sources the real
+// portfolio TWR index (never recomputed from trades) and filters to the window.
+type achievementPerformanceProvider struct{ s *portfolio.Service }
+
+func (a achievementPerformanceProvider) GetPortfolioIndexSeries(ctx context.Context, userID string, start, end time.Time) ([]benchmark.IndexPoint, error) {
+	// 1Y archives cover every badge period; filter points to [start, end].
+	archives, err := a.s.Archives(ctx, userID, portfolio.ArchiveTimeframe1Y)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]benchmark.IndexPoint, 0, len(archives.Points))
+	for _, p := range archives.Points {
+		captured, err := time.Parse(time.RFC3339, p.CapturedAt)
+		if err != nil {
+			continue
+		}
+		if captured.Before(start) || captured.After(end) {
+			continue
+		}
+		out = append(out, benchmark.IndexPoint{
+			Date:  captured.UTC().Format("2006-01-02"),
+			Index: p.PortfolioIndex,
+		})
+	}
+	return out, nil
+}
+
 // leaderboardProfileAdapter joins public profile data onto leaderboard rows,
 // converting profile weights into the leaderboard package's shape.
 type leaderboardProfileAdapter struct{ s *profile.Service }
@@ -83,6 +157,40 @@ func (a leaderboardProfileAdapter) PublicInfo(ctx context.Context, userID string
 		Handle: info.Handle, StrategyTag: info.StrategyTag,
 		IsPublic: info.IsPublic, ShowWeights: info.ShowWeights, Weights: weights,
 	}, true, nil
+}
+
+// rankedPerformanceAdapter bridges the ranked-performance service to the
+// leaderboard's narrow provider port, translating the paused status into the
+// boolean the leaderboard uses to exclude empty portfolios.
+type rankedPerformanceAdapter struct{ s *performance.Service }
+
+func (a rankedPerformanceAdapter) CurrentRankedPerformance(ctx context.Context, userID string) (leaderboard.RankedPerformance, error) {
+	rp, err := a.s.CurrentRankedPerformance(ctx, userID)
+	if err != nil {
+		return leaderboard.RankedPerformance{}, err
+	}
+	return leaderboard.RankedPerformance{
+		RankedIndex:            rp.RankedIndex,
+		RankedReturnPercentage: rp.RankedReturnPercentage,
+		Paused:                 rp.Status == performance.StatusPaused,
+		TrackingStartedAt:      rp.TrackingStartedAt,
+	}, nil
+}
+
+// profileRankedAdapter bridges the ranked-performance service to the profile
+// module's port so public profiles surface the trusted ranked index.
+type profileRankedAdapter struct{ s *performance.Service }
+
+func (a profileRankedAdapter) CurrentRankedPerformance(ctx context.Context, userID string) (profile.RankedPerformance, error) {
+	rp, err := a.s.CurrentRankedPerformance(ctx, userID)
+	if err != nil {
+		return profile.RankedPerformance{}, err
+	}
+	return profile.RankedPerformance{
+		RankedIndex:            rp.RankedIndex,
+		RankedReturnPercentage: rp.RankedReturnPercentage,
+		Paused:                 rp.Status == performance.StatusPaused,
+	}, nil
 }
 
 type profileTimeframeRankAdapter struct{ s *leaderboard.Service }
@@ -108,6 +216,7 @@ func (a profileTimeframeRankAdapter) UserRankings(ctx context.Context, timeframe
 type repositories struct {
 	users        auth.UserRepository
 	portfolio    portfolio.Repository
+	performance  performance.Repository
 	competitions competitions.CompetitionRepository
 	achievements achievements.AchievementRepository
 	profiles     profile.Repository
@@ -160,6 +269,7 @@ func main() {
 		repos = repositories{
 			users:        auth.NewInMemoryUserRepository(),
 			portfolio:    portfolio.NewInMemoryRepository(),
+			performance:  performance.NewInMemoryRepository(),
 			competitions: competitions.NewInMemoryCompetitionRepository(),
 			achievements: achievements.NewInMemoryAchievementRepository(),
 			profiles:     profile.NewInMemoryRepository(),
@@ -186,6 +296,7 @@ func main() {
 		repos = repositories{
 			users:        auth.NewPostgresUserRepository(pool),
 			portfolio:    portfolio.NewPostgresRepository(pool),
+			performance:  performance.NewPostgresRepository(pool),
 			competitions: competitions.NewPostgresCompetitionRepository(pool),
 			achievements: achRepo,
 			profiles:     profile.NewPostgresRepository(pool),
@@ -204,6 +315,7 @@ func main() {
 
 	// --- market-data provider (+ conservative quote cache service) ---
 	var marketProvider marketdata.Provider
+	var twelveData *marketdata.TwelveDataProvider // set when the real feed is active
 	priceProviderName := cfg.PriceProvider
 	switch cfg.PriceProvider {
 	case "mock", "":
@@ -225,6 +337,7 @@ func main() {
 			os.Exit(1)
 		}
 		marketProvider = p
+		twelveData = p
 	case "yahoo":
 		slog.Warn("the Yahoo (finance-go) provider is PROTOTYPE ONLY; use PRICE_PROVIDER=twelvedata for Prototype 3A real data")
 		baseProvider, err := prices.NewProvider(cfg.PriceProvider)
@@ -265,38 +378,77 @@ func main() {
 	})
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
-	leaderboardSvc := leaderboard.NewService(authSvc, portfolioSvc)
+	// Ranked-performance engine: the single trusted source of global ranked
+	// performance. The portfolio service checkpoints into it on every mutation
+	// and supplies the current valuation it reads back.
+	performanceSvc := performance.NewService(repos.performance)
+	performanceSvc.SetValuator(portfolioSvc)
+	portfolioSvc.SetCheckpointer(performanceSvc)
+	leaderboardSvc := leaderboard.NewService(authSvc, rankedPerformanceAdapter{performanceSvc})
 	leaderboardSvc.SetSnapshotStore(repos.snapshots)
 	competitionsSvc := competitions.NewService(
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
 	)
-	achievementsSvc := achievements.NewService(
-		repos.achievements, positionProvider{portfolioSvc}, summaryProvider{portfolioSvc},
-		rankProvider{competitionsSvc},
+	// Benchmark badge engine. The portfolio side always uses the real archive
+	// index series; the benchmark side uses real Twelve Data historical closes
+	// when the real feed is enabled, and falls back to a deterministic offline
+	// provider only for local dev/tests without an API key. The Berkshire 13F
+	// basket resolves from real disclosed holdings.
+	var benchmarkHistory benchmark.HistoricalPriceProvider
+	if twelveData != nil {
+		benchmarkHistory = benchmarkHistoryAdapter{
+			marketdata.NewTwelveDataHistoryProvider(twelveData, cfg.PriceCacheTTL),
+		}
+		slog.Info("benchmark evaluation using real Twelve Data historical prices")
+	} else {
+		benchmarkHistory = benchmark.NewMockHistoricalPriceProvider(benchmark.DefaultMockReturns())
+		slog.Warn("benchmark evaluation using offline mock prices (set PRICE_PROVIDER=twelvedata + ENABLE_REAL_MARKET_DATA=true for real data)")
+	}
+	benchmarkEngine := benchmark.NewBenchmarkConstructionService(
+		benchmarkHistory,
+		benchmark.Recipes,
+		benchmark.NewSnapshotRecipeResolver(benchmark.DefaultRecipeSnapshots()),
 	)
-	achievementsSvc.SetCurrentCompetitionProvider(competitionsSvc)
+	rulesEngine := benchmark.NewRulesEngine(benchmark.DefaultEvaluators())
+	achievementsSvc := achievements.NewService(
+		repos.achievements,
+		achievementPerformanceProvider{portfolioSvc},
+		benchmarkEngine,
+		rulesEngine,
+	)
 	profileSvc := profile.NewService(repos.profiles, userProvider{authSvc}, summaryProvider{portfolioSvc})
 	profileSvc.SetAchievementProvider(achievementsSvc)
 	profileSvc.SetSprintRankProvider(competitionsSvc)
 	profileSvc.SetGlobalRankProvider(leaderboardSvc)
 	profileSvc.SetTimeframeRankProvider(profileTimeframeRankAdapter{leaderboardSvc})
+	profileSvc.SetPerformanceHistoryProvider(portfolioSvc)
+	profileSvc.SetRankedPerformanceProvider(profileRankedAdapter{performanceSvc})
 	// Enrich leaderboard rows with public profile data (handle/tag/weights).
 	leaderboardSvc.SetProfileProvider(leaderboardProfileAdapter{profileSvc})
 
-	// --- AI Portfolio Coach ---
-	// Mock is the default, key-free provider. A real provider is only used when
-	// explicitly enabled AND implemented; until then we warn and fall back.
-	var coachProvider coach.Provider = coach.NewMockProvider()
-	if cfg.AIEnableRealProvider && cfg.AIProvider != "mock" && cfg.AIProvider != "" {
-		slog.Warn("AI_ENABLE_REAL_PROVIDER set but no real provider is implemented yet; using mock",
-			"requested_provider", cfg.AIProvider)
-	}
-	coachSvc := coach.NewService(authSvc, portfolioSvc, coachProvider)
-	coachSvc.SetAchievementLister(achievementsSvc)
-	coachSvc.SetProfileProvider(profileSvc)
 	strategySvc := strategy.NewService(profileSvc, portfolioSvc)
 	socialSvc := social.NewService(repos.social, repos.profiles)
+
+	// Ranking-epoch backfill: initialize persistent ranked state at index 100 for
+	// every existing portfolio so their new epoch begins at deployment. Legacy
+	// pre-epoch leaderboard snapshots are ignored by timeframe ranking. Idempotent
+	// and best-effort — a user that already has ranked state is left untouched.
+	if existingUsers, err := authSvc.ListUsers(ctx); err == nil {
+		backfilled := 0
+		for _, u := range existingUsers {
+			if err := performanceSvc.EnsureEpoch(ctx, u.ID); err != nil {
+				slog.Warn("ranked-epoch backfill failed for user", "user_id", u.ID, "error", err)
+				continue
+			}
+			backfilled++
+		}
+		if backfilled > 0 {
+			slog.Info("ranked-performance epoch initialized for existing portfolios", "count", backfilled)
+		}
+	} else {
+		slog.Warn("ranked-epoch backfill skipped: list users failed", "error", err)
+	}
 
 	// --- leaderboard caches (Redis only) ---
 	if redisClient != nil {
@@ -308,6 +460,9 @@ func main() {
 	// --- background workers ---
 	if cfg.EnableBackgroundWorkers {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
+		// Daily portfolio snapshots keep a continuous index series for benchmark
+		// evaluation; the recorder is idempotent per UTC day.
+		worker.SetPortfolioSnapshotter(portfolioSnapshotAdapter{portfolio: portfolioSvc, users: authSvc})
 		worker.Start(ctx)
 	} else {
 		slog.Info("background workers disabled (ENABLE_BACKGROUND_WORKERS=false)")
@@ -327,7 +482,6 @@ func main() {
 		Leaderboard:     leaderboardSvc,
 		Competitions:    competitionsSvc,
 		Achievements:    achievementsSvc,
-		Coach:           coachSvc,
 		Profile:         profileSvc,
 		Strategy:        strategySvc,
 		MarketData:      marketDataSvc,

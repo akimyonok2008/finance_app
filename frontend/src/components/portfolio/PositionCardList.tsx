@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Pencil, Trash2 } from "lucide-react";
+import { Archive, Pencil, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,6 +24,7 @@ type Props = {
   isError: boolean;
   errorMessage?: string;
   onEdit: (position: PositionRow) => void;
+  onClose: (position: PositionRow) => void;
   onDelete: (position: PositionRow) => void;
   /** Opens the add drawer from the empty state. */
   onAdd?: () => void;
@@ -55,6 +56,7 @@ export function PositionCardList({
   isError,
   errorMessage,
   onEdit,
+  onClose,
   onDelete,
   onAdd,
   className,
@@ -105,10 +107,10 @@ export function PositionCardList({
               exit={{ opacity: 0, y: -8, scale: 0.98 }}
               transition={{ type: "spring", stiffness: 260, damping: 24 }}
             >
-              <Card className="p-4">
+              <Card className="border-indigo-300/10 bg-[radial-gradient(circle_at_top_right,rgba(129,140,248,0.07),transparent_38%),rgba(24,24,27,0.52)] p-4 shadow-lg shadow-black/10">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-2">
-                    <span className="text-base font-semibold tracking-wide">
+                    <span className="font-mono text-base font-medium tracking-wide text-cyan-100">
                       {row.symbol}
                     </span>
                     <AssetTypeBadge type={row.asset_type} />
@@ -167,6 +169,15 @@ export function PositionCardList({
                   >
                     <Pencil />
                     Edit
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 text-amber-200 hover:text-amber-100"
+                    onClick={() => onClose(row)}
+                  >
+                    <Archive />
+                    Close
                   </Button>
                   <Button
                     variant="outline"

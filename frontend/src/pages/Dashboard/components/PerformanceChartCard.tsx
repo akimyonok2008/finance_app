@@ -1,5 +1,12 @@
 import { motion } from "framer-motion";
-import { Activity, Coins, TrendingDown, TrendingUp, Wallet } from "lucide-react";
+import {
+  Activity,
+  ArrowRight,
+  Coins,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import {
   Area,
@@ -92,65 +99,76 @@ export function PerformanceChartCard({
 
   return (
     <motion.div
-      className="min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 shadow-sm shadow-black/20 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70 sm:p-5"
+      className="relative min-w-0 overflow-hidden rounded-3xl border border-indigo-300/15 bg-[radial-gradient(circle_at_50%_0%,rgba(129,140,248,0.13),transparent_34%),radial-gradient(circle_at_15%_75%,rgba(34,211,238,0.055),transparent_28%),rgba(24,24,27,0.48)] px-4 pb-4 pt-5 shadow-2xl shadow-black/25 sm:px-7 sm:pb-6 sm:pt-6"
       whileHover={{ y: -2 }}
       transition={{ duration: 0.18 }}
     >
-      {/* Header */}
-      <div className="mb-3.5 flex items-start justify-between gap-4">
-        <div>
-          <div className="text-xs font-medium text-zinc-500">
-            Portfolio Index
-          </div>
-          <div className="mt-1 text-xs text-slate-500">
-            Illustrative index path
-          </div>
-        </div>
-        <div
-          className={cn(
-            "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium tabular-nums",
-            palette.bg,
-            palette.border,
-            palette.text,
-          )}
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-indigo-100/55">
+          Portfolio performance
+        </p>
+        <Link
+          to="/portfolio"
+          className="group inline-flex items-center gap-1 text-xs font-medium text-zinc-500 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300/35"
         >
-          <TrendIcon className="h-3.5 w-3.5" />
-          {formatPercent(gainPct)}
+          View portfolio
+          <ArrowRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
+        </Link>
+      </div>
+
+      <div className="mt-5 text-center sm:mt-6">
+        <p className="text-xs font-medium text-zinc-500">Portfolio Index</p>
+        <div className={cn("mt-1.5 font-mono text-4xl font-medium tabular-nums tracking-[-0.04em] sm:text-5xl", palette.text)}>
+          {index.toFixed(2)}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
+          <span className="text-xs text-zinc-500">Baseline 100.00</span>
+          <span className="h-1 w-1 rounded-full bg-zinc-700" />
+          <div
+            className={cn(
+              "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium tabular-nums",
+              palette.bg,
+              palette.border,
+              palette.text,
+            )}
+          >
+            <TrendIcon className="h-3.5 w-3.5" />
+            {formatPercent(gainPct)}
+          </div>
         </div>
       </div>
 
-      {/* Primary metric */}
-      <div className={cn("font-mono text-3xl font-medium tabular-nums tracking-tight", palette.text)}>
-        {index.toFixed(2)}
-      </div>
-      <div className="mt-1 text-sm text-slate-400">Index · baseline 100.00</div>
-
-      {/* Metric chips */}
-      <div className="mt-3.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <DashboardMetricCard
           label="Value"
           value={formatMoney(summary?.current_value, currency)}
           icon={<Wallet className="h-3.5 w-3.5" />}
+          className="border-cyan-300/10 bg-cyan-300/[0.035]"
         />
         <DashboardMetricCard
           label="Cost basis"
           value={formatMoney(summary?.total_cost_basis, currency)}
           icon={<Coins className="h-3.5 w-3.5" />}
+          className="border-violet-300/10 bg-violet-300/[0.035]"
         />
         <DashboardMetricCard
           label="Gain / Loss"
           value={formatMoney(summary?.gain_loss, currency)}
           tone={tone === "neutral" ? "default" : tone}
+          className={cn(
+            tone === "positive" && "border-emerald-300/10 bg-emerald-300/[0.035]",
+            tone === "negative" && "border-rose-300/10 bg-rose-300/[0.035]",
+          )}
         />
         <DashboardMetricCard
           label="Gain %"
           value={formatPercent(gainPct)}
           tone={tone === "neutral" ? "default" : tone}
+          className="border-amber-300/10 bg-amber-300/[0.035]"
         />
       </div>
 
-      {/* Chart */}
-      <div className="mt-4 h-48 min-h-48 min-w-0">
+      <div className="mt-4 h-44 min-h-44 min-w-0 sm:h-52 sm:min-h-52">
         {isError ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
             <span>We could not load your portfolio summary.</span>
@@ -192,17 +210,17 @@ export function PerformanceChartCard({
                 </defs>
                 <CartesianGrid
                   strokeDasharray="3 3"
-                  stroke="rgba(255,255,255,0.05)"
+                  stroke="rgba(255,255,255,0.045)"
                   vertical={false}
                 />
                 <XAxis
                   dataKey="label"
-                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  tick={{ fill: "#71717a", fontSize: 10 }}
                   axisLine={false}
                   tickLine={false}
                 />
                 <YAxis
-                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  tick={{ fill: "#71717a", fontSize: 10 }}
                   axisLine={false}
                   tickLine={false}
                   domain={["auto", "auto"]}
@@ -213,7 +231,7 @@ export function PerformanceChartCard({
                   type="monotone"
                   dataKey="index"
                   stroke={palette.stroke}
-                  strokeWidth={2}
+                  strokeWidth={2.25}
                   fill="url(#chartGrad)"
                   dot={false}
                   activeDot={{

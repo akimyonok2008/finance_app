@@ -52,13 +52,40 @@ export type MyCompetitionStatus = {
   sprint_index: number;
 };
 
+export type AchievementEvidence = {
+  period: string;
+  start_date: string;
+  end_date: string;
+  portfolio_return_pct: number;
+  benchmark_return_pct: number;
+  edge_points: number;
+  benchmark_recipe_id: string;
+};
+
+export type AchievementBenchmarkProgress = {
+  state: string;
+  progress_percentage: number;
+  history_coverage_percentage: number;
+  portfolio_return_percentage?: number;
+  benchmark_return_percentage?: number;
+  current_edge_points?: number;
+  start_date?: string;
+  end_date?: string;
+  reason: string;
+};
+
 export type Achievement = {
   key: string;
   name: string;
   description: string;
   icon_key: string;
+  difficulty?: string;
+  period?: string;
+  inspired_by?: string;
   unlocked: boolean;
   unlocked_at?: string | null;
+  evidence?: AchievementEvidence | null;
+  progress?: AchievementBenchmarkProgress | null;
 };
 
 export type PerformanceTone = "positive" | "negative" | "neutral";

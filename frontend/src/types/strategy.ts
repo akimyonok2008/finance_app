@@ -18,3 +18,29 @@ export type CopyPreviewResponse = {
 };
 
 export type CopyFromProfileResponse = CopyPreviewResponse;
+
+export type WeightDifference = {
+  symbol: string;
+  my_weight_percentage: number;
+  target_weight_percentage: number;
+  difference_percentage: number;
+  asset_type?: string;
+};
+
+export type ConcentrationComparison = {
+  my_position_count: number;
+  target_position_count: number;
+  my_top3_weight_percentage: number;
+  target_top3_weight_percentage: number;
+};
+
+export type CompareProfileResponse = {
+  target_profile: StrategySourceProfile;
+  summary: string;
+  overlap_score: number;
+  shared_symbols: string[];
+  weight_differences: WeightDifference[];
+  concentration_comparison: ConcentrationComparison;
+  learning_points: Array<{ title: string; body: string }>;
+  disclaimer: string;
+};

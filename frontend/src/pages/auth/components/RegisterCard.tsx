@@ -5,7 +5,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { registerRequest } from "@/api/authApi";
 import { useAuth } from "@/auth/useAuth";
@@ -77,6 +77,9 @@ export function RegisterCard() {
             <ShieldCheck className="h-5 w-5 text-zinc-300" />
           </div>
           <div className="text-center">
+            <p className="brand-wordmark mb-3 text-3xl font-semibold text-zinc-50">
+              Alarvest
+            </p>
             <h1 className="text-xl font-semibold tracking-tight text-zinc-50">
               Create your account
             </h1>
@@ -158,12 +161,12 @@ export function RegisterCard() {
 
         <p className="mt-5 text-center text-sm text-zinc-500">
           Already have an account?{" "}
-          <a
-            href="/login"
+          <Link
+            to="/login"
             className="font-medium text-zinc-300 underline underline-offset-2 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/40"
           >
             Sign in
-          </a>
+          </Link>
         </p>
 
         <AuthSecurityNote />

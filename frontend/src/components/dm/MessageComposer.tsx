@@ -21,13 +21,13 @@ export function MessageComposer({ conversationId }: Props) {
   };
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/35 p-3">
+    <div className="rounded-xl border border-sky-300/10 bg-[linear-gradient(135deg,rgba(56,189,248,0.035),rgba(99,102,241,0.025))] p-3">
       <textarea
         value={body}
         onChange={(event) => setBody(event.target.value.slice(0, 1000))}
         disabled={!conversationId || send.isPending}
         placeholder="Write a private message..."
-        className="min-h-24 w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-zinc-600 disabled:opacity-50"
+        className="min-h-24 w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-sky-300/30 focus:ring-2 focus:ring-sky-400/[0.06] disabled:opacity-50"
       />
       <div className="mt-2 flex items-center justify-between gap-3">
         <span className="text-xs text-zinc-600">{remaining} characters left</span>
@@ -36,6 +36,7 @@ export function MessageComposer({ conversationId }: Props) {
           size="sm"
           onClick={submit}
           disabled={!conversationId || !body.trim() || send.isPending}
+          className="bg-gradient-to-r from-sky-100 to-indigo-100 text-zinc-950 hover:from-white hover:to-violet-100"
         >
           <Send /> Send
         </Button>

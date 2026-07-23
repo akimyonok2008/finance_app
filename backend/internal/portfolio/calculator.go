@@ -60,13 +60,24 @@ func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceC
 //	gain_loss            = current_value - total_cost_basis
 //	gain_loss_percentage = gain_loss / total_cost_basis * 100   (0 if zero basis)
 //	portfolio_index      = 100 * current_value / total_cost_basis (100 if zero basis)
-func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positions []PositionSummary) PortfolioSummary {
-	var totalCostBasis, currentValue float64
-	for _, p := range positions {
-		totalCostBasis += p.CostBasisBase
-		currentValue += p.CurrentValueBase
+func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positions []PositionSummary, closedInput ...[]ClosedPositionSummary) PortfolioSummary {
+	var closed []ClosedPositionSummary
+	if len(closedInput) > 0 {
+		closed = closedInput[0]
 	}
-	gainLoss := currentValue - totalCostBasis
+	var activeCostBasis, activeCurrentValue, closedCostBasis, realizedGainLoss float64
+	for _, p := range positions {
+		activeCostBasis += p.CostBasisBase
+		activeCurrentValue += p.CurrentValueBase
+	}
+	for _, p := range closed {
+		closedCostBasis += p.ClosedCostBasisBase
+		realizedGainLoss += p.RealizedGainLossBase
+	}
+	totalCostBasis := activeCostBasis + closedCostBasis
+	unrealizedGainLoss := activeCurrentValue - activeCostBasis
+	gainLoss := unrealizedGainLoss + realizedGainLoss
+	currentValue := activeCurrentValue + closedCostBasis + realizedGainLoss
 
 	gainLossPct := 0.0
 	portfolioIndex := 100.0
@@ -76,14 +87,20 @@ func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positio
 	}
 
 	return PortfolioSummary{
-		UserID:             userID,
-		PortfolioID:        portfolioID,
-		BaseCurrency:       baseCurrency,
-		TotalCostBasis:     round2(totalCostBasis),
-		CurrentValue:       round2(currentValue),
-		GainLoss:           round2(gainLoss),
-		GainLossPercentage: round2(gainLossPct),
-		PortfolioIndex:     round2(portfolioIndex),
-		Positions:          positions,
+		UserID:                 userID,
+		PortfolioID:            portfolioID,
+		BaseCurrency:           baseCurrency,
+		TotalCostBasis:         round2(totalCostBasis),
+		CurrentValue:           round2(currentValue),
+		GainLoss:               round2(gainLoss),
+		GainLossPercentage:     round2(gainLossPct),
+		PortfolioIndex:         round2(portfolioIndex),
+		Positions:              positions,
+		ClosedPositions:        closed,
+		ActiveCostBasisBase:    round2(activeCostBasis),
+		ActiveCurrentValueBase: round2(activeCurrentValue),
+		UnrealizedGainLossBase: round2(unrealizedGainLoss),
+		ClosedCostBasisBase:    round2(closedCostBasis),
+		RealizedGainLossBase:   round2(realizedGainLoss),
 	}
 }

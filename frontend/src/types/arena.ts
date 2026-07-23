@@ -24,6 +24,10 @@ export type Achievement = {
   targetProgress: number;
   isUnlocked: boolean;
   unlockedAt?: string;
+  difficulty?: string;
+  period?: string;
+  inspiredBy?: string;
+  edgePoints?: number;
 };
 
 export type JoinSprintResponse = {

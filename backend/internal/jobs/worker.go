@@ -23,17 +23,33 @@ type SprintMaintainer interface {
 	RefreshCache(ctx context.Context, competitionID string) (skipped int, err error)
 }
 
+// PortfolioSnapshotter records daily portfolio archive snapshots for all users,
+// giving benchmark/achievement evaluation a continuous portfolio index series.
+// It is idempotent per UTC day, so calling it every tick writes at most one
+// snapshot per user per day. Implemented by an adapter over the portfolio and
+// auth services.
+type PortfolioSnapshotter interface {
+	SnapshotAllDaily(ctx context.Context) (recorded int, err error)
+}
+
 // Worker periodically runs all maintenance jobs. Each job is independent: one
 // failing job never prevents the others from running.
 type Worker struct {
-	global   GlobalLeaderboardRefresher
-	sprints  SprintMaintainer
-	interval time.Duration
+	global    GlobalLeaderboardRefresher
+	sprints   SprintMaintainer
+	snapshots PortfolioSnapshotter // optional
+	interval  time.Duration
 }
 
 // NewWorker wires a Worker that runs every interval.
 func NewWorker(global GlobalLeaderboardRefresher, sprints SprintMaintainer, interval time.Duration) *Worker {
 	return &Worker{global: global, sprints: sprints, interval: interval}
+}
+
+// SetPortfolioSnapshotter attaches an optional daily-snapshot job. When set, the
+// worker records daily portfolio snapshots on every pass (idempotent per day).
+func (w *Worker) SetPortfolioSnapshotter(s PortfolioSnapshotter) {
+	w.snapshots = s
 }
 
 // Start runs the jobs immediately, then on every tick until ctx is cancelled.
@@ -66,6 +82,21 @@ func (w *Worker) RunOnce(ctx context.Context) {
 	w.ensureSprint(ctx)
 	w.refreshGlobal(ctx)
 	w.refreshSprints(ctx)
+	w.recordSnapshots(ctx)
+}
+
+func (w *Worker) recordSnapshots(ctx context.Context) {
+	if w.snapshots == nil {
+		return
+	}
+	recorded, err := w.snapshots.SnapshotAllDaily(ctx)
+	if err != nil {
+		slog.Error("job: daily portfolio snapshots failed", "error", err)
+		return
+	}
+	if recorded > 0 {
+		slog.Info("job: daily portfolio snapshots recorded", "count", recorded)
+	}
 }
 
 func (w *Worker) ensureSprint(ctx context.Context) {

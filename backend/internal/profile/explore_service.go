@@ -75,10 +75,18 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 
 	total := len(filtered)
 
-	featured := make([]PublicProfile, 0, featuredCount)
-	for i := 0; i < len(filtered) && i < featuredCount; i++ {
-		featured = append(featured, filtered[i].card)
+	similarHandles := make(map[string]bool, len(similar))
+	for _, card := range similar {
+		similarHandles[card.Handle] = true
 	}
+	// Featured is a stable discovery rail. Search and symbol filters only affect
+	// top_performers (the frontend's dedicated search results), so typing a
+	// query never rewrites the recommendations beside it.
+	featuredCandidates := make([]exploreCandidate, 0, len(all))
+	for _, sc := range all {
+		featuredCandidates = append(featuredCandidates, candidateFromCard(sc))
+	}
+	featured := selectFeaturedProfiles(callerID, featuredCandidates, similarHandles, featuredCount, fallback)
 
 	start := filter.Offset
 	if start > len(filtered) {
@@ -128,76 +136,41 @@ func (s *Service) exploreRankings(ctx context.Context, timeframe string) (map[st
 	return out, false
 }
 
-// buildSimilar returns up to maxSimilar public profiles whose composition most
-// resembles the caller's. Similarity is the summed weight overlap over shared
-// symbols (a "portfolio overlap %"); profiles sharing the caller's strategy_tag
-// are used as a secondary signal and as a fallback when the caller has no
-// composition yet. The caller's own card is always excluded.
+// buildSimilar returns deterministic, quality-thresholded matches using symbol,
+// asset-type, DNA, strategy-tag and concentration similarity. MMR selection
+// adds light symbol diversity after the candidates are scored.
 func (s *Service) buildSimilar(ctx context.Context, callerID string, all []scoredCard) []PublicProfile {
 	if callerID == "" {
 		return []PublicProfile{}
 	}
 
-	callerWeights := map[string]float64{}
+	var current exploreCandidate
+	current.userID = callerID
 	if summary, err := s.summaries.GetSummary(ctx, callerID); err == nil && summary != nil {
-		weights, _, _, _ := buildComposition(summary)
-		for _, w := range weights {
-			callerWeights[w.Symbol] = w.Weight
-		}
-	}
-	callerTag := ""
-	if p, err := s.repo.GetByUserID(ctx, callerID); err == nil {
-		callerTag = p.StrategyTag
-	}
-
-	type scored struct {
-		card    PublicProfile
-		overlap float64
-		sameTag bool
-	}
-	candidates := make([]scored, 0, len(all))
-	for _, sc := range all {
-		if sc.profile.UserID == callerID {
-			continue // never suggest the caller to themselves
-		}
-		var overlap float64
-		for _, w := range sc.card.PublicWeights {
-			if cw, ok := callerWeights[w.Symbol]; ok {
-				overlap += minFloat(cw, w.Weight)
+		weights, _, _, concentration := buildComposition(summary)
+		current.card.PublicWeights = weights
+		current.card.Concentration = concentration
+		current.card.PortfolioIndex = summary.PortfolioIndex
+		current.hasIndex = finitePositive(summary.PortfolioIndex)
+		if s.ranked != nil {
+			if rp, rerr := s.ranked.CurrentRankedPerformance(ctx, callerID); rerr == nil {
+				current.card.PortfolioIndex = rp.RankedIndex
+				current.hasIndex = finitePositive(rp.RankedIndex)
 			}
 		}
-		sameTag := callerTag != "" && sc.profile.StrategyTag == callerTag
-		if overlap == 0 && !sameTag {
-			continue // unrelated — not "similar"
+		if result, dnaErr := s.dna.Calculate(ctx, dnaInputsFromSummary(summary)); dnaErr == nil && result.HasData {
+			current.dna = dnaScoreVector(result.Scores)
+			current.hasDNA = true
 		}
-		candidates = append(candidates, scored{card: sc.card, overlap: round2(overlap), sameTag: sameTag})
 	}
-
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].overlap != candidates[j].overlap {
-			return candidates[i].overlap > candidates[j].overlap
-		}
-		if candidates[i].sameTag != candidates[j].sameTag {
-			return candidates[i].sameTag // tag matches rank ahead on ties
-		}
-		if candidates[i].card.ReturnPercentage != candidates[j].card.ReturnPercentage {
-			return candidates[i].card.ReturnPercentage > candidates[j].card.ReturnPercentage
-		}
-		return candidates[i].card.Handle < candidates[j].card.Handle
-	})
-
-	out := make([]PublicProfile, 0, maxSimilar)
-	for i := 0; i < len(candidates) && i < maxSimilar; i++ {
-		out = append(out, candidates[i].card)
+	if p, err := s.repo.GetByUserID(ctx, callerID); err == nil {
+		current.card.StrategyTag = p.StrategyTag
 	}
-	return out
-}
-
-func minFloat(a, b float64) float64 {
-	if a < b {
-		return a
+	candidates := make([]exploreCandidate, 0, len(all))
+	for _, sc := range all {
+		candidates = append(candidates, candidateFromCard(sc))
 	}
-	return b
+	return selectSimilarProfiles(current, candidates, maxSimilar)
 }
 
 // matchesQuery is a case-insensitive substring match over handle, display name,

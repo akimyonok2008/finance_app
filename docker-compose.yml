@@ -1,0 +1,64 @@
+name: backend
+
+services:
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      STORAGE_PROVIDER: postgres
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/finance_app?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      ENABLE_BACKGROUND_WORKERS: "true"
+      ENABLE_QUOTE_REFRESH_WORKER: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    env_file:
+      - ./frontend/.env
+    environment:
+      VITE_API_BASE_URL: http://localhost:8080
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: finance_app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finance_app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
