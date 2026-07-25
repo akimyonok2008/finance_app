@@ -31,7 +31,7 @@ func ctx() context.Context { return context.Background() }
 func TestGetOrCreateDefaultPortfolio_CreatesWhenMissing(t *testing.T) {
 	svc, _ := newTestService()
 
-	p, err := svc.GetOrCreateDefaultPortfolio("user-1")
+	p, err := svc.GetOrCreateDefaultPortfolio(ctx(), "user-1")
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, p.ID)
@@ -42,9 +42,9 @@ func TestGetOrCreateDefaultPortfolio_CreatesWhenMissing(t *testing.T) {
 func TestGetOrCreateDefaultPortfolio_ReturnsExisting(t *testing.T) {
 	svc, _ := newTestService()
 
-	first, err := svc.GetOrCreateDefaultPortfolio("user-1")
+	first, err := svc.GetOrCreateDefaultPortfolio(ctx(), "user-1")
 	require.NoError(t, err)
-	second, err := svc.GetOrCreateDefaultPortfolio("user-1")
+	second, err := svc.GetOrCreateDefaultPortfolio(ctx(), "user-1")
 	require.NoError(t, err)
 
 	assert.Equal(t, first.ID, second.ID)
@@ -99,6 +99,9 @@ func TestAddPosition_FreshPositionStartsAtIndex100(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0.0, sum.GainLossPercentage)
 	assert.Equal(t, 100.0, sum.PortfolioIndex)
+	assert.False(t, sum.EconomicPerformance.IsComplete)
+	assert.Equal(t, "insufficient_history", sum.EconomicPerformance.CalculationStatus)
+	assert.Nil(t, sum.EconomicPerformance.TotalPnLBase)
 }
 
 func TestAddPosition_RejectsEmptySymbol(t *testing.T) {
@@ -137,7 +140,7 @@ func TestAddPosition_InvalidSymbolNotPersisted(t *testing.T) {
 	_, err := svc.AddPosition(ctx(), "user-1", in)
 	require.Error(t, err)
 
-	list, err := svc.ListPositions("user-1")
+	list, err := svc.ListPositions(ctx(), "user-1")
 	require.NoError(t, err)
 	assert.Empty(t, list, "an invalid symbol must never reach the repository")
 }
@@ -181,7 +184,7 @@ func TestListPositions_OnlyReturnsCurrentUsersPositions(t *testing.T) {
 	_, err = svc.AddPosition(ctx(), "user-2", validInput())
 	require.NoError(t, err)
 
-	list1, err := svc.ListPositions("user-1")
+	list1, err := svc.ListPositions(ctx(), "user-1")
 	require.NoError(t, err)
 	assert.Len(t, list1, 1)
 	assert.Equal(t, "user-1", list1[0].UserID)
@@ -238,7 +241,7 @@ func TestDeletePosition_OwnSucceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, svc.DeletePosition(ctx(), "user-1", pos.ID))
-	list, _ := svc.ListPositions("user-1")
+	list, _ := svc.ListPositions(ctx(), "user-1")
 	assert.Empty(t, list)
 }
 
@@ -320,6 +323,6 @@ func TestSummary_EmptyPortfolio(t *testing.T) {
 
 func TestRepository_GetPositionUnknownReturnsNotFound(t *testing.T) {
 	repo := NewInMemoryRepository()
-	_, err := repo.GetPosition("does-not-exist")
+	_, err := repo.GetPosition(ctx(), "does-not-exist")
 	assert.ErrorIs(t, err, ErrPositionNotFound)
 }

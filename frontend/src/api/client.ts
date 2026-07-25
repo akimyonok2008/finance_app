@@ -50,6 +50,7 @@ type RequestOptions = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   signal?: AbortSignal;
+  idempotencyKey?: string;
 };
 
 /**
@@ -60,12 +61,13 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const { method = "GET", body, signal } = options;
+  const { method = "GET", body, signal, idempotencyKey } = options;
 
   const headers: Record<string, string> = { Accept: "application/json" };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
 
   let res: Response;
   try {

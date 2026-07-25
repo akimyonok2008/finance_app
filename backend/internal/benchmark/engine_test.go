@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -93,14 +94,19 @@ func TestDynamicRecipeResolved(t *testing.T) {
 	}
 }
 
-func TestDynamicRecipeWithoutResolverErrors(t *testing.T) {
+// TestDynamicRecipeLookAheadFailsClosed proves the no-look-ahead policy: a
+// dynamic 13F recipe evaluated over a window that starts before any version was
+// publicly filed must fail closed rather than borrow future holdings. The
+// earliest Berkshire version becomes public on 2025-05-15, so a 2024 window has
+// no valid recipe version.
+func TestDynamicRecipeLookAheadFailsClosed(t *testing.T) {
 	engine := NewBenchmarkConstructionService(
 		NewMockHistoricalPriceProvider(DefaultMockReturns()), Recipes, nil,
 	)
 	_, err := engine.CalculateReturnPct(context.Background(), "BUFFETT_13F",
-		mustTime("2026-01-01"), mustTime("2026-06-30"))
-	if err == nil {
-		t.Fatalf("expected error for dynamic recipe with no resolver")
+		mustTime("2024-06-01"), mustTime("2024-12-31"))
+	if !errors.Is(err, ErrRecipeVersionUnavailable) {
+		t.Fatalf("expected ErrRecipeVersionUnavailable for pre-filing window, got %v", err)
 	}
 }
 

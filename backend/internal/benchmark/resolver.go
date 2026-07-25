@@ -5,11 +5,13 @@ import (
 	"time"
 )
 
-// SnapshotRecipeResolver resolves dynamic recipes (e.g. the Berkshire 13F
-// equity basket) from stored, real disclosed holdings. It performs no I/O:
-// resolving a live 13F on every evaluation is neither cheap nor reliable
-// (13F filings report CUSIPs, not tickers), so the product policy is to store
-// each quarter's disclosed basket and refresh it when a new 13F is published.
+// SnapshotRecipeResolver is the legacy single-snapshot resolver for dynamic
+// recipes. It is superseded by the versioned recipe store (see
+// recipe_version.go): BenchmarkConstructionService now selects an immutable
+// recipe version by the no-look-ahead policy (newest version whose
+// PubliclyKnownAt <= evaluation start) rather than always returning one stored
+// snapshot. This type is retained only for backward-compatible wiring and is not
+// consulted by CalculateReturn.
 type SnapshotRecipeResolver struct {
 	snapshots map[string]BenchmarkRecipe
 }
@@ -32,16 +34,18 @@ func (r *SnapshotRecipeResolver) Resolve(_ context.Context, recipe BenchmarkReci
 	return recipe, nil
 }
 
-// DefaultRecipeSnapshots returns the current stored baskets for dynamic recipes.
-// The Berkshire basket holds the real, publicly disclosed top equity positions
-// from Berkshire Hathaway's most recent 13F; weights are normalized to sum to 1.
-// Refresh this snapshot (id and weights) each quarter when a new 13F is filed.
+// DefaultRecipeSnapshots returns a legacy, approximate Berkshire basket for the
+// deprecated SnapshotRecipeResolver. It is NOT the source of truth: the
+// authoritative, immutably versioned Berkshire baskets (transcribed from the SEC
+// 13F-HR filings) live in berkshireVersions() and are what CalculateReturn uses.
+// These approximate weights are never used for a verified award and are kept
+// only so legacy wiring still compiles.
 func DefaultRecipeSnapshots() map[string]BenchmarkRecipe {
 	return map[string]BenchmarkRecipe{
 		"BUFFETT_13F": normalizedRecipe(
-			"BUFFETT_13F_2025Q1",
-			"Berkshire 13F Equity Basket",
-			"Berkshire Hathaway's disclosed top public equity holdings (13F, 2025 Q1).",
+			"BUFFETT_13F_legacy_approx",
+			"Berkshire 13F Equity Basket (legacy approximate)",
+			"Legacy approximate Berkshire basket; superseded by versioned SEC 13F baskets.",
 			[]AssetAllocation{
 				{Symbol: "AAPL", Weight: 26},
 				{Symbol: "AXP", Weight: 16},

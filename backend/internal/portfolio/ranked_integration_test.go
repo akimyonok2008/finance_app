@@ -11,15 +11,16 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
 
-// newRankedTestService wires a portfolio service to a REAL performance service
-// (in-memory) so the fairness invariants are exercised end-to-end through the
-// actual mutation → checkpoint path.
+// newRankedTestService wires a portfolio service to a REAL performance read
+// service so the fairness invariants are exercised end-to-end through the actual
+// aggregate transaction. The in-memory repository IS the ranked-state store —
+// positions and ranked state live in one aggregate, exactly as in Postgres.
 func newRankedTestService() (*Service, *performance.Service, *prices.MockPriceProvider) {
 	pp := prices.NewMockPriceProvider()
-	svc := NewService(NewInMemoryRepository(), pp, fx.NewMockFXProvider())
-	perf := performance.NewService(performance.NewInMemoryRepository())
+	repo := NewInMemoryRepository()
+	svc := NewService(repo, pp, fx.NewMockFXProvider())
+	perf := performance.NewService(repo)
 	perf.SetValuator(svc)
-	svc.SetCheckpointer(perf)
 	return svc, perf, pp
 }
 
@@ -125,7 +126,7 @@ func TestRanked_PriceFailureAbortsMutationAndState(t *testing.T) {
 	// Restore price; portfolio still has exactly the one original position and
 	// the ranked index is still 100 (no partial mutation, no ranked drift).
 	pp.Set("AAPL", 195.0, "USD")
-	list, err := svc.ListPositions("u1")
+	list, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	require.Equal(t, 100.0, rankedIndex(t, perf, "u1"))

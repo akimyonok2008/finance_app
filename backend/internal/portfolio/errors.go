@@ -18,6 +18,28 @@ var (
 	// ErrUnsupportedCurrency is returned when a symbol's quote currency cannot
 	// be converted to the base currency. Maps to HTTP 400.
 	ErrUnsupportedCurrency = errors.New("unsupported currency")
+	ErrInvalidCashAmount   = errors.New("cash amount must be greater than 0")
+	ErrInsufficientCash    = errors.New("insufficient cash")
+	ErrCashBalanceNotFound = errors.New("cash balance not found")
+	ErrInvalidSaleQuantity = errors.New("sale quantity must be greater than 0 and not exceed the owned quantity")
+	ErrInvalidSalePrice    = errors.New("execution price must be greater than 0")
+	ErrInvalidSaleFee      = errors.New("sale fee must be non-negative and less than gross proceeds")
+	ErrDuplicateActivity   = errors.New("activity already recorded")
+
+	// ErrActivityNotFound is returned when a correction references an unknown
+	// activity, or an activity that does not belong to the requesting user.
+	ErrActivityNotFound = errors.New("activity not found")
+	// ErrActivityAlreadyCorrected is returned when an activity already has a
+	// compensating correction on record; corrections cannot stack.
+	ErrActivityAlreadyCorrected = errors.New("activity already corrected")
+	// ErrCorrectionNotSupported is returned for activity types that cannot be
+	// safely corrected after the fact (buy/sell may have been followed by other
+	// activity against the same position episode). Record an offsetting
+	// buy/sell instead.
+	ErrCorrectionNotSupported = errors.New("this activity type cannot be corrected; record an offsetting buy or sell instead")
+	// ErrNothingToCorrect is returned when the corrected amount equals the
+	// original amount, so no compensating activity would be created.
+	ErrNothingToCorrect = errors.New("corrected amount matches the original activity; nothing to correct")
 
 	// ErrPositionNotFound is returned when a position does not exist OR does not
 	// belong to the requesting user. The same error is used for both cases so
@@ -33,4 +55,15 @@ var (
 	// ErrPriceProvider wraps any failure from the price provider so the handler
 	// can respond with 502 Bad Gateway.
 	ErrPriceProvider = errors.New("price provider error")
+
+	// ErrMutationConflict is returned when a mutation could not be applied
+	// because the portfolio kept changing underneath it (the bounded rebuild
+	// budget was exhausted). Maps to HTTP 409 Conflict; the client may retry.
+	ErrMutationConflict = errors.New("portfolio changed concurrently; retry the mutation")
+	// ErrRankedInvariant is returned when a computed checkpoint would generate a
+	// ranked return from the mutation itself. It aborts the transaction rather
+	// than committing corrupted ranked history, and always indicates a bug.
+	ErrRankedInvariant = errors.New("mutation would alter ranked performance")
+	// ErrUnsupportedMutation guards the mutation-kind switch.
+	ErrUnsupportedMutation = errors.New("unsupported portfolio mutation")
 )

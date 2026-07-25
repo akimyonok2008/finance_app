@@ -23,9 +23,9 @@ type Props = {
   isLoading: boolean;
   isError: boolean;
   errorMessage?: string;
-  onEdit: (position: PositionRow) => void;
+  onEdit?: (position: PositionRow) => void;
   onClose: (position: PositionRow) => void;
-  onDelete: (position: PositionRow) => void;
+  onDelete?: (position: PositionRow) => void;
   /** Opens the add drawer from the empty state. */
   onAdd?: () => void;
   className?: string;
@@ -161,7 +161,7 @@ export function PositionCardList({
                 </div>
 
                 <div className="mt-4 flex gap-2">
-                  <Button
+                  {onEdit && <Button
                     variant="outline"
                     size="sm"
                     className="flex-1"
@@ -169,7 +169,7 @@ export function PositionCardList({
                   >
                     <Pencil />
                     Edit
-                  </Button>
+                  </Button>}
                   <Button
                     variant="outline"
                     size="sm"
@@ -177,9 +177,9 @@ export function PositionCardList({
                     onClick={() => onClose(row)}
                   >
                     <Archive />
-                    Close
+                    Sell
                   </Button>
-                  <Button
+                  {onDelete && <Button
                     variant="outline"
                     size="sm"
                     className="flex-1 text-rose-300 hover:text-rose-200"
@@ -187,7 +187,7 @@ export function PositionCardList({
                   >
                     <Trash2 />
                     Delete
-                  </Button>
+                  </Button>}
                 </div>
               </Card>
             </motion.div>

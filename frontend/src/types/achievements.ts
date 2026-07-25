@@ -11,6 +11,28 @@ export type BadgeEvidence = {
   portfolioReturnPct: number;
   benchmarkReturnPct: number;
   edgePoints: number;
+  evaluationModel?: string;
+  evidenceVersion?: number;
+  trackingEpoch?: string;
+  startRankedIndex?: number;
+  endRankedIndex?: number;
+  startSnapshotAt?: string;
+  endSnapshotAt?: string;
+  activeCoveragePct?: number;
+  trustedCoveragePct?: number;
+  benchmarkDataSource?: string;
+  snapshotFrequency?: string;
+  // Benchmark data-integrity provenance.
+  benchmarkRecipeVersion?: string;
+  verification?: string;
+  rebalancingPolicy?: string;
+  priceType?: string;
+  dataQuality?: string;
+  isSynthetic?: boolean;
+  totalReturnMethod?: string;
+  recipeSourceAccession?: string;
+  recipeReportPeriodEnd?: string;
+  mappingCoveragePct?: number;
 };
 
 // The per-badge view model consumed by the UI. It combines the static catalogue
@@ -21,14 +43,18 @@ export type AchievementProgress = BadgeCatalogueEntry & {
   /** 0-100, only when real progress is available. */
   progressPct?: number;
   historyCoveragePct?: number;
+  activeCoveragePct?: number;
+  trustedDataCoveragePct?: number;
   progressState?: string;
   trackingStartDate?: string;
   trackingEndDate?: string;
+  latestSnapshotAt?: string;
   currentEdgePoints?: number;
   portfolioReturnPct?: number;
   benchmarkReturnPct?: number;
   awardedAt?: string;
   evidence?: BadgeEvidence;
+  legacyEvidence?: boolean;
   /** Live benchmark tracking status or, if unavailable, the reason why. */
   unavailableReason?: string;
 };

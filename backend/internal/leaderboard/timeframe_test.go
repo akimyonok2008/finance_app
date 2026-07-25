@@ -187,7 +187,44 @@ func TestUserStanding_WindowedIneligibleWhenHistoryMissing(t *testing.T) {
 	assert.Equal(t, "Not enough ranked history for this timeframe yet.", st.Reason)
 }
 
-func TestRefreshCache_RecordsSnapshotsWithoutCache(t *testing.T) {
+func TestUserStanding_PausedOverridesAnyCachedRankAndPreservesIndex(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	paused := RankedPerformance{
+		RankedIndex: 112, RankedReturnPercentage: 12, Paused: true,
+	}
+	svc := NewService(users, fakeRanked{byUser: map[string]RankedPerformance{"u1": paused}})
+	cache := newTestCache(t)
+	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", 12))
+	svc.SetCache(cache)
+
+	st, err := svc.UserStanding(context.Background(), "u1", TimeframeAll)
+	require.NoError(t, err)
+	assert.False(t, st.Ranked)
+	assert.True(t, st.Paused)
+	assert.Equal(t, 112.0, st.RankedIndex)
+	assert.Equal(t, 12.0, st.RankedReturnPercentage)
+	assert.Contains(t, st.Reason, "paused")
+}
+
+func TestGetUserRank_PausedStateEvictsStaleCachedRank(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	paused := RankedPerformance{
+		RankedIndex: 112, RankedReturnPercentage: 12, Paused: true,
+	}
+	svc := NewService(users, fakeRanked{byUser: map[string]RankedPerformance{"u1": paused}})
+	cache := newTestCache(t)
+	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", 12))
+	svc.SetCache(cache)
+
+	rank, err := svc.GetUserRank(context.Background(), "u1")
+	require.NoError(t, err)
+	assert.Zero(t, rank)
+	top, err := cache.GetGlobalTop(context.Background(), 0)
+	require.NoError(t, err)
+	assert.Empty(t, top)
+}
+
+func TestRefreshCache_DoesNotWriteIndependentSnapshotHistory(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(15, 115)}}
 	svc := NewService(users, sums)
@@ -202,6 +239,6 @@ func TestRefreshCache_RecordsSnapshotsWithoutCache(t *testing.T) {
 
 	idx, found, err := store.IndexAtOrBefore(context.Background(), "u1", now, time.Time{})
 	require.NoError(t, err)
-	assert.True(t, found)
-	assert.Equal(t, 115.0, idx)
+	assert.False(t, found, "canonical ranked-snapshot worker owns history writes")
+	assert.Zero(t, idx)
 }

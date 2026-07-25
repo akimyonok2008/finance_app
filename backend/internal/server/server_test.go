@@ -20,6 +20,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/performance"
+	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/server"
@@ -56,8 +57,8 @@ func (a rankedPerformanceAdapter) CurrentRankedPerformance(ctx context.Context, 
 
 type positionProvider struct{ s *portfolio.Service }
 
-func (p positionProvider) ListPositions(_ context.Context, userID string) ([]portfolio.Position, error) {
-	ptrs, err := p.s.ListPositions(userID)
+func (p positionProvider) ListPositions(ctx context.Context, userID string) ([]portfolio.Position, error) {
+	ptrs, err := p.s.ListPositions(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -100,10 +101,12 @@ func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler
 	authSvc := auth.NewService(auth.NewInMemoryUserRepository(), tokens)
 	fxp := fx.NewMockFXProvider()
 	priceProvider := prices.NewMockPriceProvider()
-	portfolioSvc := portfolio.NewService(portfolio.NewInMemoryRepository(), priceProvider, fxp)
-	performanceSvc := performance.NewService(performance.NewInMemoryRepository())
+	portfolioRepo := portfolio.NewInMemoryRepository()
+	portfolioSvc := portfolio.NewService(portfolioRepo, priceProvider, fxp)
+	performanceSvc := performance.NewService(portfolioRepo)
 	performanceSvc.SetValuator(portfolioSvc)
-	portfolioSvc.SetCheckpointer(performanceSvc)
+	historySvc := performancehistory.NewService(
+		performancehistory.NewInMemoryRepository(), performanceSvc, performancehistory.Config{})
 	leaderboardSvc := leaderboard.NewService(authSvc, rankedPerformanceAdapter{performanceSvc})
 	competitionsSvc := competitions.NewService(
 		competitions.NewInMemoryCompetitionRepository(),
@@ -117,7 +120,7 @@ func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler
 	)
 	achievementsSvc := achievements.NewService(
 		achievements.NewInMemoryAchievementRepository(),
-		achievementPerformanceProvider{portfolioSvc},
+		historySvc,
 		benchmarkEngine,
 		benchmark.NewRulesEngine(benchmark.DefaultEvaluators()),
 	)
@@ -146,6 +149,17 @@ func doReq(t *testing.T, h http.Handler, method, path, body, token string) *http
 	return rec
 }
 
+func doIdempotentReq(t *testing.T, h http.Handler, path, body, token, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Idempotency-Key", key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 // --- health / readiness ---------------------------------------------------------
 
 func TestHealth_AlwaysOK(t *testing.T) {
@@ -153,6 +167,20 @@ func TestHealth_AlwaysOK(t *testing.T) {
 	rec := doReq(t, h, http.MethodGet, "/health", "", "")
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"ok"`)
+}
+
+func TestCORSPreflight_AllowsIdempotencyKey(t *testing.T) {
+	h := newFullServer(t, nil)
+	req := httptest.NewRequest(http.MethodOptions, "/portfolio/buys", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type,idempotency-key")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "Idempotency-Key")
 }
 
 func TestReady_OKWhenAllChecksPass(t *testing.T) {
@@ -213,7 +241,9 @@ func TestPrivacy_PublicEndpointsExposeNoSensitiveFields(t *testing.T) {
 	require.Equal(t, http.StatusCreated, reg.Code)
 	token := extractToken(t, reg.Body.String())
 
-	rec := doReq(t, h, http.MethodPost, "/portfolio/positions", `{"symbol":"AAPL","asset_type":"stock","quantity":10}`, token)
+	rec := doIdempotentReq(t, h, "/portfolio/deposits", `{"currency":"USD","amount":5000}`, token, "privacy-deposit")
+	require.Equal(t, http.StatusCreated, rec.Code)
+	rec = doIdempotentReq(t, h, "/portfolio/buys", `{"symbol":"AAPL","asset_type":"stock","quantity":10}`, token, "privacy-buy")
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	comps := doReq(t, h, http.MethodGet, "/competitions", "", token)

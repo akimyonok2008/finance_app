@@ -127,6 +127,12 @@ export default function App() {
                 }
               />
 
+              {/* Activity is a tab within Portfolio, not a separate page —
+                  this redirect keeps old links/bookmarks working. Performance
+                  was folded into the Portfolio tab's summary cards. */}
+              <Route path="/activity" element={<Navigate to="/portfolio?tab=transactions" replace />} />
+              <Route path="/performance" element={<Navigate to="/portfolio" replace />} />
+
               <Route
                 path="/leaderboard"
                 element={

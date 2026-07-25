@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,13 +34,10 @@ func (s testSummaries) GetSummary(_ context.Context, id string) (*portfolio.Port
 	return &portfolio.PortfolioSummary{PortfolioIndex: 100, Positions: []portfolio.PositionSummary{}}, nil
 }
 
-type testHistory map[string][]portfolio.PortfolioArchivePoint
+type testHistory map[string][]PublicPerformancePoint
 
-func (h testHistory) Archives(_ context.Context, userID, timeframe string) (*portfolio.PortfolioArchives, error) {
-	return &portfolio.PortfolioArchives{
-		Timeframe: timeframe,
-		Points:    append([]portfolio.PortfolioArchivePoint(nil), h[userID]...),
-	}, nil
+func (h testHistory) RankedHistory(_ context.Context, userID string, _, _ time.Time) ([]PublicPerformancePoint, error) {
+	return append([]PublicPerformancePoint(nil), h[userID]...), nil
 }
 
 func testService() *Service {
@@ -71,8 +69,8 @@ func testService() *Service {
 	})
 	svc.SetPerformanceHistoryProvider(testHistory{
 		"u1": {
-			{CapturedAt: "2026-07-01T00:00:00Z", PortfolioIndex: 118.12, GainLossPercentage: 18.12},
-			{CapturedAt: "2026-07-07T00:00:00Z", PortfolioIndex: 125, GainLossPercentage: 25},
+			{CapturedAt: "2026-07-01T00:00:00Z", PortfolioIndex: 118.12, ReturnPercentage: 18.12},
+			{CapturedAt: "2026-07-07T00:00:00Z", PortfolioIndex: 125, ReturnPercentage: 25},
 		},
 	})
 	return svc

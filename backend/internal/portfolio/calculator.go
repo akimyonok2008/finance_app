@@ -8,6 +8,12 @@ func round2(v float64) float64 {
 	return math.Round(v*100) / 100
 }
 
+// round4 rounds to four decimal places. Fractional reinvestment quantities need
+// finer precision than cash amounts.
+func round4(v float64) float64 {
+	return math.Round(v*10000) / 10000
+}
+
 // CalculatePositionSummary computes the derived figures for a single position.
 // Local cost basis / current value are derived from quantity, average buy
 // price, and the current price; the base-currency equivalents are supplied by
@@ -55,11 +61,15 @@ func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceC
 // total, using the base-currency values so mixed-currency portfolios are
 // comparable.
 //
-//	total_cost_basis     = sum(cost_basis_base)
-//	current_value        = sum(current_value_base)
-//	gain_loss            = current_value - total_cost_basis
-//	gain_loss_percentage = gain_loss / total_cost_basis * 100   (0 if zero basis)
-//	portfolio_index      = 100 * current_value / total_cost_basis (100 if zero basis)
+// Compatibility aliases are deliberately scoped to OPEN holdings:
+//
+//	total_cost_basis     = open holdings cost basis
+//	current_value        = open holdings market value (cash is added by Service)
+//	gain_loss            = open holdings unrealized P&L
+//	gain_loss_percentage = open holdings unrealized return
+//
+// portfolio_index is left at its neutral default here. Only the persistent
+// ranked-performance service is allowed to populate it.
 func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positions []PositionSummary, closedInput ...[]ClosedPositionSummary) PortfolioSummary {
 	var closed []ClosedPositionSummary
 	if len(closedInput) > 0 {
@@ -74,27 +84,26 @@ func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positio
 		closedCostBasis += p.ClosedCostBasisBase
 		realizedGainLoss += p.RealizedGainLossBase
 	}
-	totalCostBasis := activeCostBasis + closedCostBasis
 	unrealizedGainLoss := activeCurrentValue - activeCostBasis
-	gainLoss := unrealizedGainLoss + realizedGainLoss
-	currentValue := activeCurrentValue + closedCostBasis + realizedGainLoss
+	// Closed proceeds are assets only when represented by cash. Do not synthesize
+	// them here or realized gain would be counted twice once sale proceeds enter
+	// portfolio_cash_balances.
+	currentValue := activeCurrentValue
 
 	gainLossPct := 0.0
-	portfolioIndex := 100.0
-	if totalCostBasis != 0 {
-		gainLossPct = gainLoss / totalCostBasis * 100
-		portfolioIndex = 100 * currentValue / totalCostBasis
+	if activeCostBasis != 0 {
+		gainLossPct = unrealizedGainLoss / activeCostBasis * 100
 	}
 
 	return PortfolioSummary{
 		UserID:                 userID,
 		PortfolioID:            portfolioID,
 		BaseCurrency:           baseCurrency,
-		TotalCostBasis:         round2(totalCostBasis),
+		TotalCostBasis:         round2(activeCostBasis),
 		CurrentValue:           round2(currentValue),
-		GainLoss:               round2(gainLoss),
+		GainLoss:               round2(unrealizedGainLoss),
 		GainLossPercentage:     round2(gainLossPct),
-		PortfolioIndex:         round2(portfolioIndex),
+		PortfolioIndex:         100,
 		Positions:              positions,
 		ClosedPositions:        closed,
 		ActiveCostBasisBase:    round2(activeCostBasis),

@@ -63,10 +63,37 @@ type State struct {
 // basis, or internal identifiers — only the index, the return percentage, the
 // status, and the ranking epoch.
 type RankedPerformance struct {
+	PortfolioID            string    `json:"-"`
 	RankedIndex            float64   `json:"ranked_index"`
 	RankedReturnPercentage float64   `json:"ranked_return_percentage"`
 	Status                 Status    `json:"ranking_status"`
 	TrackingStartedAt      time.Time `json:"tracking_started_at"`
+	ValuationAsOf          time.Time `json:"-"`
+	DataQualityStatus      string    `json:"-"`
+}
+
+// ValuationObservation is the private valuation result used when persisting a
+// trusted ranked snapshot. It contains no position-level or public monetary
+// data.
+type ValuationObservation struct {
+	PortfolioID       string
+	ValueBase         float64
+	HasActive         bool
+	ValuationAsOf     time.Time
+	DataQualityStatus string
+}
+
+// TransitionSnapshot is emitted only when a tracking epoch starts or the
+// active/paused status changes.
+type TransitionSnapshot struct {
+	PortfolioID       string
+	UserID            string
+	TrackingStartedAt time.Time
+	RankedIndex       float64
+	Status            Status
+	CapturedAt        time.Time
+	ValuationAsOf     time.Time
+	DataQualityStatus string
 }
 
 // CheckpointInput describes a single atomic portfolio mutation from the ranked

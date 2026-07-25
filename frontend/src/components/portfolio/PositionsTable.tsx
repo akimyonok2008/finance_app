@@ -31,9 +31,9 @@ type Props = {
   isLoading: boolean;
   isError: boolean;
   errorMessage?: string;
-  onEdit: (position: PositionRow) => void;
+  onEdit?: (position: PositionRow) => void;
   onClose: (position: PositionRow) => void;
-  onDelete: (position: PositionRow) => void;
+  onDelete?: (position: PositionRow) => void;
 };
 
 // framer-motion needs a real DOM table row; motion.tr keeps semantics intact.
@@ -148,24 +148,24 @@ export function PositionsTable({
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
-                      <Button
+                      {onEdit && <Button
                         variant="ghost"
                         size="icon"
                         aria-label={`Edit ${row.symbol}`}
                         onClick={() => onEdit(row)}
                       >
                         <Pencil />
-                      </Button>
+                      </Button>}
                       <Button
                         variant="ghost"
                         size="icon"
-                        aria-label={`Close ${row.symbol}`}
+                        aria-label={`Record sale of ${row.symbol}`}
                         className="text-slate-400 hover:text-amber-300"
                         onClick={() => onClose(row)}
                       >
                         <Archive />
                       </Button>
-                      <Button
+                      {onDelete && <Button
                         variant="ghost"
                         size="icon"
                         aria-label={`Delete ${row.symbol}`}
@@ -173,7 +173,7 @@ export function PositionsTable({
                         onClick={() => onDelete(row)}
                       >
                         <Trash2 />
-                      </Button>
+                      </Button>}
                     </div>
                   </TableCell>
                 </MotionTr>

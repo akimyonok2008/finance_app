@@ -2,319 +2,423 @@ package achievements
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math"
-	"sort"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
+	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 )
 
-// coverageFraction is how much of a badge's nominal period the portfolio's
-// available history must span before the badge can be evaluated.
-const coverageFraction = 0.9
-
-// seriesWindow returns the earliest and latest dates in an index series.
-func seriesWindow(series []benchmark.IndexPoint) (time.Time, time.Time, bool) {
-	if len(series) < 2 {
-		return time.Time{}, time.Time{}, false
-	}
-	sorted := append([]benchmark.IndexPoint(nil), series...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Date < sorted[j].Date })
-	first, err1 := time.Parse("2006-01-02", sorted[0].Date)
-	last, err2 := time.Parse("2006-01-02", sorted[len(sorted)-1].Date)
-	if err1 != nil || err2 != nil || !last.After(first) {
-		return time.Time{}, time.Time{}, false
-	}
-	return first, last, true
+// RankedPerformanceHistoryProvider is the canonical history contract shared
+// with timeframe leaderboards. It never exposes portfolio values or cost basis.
+type RankedPerformanceHistoryProvider interface {
+	Window(ctx context.Context, userID string, start, end time.Time) (performancehistory.Window, error)
+	ProtectEvidence(ctx context.Context, ids ...string) error
+	EligibilityThreshold() float64
+	SnapshotFrequency() string
 }
 
-// coversPeriod reports whether [first, last] spans at least coverageFraction of
-// the badge's nominal period.
-func coversPeriod(first, last time.Time, period benchmark.PeriodCode) bool {
-	need := periodDays(period) * coverageFraction
-	got := last.Sub(first).Hours() / 24
-	return need > 0 && got >= need
-}
-
-func periodDays(period benchmark.PeriodCode) float64 {
-	switch period {
-	case benchmark.Period30D:
-		return 30
-	case benchmark.Period90D:
-		return 90
-	case benchmark.Period6M:
-		return 182
-	case benchmark.Period1Y:
-		return 365
-	default:
-		return 0
-	}
-}
-
-// PortfolioPerformanceProvider supplies a user's portfolio index (TWR) series
-// over a window. Implemented by an adapter over the portfolio archive engine —
-// the achievements module never recomputes returns from trades.
-type PortfolioPerformanceProvider interface {
-	GetPortfolioIndexSeries(ctx context.Context, userID string, start, end time.Time) ([]benchmark.IndexPoint, error)
-}
-
-// Service evaluates and awards benchmark badges. It is best-effort: evaluation
-// failures never block the caller's main request.
 type Service struct {
-	repo        AchievementRepository
-	performance PortfolioPerformanceProvider
-	engine      *benchmark.BenchmarkConstructionService
-	rules       *benchmark.RulesEngine
-	badges      []benchmark.Badge
-	now         func() time.Time
+	repo                 AchievementRepository
+	history              RankedPerformanceHistoryProvider
+	engine               *benchmark.BenchmarkConstructionService
+	rules                *benchmark.RulesEngine
+	badges               []benchmark.Badge
+	now                  func() time.Time
+	benchmarkDataSource  string
+	allowPermanentAwards bool
+	// policy decides whether a benchmark result may become a permanent award and
+	// with what verification level. environment gates production awards.
+	policy      benchmark.AwardEligibilityPolicy
+	environment benchmark.EnvironmentMode
 }
 
-// NewService wires an achievements Service over the benchmark engine.
 func NewService(
 	repo AchievementRepository,
-	performance PortfolioPerformanceProvider,
+	history RankedPerformanceHistoryProvider,
 	engine *benchmark.BenchmarkConstructionService,
 	rules *benchmark.RulesEngine,
 ) *Service {
 	return &Service{
-		repo:        repo,
-		performance: performance,
-		engine:      engine,
-		rules:       rules,
-		badges:      benchmark.Badges,
-		now:         func() time.Time { return time.Now().UTC() },
+		repo: repo, history: history, engine: engine, rules: rules,
+		badges: benchmark.Badges, now: func() time.Time { return time.Now().UTC() },
+		benchmarkDataSource:  "configured_historical_provider",
+		allowPermanentAwards: true,
+		// Default safely: only verified real data may back a permanent award.
+		policy:      benchmark.NewAwardEligibilityPolicy(benchmark.AwardModeVerifiedOnly),
+		environment: benchmark.EnvironmentDevelopment,
 	}
 }
 
-// ListAchievementsForUser returns every badge in the catalogue with the user's
-// unlock state and evidence.
-func (s *Service) ListAchievementsForUser(ctx context.Context, userID string) ([]AchievementResponse, error) {
-	return s.listAchievementsForUser(ctx, userID, false)
+func (s *Service) SetClock(now func() time.Time) { s.now = now }
+func (s *Service) SetBenchmarkDataSource(source string) {
+	if source != "" {
+		s.benchmarkDataSource = source
+		// Synthetic prices are useful for local progress previews, but they are
+		// not admissible evidence for a permanent performance award.
+		s.allowPermanentAwards = source != "mock"
+	}
 }
 
-func (s *Service) listAchievementsForUser(ctx context.Context, userID string, includeProgress bool) ([]AchievementResponse, error) {
+// SetAwardPolicy configures the permanent-award policy and environment. This is
+// the single authority over verified/demo/disabled behavior.
+func (s *Service) SetAwardPolicy(mode benchmark.AwardMode, env benchmark.EnvironmentMode) {
+	s.policy = benchmark.NewAwardEligibilityPolicy(mode)
+	if env != "" {
+		s.environment = env
+	}
+}
+
+func (s *Service) ListAchievementsForUser(ctx context.Context, userID string) ([]AchievementResponse, error) {
+	return s.list(ctx, userID, false)
+}
+
+func (s *Service) EvaluateAll(ctx context.Context, userID string) ([]AchievementResponse, error) {
+	if err := s.EvaluateLocked(ctx, userID); err != nil {
+		return nil, err
+	}
+	return s.list(ctx, userID, true)
+}
+
+// EvaluateLocked evaluates only badges that have not already been awarded.
+// Workers call this after a trusted snapshot commit.
+func (s *Service) EvaluateLocked(ctx context.Context, userID string) error {
+	_, err := s.checkAndAwardBadges(ctx, userID)
+	return err
+}
+
+type periodResult struct {
+	window performancehistory.Window
+	err    error
+}
+
+func (s *Service) periodWindows(ctx context.Context, userID string, now time.Time) map[benchmark.PeriodCode]periodResult {
+	out := map[benchmark.PeriodCode]periodResult{}
+	for _, period := range []benchmark.PeriodCode{
+		benchmark.Period30D, benchmark.Period90D, benchmark.Period6M, benchmark.Period1Y,
+	} {
+		start, err := benchmark.SubtractPeriod(now, period)
+		if err != nil {
+			out[period] = periodResult{err: err}
+			continue
+		}
+		window, err := s.history.Window(ctx, userID, start, now)
+		out[period] = periodResult{window: window, err: err}
+	}
+	return out
+}
+
+func (s *Service) list(ctx context.Context, userID string, includeProgress bool) ([]AchievementResponse, error) {
 	awarded, err := s.repo.ListAwarded(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	var windows map[benchmark.PeriodCode]periodResult
+	if includeProgress {
+		windows = s.periodWindows(ctx, userID, s.now())
+	}
+	benchmarkCache := map[string]benchmarkResult{}
 	out := make([]AchievementResponse, 0, len(s.badges))
 	for _, badge := range s.badges {
 		resp := AchievementResponse{
-			Key:         badge.ID,
-			Name:        badge.Name,
-			Description: badge.Description,
-			IconKey:     iconKeyForDifficulty(badge.Difficulty),
-			Difficulty:  string(badge.Difficulty),
-			Period:      string(badge.Period),
-			InspiredBy:  badge.InspiredBy,
+			Key: badge.ID, Name: badge.Name, Description: badge.Description,
+			IconKey:    iconKeyForDifficulty(badge.Difficulty),
+			Difficulty: string(badge.Difficulty), Period: string(badge.Period),
+			InspiredBy: badge.InspiredBy,
 		}
-		if a, ok := awarded[badge.ID]; ok {
-			at := a.UnlockedAt
-			evidence := a.Evidence
-			resp.Unlocked = true
-			resp.UnlockedAt = &at
-			resp.Evidence = &evidence
+		if award, ok := awarded[badge.ID]; ok {
+			at, evidence := award.UnlockedAt, award.Evidence
+			if evidence.EvaluationModel == "" {
+				evidence.EvaluationModel = "archive_model_v0"
+				evidence.EvidenceVersion = 0
+			}
+			resp.Unlocked, resp.UnlockedAt, resp.Evidence = true, &at, &evidence
+			resp.LegacyEvidence = evidence.EvaluationModel != "ranked_snapshot_v1"
 		} else if includeProgress {
-			resp.Progress = s.progressForBadge(ctx, userID, badge)
+			result := windows[badge.Period]
+			resp.Progress = s.progress(ctx, badge, result, benchmarkCache)
 		}
 		out = append(out, resp)
 	}
 	return out, nil
 }
 
-// EvaluateAll re-checks every benchmark badge for the user and returns the
-// updated list.
-func (s *Service) EvaluateAll(ctx context.Context, userID string) ([]AchievementResponse, error) {
-	_, _ = s.checkAndAwardBadges(ctx, userID)
-	return s.listAchievementsForUser(ctx, userID, true)
+type benchmarkResult struct {
+	value float64
+	err   error
 }
 
-// progressForBadge measures live progress without weakening the award rules.
-// Sixty percent of the displayed progress represents having enough history to
-// evaluate the full window; forty percent represents the current return/edge
-// criteria. Unlocking still requires the existing 90% history coverage gate and
-// the exact rule evaluator.
-func (s *Service) progressForBadge(ctx context.Context, userID string, badge benchmark.Badge) *AchievementProgress {
+func (s *Service) benchmarkReturn(
+	ctx context.Context, badge benchmark.Badge, window performancehistory.Window,
+	cache map[string]benchmarkResult,
+) (float64, error) {
+	start, end := window.StartSnapshot.CapturedAt, window.EndSnapshot.CapturedAt
+	key := badge.RecipeID + "|" + start.Format(time.RFC3339Nano) + "|" + end.Format(time.RFC3339Nano)
+	if cached, ok := cache[key]; ok {
+		return cached.value, cached.err
+	}
+	value, err := s.engine.CalculateReturnPct(ctx, badge.RecipeID, start, end)
+	cache[key] = benchmarkResult{value: value, err: err}
+	return value, err
+}
+
+func rankedReturn(window performancehistory.Window) (float64, error) {
+	start, end := window.StartSnapshot.RankedIndex, window.EndSnapshot.RankedIndex
+	if start <= 0 || end <= 0 || math.IsNaN(start) || math.IsNaN(end) ||
+		math.IsInf(start, 0) || math.IsInf(end, 0) {
+		return 0, performancehistory.ErrInvalidSnapshot
+	}
+	return (end/start - 1) * 100, nil
+}
+
+func (s *Service) progress(
+	ctx context.Context, badge benchmark.Badge, period periodResult,
+	cache map[string]benchmarkResult,
+) *AchievementProgress {
 	progress := &AchievementProgress{
-		State:  "building_history",
-		Reason: "Benchmark tracking is active. Collecting daily portfolio history.",
+		State:              "building_history",
+		Reason:             "Building trusted ranked-performance history.",
+		RequiredEdgePoints: badge.Rule.RequiredEdgePoints,
 	}
-	now := s.now()
-	start, err := benchmark.SubtractPeriod(now, badge.Period)
+	if period.err != nil {
+		return progress
+	}
+	window := period.window
+	progress.HistoryCoveragePercentage = round(window.HistoryCoverage * 100)
+	progress.ActiveCoveragePercentage = round(window.ActiveCoverage * 100)
+	progress.TrustedDataCoveragePercentage = round(window.TrustedCoverage * 100)
+	progress.EffectiveStartAt = window.StartSnapshot.CapturedAt.Format(time.RFC3339)
+	progress.EffectiveEndAt = window.EndSnapshot.CapturedAt.Format(time.RFC3339)
+	progress.LatestSnapshotAt = progress.EffectiveEndAt
+	progress.StartDate = window.StartSnapshot.CapturedAt.Format("2006-01-02")
+	progress.EndDate = window.EndSnapshot.CapturedAt.Format("2006-01-02")
+	threshold := s.history.EligibilityThreshold()
+	historyReadiness := clamp(window.HistoryCoverage / threshold)
+	activeReadiness := clamp(window.ActiveCoverage / threshold)
+	trustedReadiness := clamp(window.TrustedCoverage / threshold)
+	coverageReadiness := math.Min(historyReadiness, math.Min(activeReadiness, trustedReadiness))
+	progress.ProgressPercentage = round(coverageReadiness * 60)
+
+	if window.HistoryCoverage < threshold {
+		progress.Reason = fmt.Sprintf("Building ranked history: %.0f%% available; %.0f%% is required.",
+			progress.HistoryCoveragePercentage, threshold*100)
+		return progress
+	}
+	if window.ActiveCoverage < threshold {
+		progress.State = "insufficient_active_coverage"
+		progress.Reason = fmt.Sprintf("Portfolio was active for %.0f%% of this period; %.0f%% is required.",
+			progress.ActiveCoveragePercentage, threshold*100)
+		return progress
+	}
+	if window.TrustedCoverage < threshold {
+		progress.State = "insufficient_trusted_data"
+		progress.Reason = fmt.Sprintf("Trusted snapshot coverage is %.0f%%; %.0f%% is required.",
+			progress.TrustedDataCoveragePercentage, threshold*100)
+		return progress
+	}
+	portfolioReturn, err := rankedReturn(window)
 	if err != nil {
 		return progress
 	}
-	series, err := s.performance.GetPortfolioIndexSeries(ctx, userID, start, now)
-	if err != nil || len(series) < 2 {
-		return progress
-	}
-	first, last, ok := seriesWindow(series)
-	if !ok {
-		return progress
-	}
-
-	requiredDays := periodDays(badge.Period)
-	if requiredDays <= 0 {
-		progress.Reason = "Benchmark tracking is active, but this badge period is invalid."
-		return progress
-	}
-	coverage := clamp01(last.Sub(first).Hours() / 24 / requiredDays)
-	historyReadiness := clamp01(coverage / coverageFraction)
-	progress.HistoryCoveragePercentage = roundProgress(coverage * 100)
-	progress.ProgressPercentage = roundProgress(historyReadiness * 60)
-	progress.StartDate = first.UTC().Format("2006-01-02")
-	progress.EndDate = last.UTC().Format("2006-01-02")
-
-	portfolioReturn, err := benchmark.CalculateIndexReturnPct(series)
+	// Preview-grade benchmark return: always computed so the user sees where they
+	// stand even when the data is not award-grade.
+	benchmarkReturn, err := s.benchmarkReturn(ctx, badge, window, cache)
 	if err != nil {
-		progress.Reason = fmt.Sprintf("Benchmark tracking is active. %.0f%% of the required history is available.", progress.HistoryCoveragePercentage)
+		progress.State = classifyBenchmarkError(err)
+		progress.Reason = benchmarkReasonFor(progress.State)
 		return progress
 	}
-	benchmarkReturn, err := s.engine.CalculateReturnPct(ctx, badge.RecipeID, first, last)
-	if err != nil {
-		progress.State = "benchmark_unavailable"
-		progress.Reason = "Portfolio history is active; benchmark prices are temporarily unavailable."
-		return progress
-	}
-
 	edge := portfolioReturn - benchmarkReturn
-	portfolioReturn = roundProgress(portfolioReturn)
-	benchmarkReturn = roundProgress(benchmarkReturn)
-	edge = roundProgress(edge)
-	progress.PortfolioReturnPercentage = &portfolioReturn
-	progress.BenchmarkReturnPercentage = &benchmarkReturn
-	progress.CurrentEdgePoints = &edge
-	progress.State = "tracking"
+	roundedPortfolio, roundedBenchmark, roundedEdge := round(portfolioReturn), round(benchmarkReturn), round(edge)
+	progress.PortfolioReturnPercentage = &roundedPortfolio
+	progress.BenchmarkReturnPercentage = &roundedBenchmark
+	progress.CurrentEdgePoints = &roundedEdge
 
-	edgeProgress := 0.0
-	if badge.Rule.RequiredEdgePoints > 0 {
-		edgeProgress = clamp01(edge / badge.Rule.RequiredEdgePoints)
-	} else if edge > 0 {
-		edgeProgress = 1
-	}
-	positiveProgress := 1.0
-	if badge.Rule.RequiresPositiveReturn && portfolioReturn <= 0 {
-		positiveProgress = 0
-	}
-	criteriaProgress := math.Min(edgeProgress, positiveProgress)
-	progress.ProgressPercentage = roundProgress(math.Min(99, (0.60*historyReadiness+0.40*criteriaProgress)*100))
-
-	if coverage < coverageFraction {
-		progress.Reason = fmt.Sprintf(
-			"Tracking live. %.0f%% of the %s history window is available.",
-			progress.HistoryCoveragePercentage,
-			badge.Period,
-		)
-	} else if badge.Rule.RequiresPositiveReturn && portfolioReturn <= 0 {
-		progress.Reason = "Full history is available; a positive portfolio return is still required."
+	// Distinguish "beats the benchmark" from "may earn a verified award". Probe
+	// award-grade data to classify the exact integrity status.
+	if s.policy.Mode == benchmark.AwardModeDisabled {
+		progress.State = "benchmark_unverified"
+		progress.Reason = "Benchmark awards are disabled in this environment; progress is preview-only."
+	} else if _, awardErr := s.engine.CalculateReturn(ctx, badge.RecipeID,
+		window.StartSnapshot.CapturedAt, window.EndSnapshot.CapturedAt,
+		benchmark.RequirementForAwards()); awardErr != nil {
+		progress.State = classifyBenchmarkError(awardErr)
+		progress.Reason = benchmarkReasonForEdge(progress.State, roundedEdge)
+	} else if s.policy.Mode == benchmark.AwardModeDemo {
+		progress.State = "benchmark_unverified"
+		progress.Reason = "This badge is running in demo mode and cannot create a verified permanent award."
 	} else {
-		progress.Reason = fmt.Sprintf(
-			"Tracking live edge: %+.2f pts versus %+.2f pts required.",
-			edge,
-			badge.Rule.RequiredEdgePoints,
-		)
+		progress.State = "eligible_but_rule_not_met"
+		progress.Reason = fmt.Sprintf("Trusted ranked edge: %+.2f pts versus %+.2f pts required.",
+			roundedEdge, badge.Rule.RequiredEdgePoints)
 	}
+
+	edgeReadiness := 1.0
+	if badge.Rule.RequiredEdgePoints > 0 {
+		edgeReadiness = clamp(edge / badge.Rule.RequiredEdgePoints)
+	} else if edge <= 0 {
+		edgeReadiness = 0
+	}
+	if badge.Rule.RequiresPositiveReturn && portfolioReturn <= 0 {
+		edgeReadiness = 0
+	}
+	progress.ProgressPercentage = round(math.Min(99, 60+40*edgeReadiness))
 	return progress
 }
 
-func clamp01(value float64) float64 {
-	return math.Max(0, math.Min(1, value))
+// classifyBenchmarkError maps a typed benchmark-data error to a specific
+// progress state, so the UI never shows a generic "unavailable" for every
+// integrity failure.
+func classifyBenchmarkError(err error) string {
+	switch {
+	case errors.Is(err, benchmark.ErrAdjustedDataUnavailable), errors.Is(err, benchmark.ErrTotalReturnUnavailable):
+		return "benchmark_unadjusted"
+	case errors.Is(err, benchmark.ErrStaleBenchmarkData):
+		return "benchmark_stale"
+	case errors.Is(err, benchmark.ErrSyntheticDataNotAllowed):
+		return "benchmark_unverified"
+	case errors.Is(err, benchmark.ErrRecipeVersionUnavailable):
+		return "recipe_version_unavailable"
+	default:
+		return "benchmark_unavailable"
+	}
 }
 
-func roundProgress(value float64) float64 {
-	return math.Round(value*100) / 100
+func benchmarkReasonFor(state string) string {
+	switch state {
+	case "benchmark_unadjusted":
+		return "Verified total-return benchmark data is unavailable for this period."
+	case "benchmark_stale":
+		return "Benchmark data for this period is stale."
+	case "benchmark_unverified":
+		return "Benchmark data is preview-only and cannot create a verified permanent award."
+	case "recipe_version_unavailable":
+		return "The benchmark recipe for this historical period is unavailable."
+	default:
+		return "Benchmark data is unavailable for the ranked-performance interval."
+	}
 }
 
-// EvaluatePortfolioAchievements re-checks benchmark badges after a portfolio
-// change. Best-effort: errors are swallowed so the caller is never blocked.
-func (s *Service) EvaluatePortfolioAchievements(ctx context.Context, userID string) error {
-	_, _ = s.checkAndAwardBadges(ctx, userID)
-	return nil
+func benchmarkReasonForEdge(state string, edge float64) string {
+	if state == "benchmark_unadjusted" && edge > 0 {
+		return "Your portfolio currently beats the benchmark, but verified total-return data is unavailable."
+	}
+	return benchmarkReasonFor(state)
 }
 
-// EvaluateSprintJoinAchievements re-checks benchmark badges when a user joins a
-// sprint. Retained for the competitions integration; benchmark badges are
-// portfolio-relative, so this simply triggers a re-check.
-func (s *Service) EvaluateSprintJoinAchievements(ctx context.Context, userID string) error {
-	_, _ = s.checkAndAwardBadges(ctx, userID)
-	return nil
-}
-
-// EvaluateSprintRankAchievements re-checks benchmark badges after a sprint rank
-// update. The competitionID is accepted for interface compatibility.
-func (s *Service) EvaluateSprintRankAchievements(ctx context.Context, userID, _ string) error {
-	_, _ = s.checkAndAwardBadges(ctx, userID)
-	return nil
-}
-
-// checkAndAwardBadges evaluates every not-yet-awarded badge for the user and
-// persists newly unlocked ones. It is the single source of unlock logic.
 func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]AwardedAchievement, error) {
+	// Disabled mode shows catalogue and progress but never writes an award.
+	if s.policy.Mode == benchmark.AwardModeDisabled {
+		return nil, nil
+	}
 	awarded, err := s.repo.ListAwarded(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-
 	now := s.now()
-	var newly []AwardedAchievement
-
+	windows := s.periodWindows(ctx, userID, now)
+	newly := []AwardedAchievement{}
 	for _, badge := range s.badges {
-		if _, done := awarded[badge.ID]; done {
+		if _, exists := awarded[badge.ID]; exists {
 			continue
 		}
-
-		start, err := benchmark.SubtractPeriod(now, badge.Period)
+		period := windows[badge.Period]
+		if period.err != nil || !period.window.Eligible(s.history.EligibilityThreshold()) {
+			continue
+		}
+		window := period.window
+		portfolioReturn, err := rankedReturn(window)
 		if err != nil {
 			continue
 		}
-
-		series, err := s.performance.GetPortfolioIndexSeries(ctx, userID, start, now)
-		if err != nil || len(series) < 2 {
-			continue // not enough portfolio history to judge this period
+		// Award-grade benchmark evaluation. Under verified_only the strict
+		// requirement makes raw, synthetic or stale data fail closed with a typed
+		// error before any award. Under demo mode synthetic data is permitted into
+		// the evaluation so the policy can classify it as a demo award; the policy
+		// — not the requirement — remains the single authority on verification.
+		req := benchmark.RequirementForAwards()
+		if s.policy.Mode == benchmark.AwardModeDemo {
+			req = benchmark.RequirementForPreview()
 		}
-
-		// Measure the portfolio and the benchmark over the SAME window — the
-		// actual span the portfolio has data for — and require that span to cover
-		// most of the badge period, so a young portfolio can't earn a long-period
-		// badge on a few days of data.
-		firstDate, lastDate, ok := seriesWindow(series)
-		if !ok || !coversPeriod(firstDate, lastDate, badge.Period) {
-			continue
-		}
-
-		portfolioReturnPct, err := benchmark.CalculateIndexReturnPct(series)
+		benchResult, err := s.engine.CalculateReturn(
+			ctx, badge.RecipeID,
+			window.StartSnapshot.CapturedAt, window.EndSnapshot.CapturedAt,
+			req,
+		)
 		if err != nil {
 			continue
 		}
-
-		benchmarkReturnPct, err := s.engine.CalculateReturnPct(ctx, badge.RecipeID, firstDate, lastDate)
-		if err != nil {
-			continue // benchmark data unavailable — never award on missing data
-		}
-
 		result, err := s.rules.Evaluate(benchmark.EvaluationContext{
 			Badge:              badge,
-			StartDate:          firstDate.UTC().Format("2006-01-02"),
-			EndDate:            lastDate.UTC().Format("2006-01-02"),
-			PortfolioReturnPct: portfolioReturnPct,
-			BenchmarkReturnPct: benchmarkReturnPct,
+			StartDate:          benchResult.EffectiveStart.Format("2006-01-02"),
+			EndDate:            benchResult.EffectiveEnd.Format("2006-01-02"),
+			PortfolioReturnPct: portfolioReturn,
+			BenchmarkReturnPct: benchResult.ReturnPercentage,
 		})
 		if err != nil || !result.Unlocked || result.Evidence == nil {
 			continue
 		}
-
+		// The rule passing is not sufficient: the award policy decides whether the
+		// data is trusted enough to persist, and with what verification level.
+		decision := s.policy.CanPersistPermanentAward(benchResult, s.environment)
+		if !decision.Eligible {
+			// Structured, privacy-safe: no monetary values or holdings.
+			slog.Info("benchmark award blocked by data policy",
+				"badge", badge.ID, "recipe_version", benchResult.RecipeVersion.VersionID,
+				"quality", string(benchResult.DataMetadata.Quality), "reasons", decision.Reasons)
+			continue
+		}
+		evidence := *result.Evidence
+		evidence.EvaluationModel = "ranked_snapshot_v1"
+		evidence.EvidenceVersion = 2
+		evidence.TrackingEpoch = window.StartSnapshot.TrackingStartedAt.Format(time.RFC3339Nano)
+		evidence.StartRankedIndex = window.StartSnapshot.RankedIndex
+		evidence.EndRankedIndex = window.EndSnapshot.RankedIndex
+		evidence.StartSnapshotAt = window.StartSnapshot.CapturedAt.Format(time.RFC3339Nano)
+		evidence.EndSnapshotAt = window.EndSnapshot.CapturedAt.Format(time.RFC3339Nano)
+		evidence.ActiveCoveragePct = round(window.ActiveCoverage * 100)
+		evidence.TrustedCoveragePct = round(window.TrustedCoverage * 100)
+		evidence.BenchmarkDataSource = s.benchmarkDataSource
+		evidence.SnapshotFrequency = s.history.SnapshotFrequency()
+		// Benchmark data-integrity provenance (evidence v2).
+		evidence.Verification = decision.Verification
+		evidence.BenchmarkRecipeVersion = benchResult.RecipeVersion.VersionID
+		evidence.RebalancingPolicy = benchResult.RecipeVersion.RebalancingPolicy
+		evidence.BenchmarkInputHash = benchResult.Fingerprint
+		dataEvidence := benchmark.EvidenceFromResult(benchResult)
+		evidence.DataSourceSummary = &dataEvidence
+		if err := s.history.ProtectEvidence(ctx, window.StartSnapshot.ID, window.EndSnapshot.ID); err != nil {
+			continue
+		}
 		record := AwardedAchievement{
-			UserID:     userID,
-			BadgeKey:   badge.ID,
-			UnlockedAt: now,
-			Evidence:   *result.Evidence,
+			UserID: userID, BadgeKey: badge.ID, UnlockedAt: now, Evidence: evidence,
+			StartSnapshotID: window.StartSnapshot.ID, EndSnapshotID: window.EndSnapshot.ID,
 		}
 		if err := s.repo.Award(ctx, record); err != nil {
 			continue
 		}
+		slog.Info("benchmark award issued",
+			"badge", badge.ID, "verification", string(decision.Verification),
+			"recipe_version", benchResult.RecipeVersion.VersionID,
+			"quality", string(benchResult.DataMetadata.Quality),
+			"fingerprint", benchResult.Fingerprint)
 		newly = append(newly, record)
 	}
-
 	return newly, nil
+}
+
+// Legacy trigger ports remain no-ops. Evaluation is driven by committed trusted
+// snapshots or the explicit POST /achievements/evaluate endpoint.
+func (s *Service) EvaluatePortfolioAchievements(context.Context, string) error          { return nil }
+func (s *Service) EvaluateSprintJoinAchievements(context.Context, string) error         { return nil }
+func (s *Service) EvaluateSprintRankAchievements(context.Context, string, string) error { return nil }
+
+func clamp(value float64) float64 { return math.Max(0, math.Min(1, value)) }
+func round(value float64) float64 { return math.Round(value*100) / 100 }
+
+func IsHistoryNotReady(err error) bool {
+	return errors.Is(err, performancehistory.ErrWindowNotReady)
 }

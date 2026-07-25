@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -181,20 +182,29 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 	for _, sc := range scores {
 		u, ok := byID[sc.UserID]
 		if !ok {
-			continue // user deleted since the cache was refreshed
+			if err := s.cache.RemoveGlobalScore(ctx, sc.UserID); err != nil {
+				slog.Warn("leaderboard_cache_update_failed",
+					"operation", "remove_missing_user", "user_id", sc.UserID, "error", err)
+			} else {
+				slog.Info("leaderboard_cache_stale_user_removed", "user_id", sc.UserID)
+			}
+			continue
 		}
 		// portfolio_index = 100 + gain% holds exactly for our formulas.
-		e := rankedEntry(len(entries)+1, u.DisplayName, u.AvatarKey, sc.Score, 100+sc.Score)
+		e := rankedEntry(
+			len(entries)+1, u.DisplayName, u.AvatarKey,
+			round2(sc.Score), round2(100+sc.Score),
+		)
 		s.enrich(ctx, sc.UserID, &e)
 		entries = append(entries, e)
 	}
 	return entries, len(entries) > 0
 }
 
-// RefreshCache recomputes every user's live performance, records an index
-// snapshot (for trailing timeframes), and upserts the all-time score into the
-// cache. Called by the background worker each tick. It runs whenever either a
-// cache OR a snapshot store is attached; with neither it is a no-op.
+// RefreshCache recomputes every user's live performance and upserts the all-time
+// score. Canonical history is owned by the independent ranked snapshot worker.
+// With neither a cache nor snapshot reader attached this compatibility refresh
+// is a no-op.
 func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	if s.cache == nil && s.snapshots == nil {
 		return 0, nil
@@ -203,31 +213,92 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrListUsers, err)
 	}
-	now := s.now()
+	slog.Info("leaderboard_cache_reconciliation_started", "users", len(users))
 	skipped := 0
+	activeUpserted, pausedRemoved, deletedRemoved, cacheFailures := 0, 0, 0, 0
+	ranked := make(map[string]bool, len(users))
+	known := make(map[string]bool, len(users))
+	valuationFailed := make(map[string]bool)
+	var firstCacheErr error
 	for _, u := range users {
+		known[u.ID] = true
 		rp, err := s.ranked.CurrentRankedPerformance(ctx, u.ID)
 		if err != nil {
 			skipped++
+			valuationFailed[u.ID] = true
 			continue
 		}
 		if rp.Paused {
-			continue // empty portfolios are excluded from ranking, not scored
-		}
-		if s.snapshots != nil {
-			// Record the persistent RANKED index (post-epoch), never the legacy
-			// reconstructed portfolio index.
-			if err := s.snapshots.Record(ctx, u.ID, rp.RankedIndex, now); err != nil {
-				log.Printf("leaderboard: snapshot record failed for %s: %v", u.ID, err)
+			// Explicitly EVICT rather than merely skip: a user who emptied their
+			// portfolio would otherwise stay visible on the board via their last
+			// cached score.
+			if s.cache != nil {
+				if err := s.cache.RemoveGlobalScore(ctx, u.ID); err != nil {
+					cacheFailures++
+					if firstCacheErr == nil {
+						firstCacheErr = err
+					}
+					slog.Warn("leaderboard_cache_update_failed",
+						"operation", "remove_paused", "user_id", u.ID, "error", err)
+				} else {
+					pausedRemoved++
+				}
 			}
+			continue
 		}
+		ranked[u.ID] = true
 		if s.cache != nil {
 			if err := s.cache.UpsertGlobalScore(ctx, u.ID, rp.RankedReturnPercentage); err != nil {
-				return skipped, err
+				cacheFailures++
+				if firstCacheErr == nil {
+					firstCacheErr = err
+				}
+				slog.Warn("leaderboard_cache_update_failed",
+					"operation", "upsert_active", "user_id", u.ID, "error", err)
+			} else {
+				activeUpserted++
 			}
 		}
 	}
-	return skipped, nil
+	// Prune members that are no longer rankable at all (deleted users, or users
+	// whose ranked state disappeared), so the cache converges on the live set
+	// instead of accumulating ghosts.
+	if s.cache != nil {
+		if cached, err := s.cache.GetGlobalTop(ctx, 0); err == nil {
+			for _, sc := range cached {
+				if ranked[sc.UserID] || valuationFailed[sc.UserID] {
+					continue
+				}
+				if err := s.cache.RemoveGlobalScore(ctx, sc.UserID); err != nil {
+					cacheFailures++
+					if firstCacheErr == nil {
+						firstCacheErr = err
+					}
+					slog.Warn("leaderboard_cache_update_failed",
+						"operation", "remove_stale", "user_id", sc.UserID, "error", err)
+				} else if !known[sc.UserID] {
+					deletedRemoved++
+					slog.Info("leaderboard_cache_stale_user_removed", "user_id", sc.UserID)
+				}
+			}
+		} else {
+			cacheFailures++
+			if firstCacheErr == nil {
+				firstCacheErr = err
+			}
+		}
+	}
+	slog.Info("leaderboard_cache_reconciliation_completed",
+		"active_upserted", activeUpserted,
+		"paused_removed", pausedRemoved,
+		"deleted_removed", deletedRemoved,
+		"valuation_skipped", skipped,
+		"cache_failures", cacheFailures,
+	)
+	if firstCacheErr != nil {
+		slog.Error("leaderboard_cache_reconciliation_failed", "error", firstCacheErr)
+	}
+	return skipped, firstCacheErr
 }
 
 // Result carries the ranked entries plus internal metadata about how many users
@@ -266,6 +337,17 @@ func (s *Service) UserRankings(ctx context.Context, tf Timeframe) ([]UserRanking
 // portfolio cannot be ranked. Internal ids are used only for matching and are
 // never added to the public leaderboard response.
 func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
+	// The requested user's current lifecycle state is cheap to validate and must
+	// take precedence over a stale cached membership.
+	if current, err := s.ranked.CurrentRankedPerformance(ctx, userID); err == nil && current.Paused {
+		if s.cache != nil {
+			if err := s.cache.RemoveGlobalScore(ctx, userID); err != nil {
+				slog.Warn("leaderboard_cache_update_failed",
+					"operation", "remove_paused_rank_lookup", "user_id", userID, "error", err)
+			}
+		}
+		return 0, nil
+	}
 	if s.cache != nil {
 		if scores, err := s.cache.GetGlobalTop(ctx, maxLeaderboardSize); err == nil && len(scores) > 0 {
 			for i, score := range scores {
@@ -375,8 +457,8 @@ func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe)
 		// preserved and excluded from ranking) from a user who has never ranked.
 		if rp, err := s.ranked.CurrentRankedPerformance(ctx, userID); err == nil && rp.Paused {
 			st.Paused = true
-			st.RankedIndex = rp.RankedIndex
-			st.RankedReturnPercentage = rp.RankedReturnPercentage
+			st.RankedIndex = round2(rp.RankedIndex)
+			st.RankedReturnPercentage = round2(rp.RankedReturnPercentage)
 			st.Reason = "Ranked tracking is paused. Your accumulated index is preserved — add a position to resume from it."
 		} else if _, windowed := tf.window(); windowed {
 			st.Reason = "Not enough ranked history for this timeframe yet."

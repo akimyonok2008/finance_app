@@ -7,128 +7,192 @@ import (
 )
 
 // Valuator supplies the current base-currency market value of a user's ACTIVE
-// positions. It is implemented by the portfolio service. Returning an error
-// means the portfolio cannot be valued consistently (missing prices/FX); the
-// ranked engine then refuses to read or checkpoint rather than inventing zeros.
+// positions. Implemented by the portfolio service. An error means the portfolio
+// cannot be valued consistently (missing prices/FX); the ranked engine then
+// refuses to report rather than inventing zeros.
 type Valuator interface {
-	// PortfolioValueBase returns the portfolio id, the current base-currency
-	// value of active positions, and whether any active positions exist.
 	PortfolioValueBase(ctx context.Context, userID string) (portfolioID string, valueBase float64, hasActive bool, err error)
 }
 
-// Service is the ranked-performance domain service: the single trusted source of
-// global ranked performance. It owns persistent ranked state and the checkpoint
-// engine; it never stores or exposes absolute monetary values publicly.
+type ObservedValuator interface {
+	PortfolioValueObservation(ctx context.Context, userID string) (ValuationObservation, error)
+}
+
+type TransitionRecorder interface {
+	RecordTransition(ctx context.Context, snapshot TransitionSnapshot) error
+}
+
+// Service is the READ side of ranked performance — the single trusted source of
+// global ranked standing for the leaderboard, profiles and explore.
+//
+// It has no write API. Ranked state changes only inside the portfolio aggregate
+// transaction (see portfolio.MutationCoordinator), which guarantees a checkpoint
+// can never be committed apart from the position write that caused it.
 type Service struct {
-	repo     Repository
+	states   StateReader
+	mutable  MutableRepository
 	valuator Valuator
+	recorder TransitionRecorder
 	now      func() time.Time
 }
 
-// NewService wires a ranked-performance service. The valuator may be attached
-// later via SetValuator (the portfolio service and this service are mutually
-// dependent at construction time).
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo, now: func() time.Time { return time.Now().UTC() }}
+// NewService wires the ranked-performance read service.
+func NewService(states StateReader) *Service {
+	s := &Service{states: states, now: func() time.Time { return time.Now().UTC() }}
+	if mutable, ok := states.(MutableRepository); ok {
+		s.mutable = mutable
+	}
+	return s
 }
 
-// SetValuator attaches the portfolio valuator used by the read path.
+// SetValuator attaches the portfolio valuator (the portfolio and performance
+// services are mutually dependent at construction time).
 func (s *Service) SetValuator(v Valuator) { s.valuator = v }
 
 // SetClock overrides the time source (tests).
 func (s *Service) SetClock(now func() time.Time) { s.now = now }
 
-// Checkpoint atomically advances the ranked state for a single portfolio
-// mutation. It is idempotent w.r.t. the ranked invariant: the ranked index is
-// identical immediately before and after, so no mutation (add capital, resize,
-// delete, rebalance, strategy copy, empty, resume) generates ranked return.
-//
-// The caller must have already valued the portfolio before and after the
-// mutation using ONE consistent price/FX snapshot. On a version conflict the
-// method re-reads and retries a bounded number of times so concurrent mutations
-// serialize rather than clobbering each other.
-func (s *Service) Checkpoint(ctx context.Context, in CheckpointInput) error {
-	if in.At.IsZero() {
-		in.At = s.now()
-	}
-	const maxAttempts = 5
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		prev, err := s.repo.GetByPortfolio(ctx, in.PortfolioID)
-		if errors.Is(err, ErrStateNotFound) {
-			// First time this portfolio enters ranked tracking: activate at 100.
-			st := activate(in.PortfolioID, in.UserID, in.ValueAfterBase, in.HasActiveAfter, in.At)
-			if err := s.repo.Create(ctx, st); err != nil {
-				if errors.Is(err, ErrVersionConflict) {
-					continue // lost the create race; re-read and update instead
-				}
-				return err
-			}
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		next := applyCheckpoint(*prev, in)
-		if err := s.repo.Update(ctx, next, prev.Version); err != nil {
-			if errors.Is(err, ErrVersionConflict) {
-				continue
-			}
-			return err
-		}
-		return nil
-	}
-	return ErrVersionConflict
+func (s *Service) SetTransitionRecorder(recorder TransitionRecorder) {
+	s.recorder = recorder
 }
 
-// EnsureEpoch initializes ranked tracking for an existing portfolio if it has no
-// state yet, WITHOUT rewriting any existing state. This implements the migration
-// policy: a non-empty portfolio starts a new epoch at index 100 with its current
-// value as the first segment; an empty portfolio starts paused at index 100.
-// Idempotent: a portfolio that already has state is left untouched.
-func (s *Service) EnsureEpoch(ctx context.Context, userID string) error {
-	portfolioID, valueBase, hasActive, err := s.valuator.PortfolioValueBase(ctx, userID)
+// CurrentRankedPerformance values the user's active portfolio and applies the
+// persistent ranked state. A portfolio that has never been checkpointed reads as
+// a fresh epoch (active at 100 when it holds positions, else paused at 100) so a
+// first read is well-defined without performing a write.
+func (s *Service) CurrentRankedPerformance(ctx context.Context, userID string) (*RankedPerformance, error) {
+	observation := ValuationObservation{
+		ValuationAsOf:     s.now(),
+		DataQualityStatus: "complete",
+	}
+	if observed, ok := s.valuator.(ObservedValuator); ok {
+		var err error
+		observation, err = observed.PortfolioValueObservation(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		portfolioID, valueBase, hasActive, err := s.valuator.PortfolioValueBase(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		observation.PortfolioID = portfolioID
+		observation.ValueBase = valueBase
+		observation.HasActive = hasActive
+	}
+	state, err := s.states.GetByPortfolio(ctx, observation.PortfolioID)
+	if errors.Is(err, ErrStateNotFound) {
+		synthetic := ActivateState(observation.PortfolioID, userID, observation.ValueBase, observation.HasActive, s.now())
+		return PerformanceFromObservation(synthetic, observation), nil
+	}
 	if err != nil {
+		return nil, err
+	}
+	return PerformanceFromObservation(*state, observation), nil
+}
+
+// PerformanceFrom projects a ranked state plus a current valuation into the
+// privacy-safe read model. It preserves full precision so canonical snapshot
+// persistence never receives presentation-rounded data.
+func PerformanceFrom(state State, valueBase float64) *RankedPerformance {
+	return PerformanceFromObservation(state, ValuationObservation{
+		PortfolioID: state.PortfolioID, ValueBase: valueBase,
+		ValuationAsOf: time.Now().UTC(), DataQualityStatus: "complete",
+	})
+}
+
+func PerformanceFromObservation(state State, observation ValuationObservation) *RankedPerformance {
+	idx := CalculateCurrentIndex(state, observation.ValueBase)
+	return &RankedPerformance{
+		PortfolioID:            state.PortfolioID,
+		RankedIndex:            idx,
+		RankedReturnPercentage: idx - 100,
+		Status:                 state.Status,
+		TrackingStartedAt:      state.TrackingStartedAt,
+		ValuationAsOf:          observation.ValuationAsOf,
+		DataQualityStatus:      observation.DataQualityStatus,
+	}
+}
+
+// Checkpoint advances ranked state after a portfolio mutation. The in-progress
+// aggregate transaction refactor will move this write behind AggregateStore;
+// this compatibility path preserves existing behavior meanwhile.
+func (s *Service) Checkpoint(ctx context.Context, input CheckpointInput) error {
+	if s.mutable == nil {
+		return ErrInvalidState
+	}
+	at := input.At.UTC()
+	if at.IsZero() {
+		at = s.now()
+	}
+	current, err := s.mutable.GetByPortfolio(ctx, input.PortfolioID)
+	isNew := errors.Is(err, ErrStateNotFound)
+	if err != nil && !isNew {
 		return err
 	}
-	if _, err := s.repo.GetByPortfolio(ctx, portfolioID); err == nil {
-		return nil // already tracked
-	} else if !errors.Is(err, ErrStateNotFound) {
-		return err
+	var next State
+	var previousStatus Status
+	if isNew {
+		next = ActivateState(input.PortfolioID, input.UserID, input.ValueAfterBase, input.HasActiveAfter, at)
+		if err := s.mutable.Create(ctx, next); err != nil {
+			return err
+		}
+	} else {
+		previousStatus = current.Status
+		next = ApplyCheckpoint(*current, input)
+		if err := s.mutable.Update(ctx, next, current.Version); err != nil {
+			return err
+		}
 	}
-	st := activate(portfolioID, userID, valueBase, hasActive, s.now())
-	if err := s.repo.Create(ctx, st); err != nil && !errors.Is(err, ErrVersionConflict) {
-		return err
+	if s.recorder != nil && (isNew || previousStatus != next.Status) {
+		_ = s.recorder.RecordTransition(ctx, TransitionSnapshot{
+			PortfolioID: next.PortfolioID, UserID: next.UserID,
+			TrackingStartedAt: next.TrackingStartedAt,
+			RankedIndex:       next.CheckpointIndex, Status: next.Status,
+			CapturedAt: at, ValuationAsOf: at, DataQualityStatus: "complete",
+		})
 	}
 	return nil
 }
 
-// CurrentRankedPerformance is the read path consumed by the leaderboard,
-// profiles, and achievements. It values the user's active portfolio and applies
-// the persistent ranked state. A portfolio that has never been checkpointed is
-// treated as a fresh epoch (active at 100 if it holds positions, else paused at
-// 100) so a first read is always well-defined without a write.
-func (s *Service) CurrentRankedPerformance(ctx context.Context, userID string) (*RankedPerformance, error) {
-	portfolioID, valueBase, hasActive, err := s.valuator.PortfolioValueBase(ctx, userID)
+// EnsureEpoch initializes a persisted epoch without importing legacy history.
+func (s *Service) EnsureEpoch(ctx context.Context, userID string) error {
+	if s.mutable == nil {
+		return ErrInvalidState
+	}
+	observation, err := s.currentObservation(ctx, userID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	state, err := s.repo.GetByPortfolio(ctx, portfolioID)
-	if errors.Is(err, ErrStateNotFound) {
-		synthetic := activate(portfolioID, userID, valueBase, hasActive, s.now())
-		return performanceFrom(synthetic, valueBase), nil
+	if _, err := s.mutable.GetByPortfolio(ctx, observation.PortfolioID); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrStateNotFound) {
+		return err
 	}
-	if err != nil {
-		return nil, err
+	at := s.now()
+	state := ActivateState(observation.PortfolioID, userID, observation.ValueBase, observation.HasActive, at)
+	if err := s.mutable.Create(ctx, state); err != nil && !errors.Is(err, ErrVersionConflict) {
+		return err
 	}
-	return performanceFrom(*state, valueBase), nil
+	if s.recorder != nil {
+		_ = s.recorder.RecordTransition(ctx, TransitionSnapshot{
+			PortfolioID: state.PortfolioID, UserID: state.UserID,
+			TrackingStartedAt: state.TrackingStartedAt,
+			RankedIndex:       state.CheckpointIndex, Status: state.Status,
+			CapturedAt: at, ValuationAsOf: observation.ValuationAsOf,
+			DataQualityStatus: observation.DataQualityStatus,
+		})
+	}
+	return nil
 }
 
-func performanceFrom(state State, valueBase float64) *RankedPerformance {
-	idx := round2(CurrentIndex(state, valueBase))
-	return &RankedPerformance{
-		RankedIndex:            idx,
-		RankedReturnPercentage: round2(idx - 100),
-		Status:                 state.Status,
-		TrackingStartedAt:      state.TrackingStartedAt,
+func (s *Service) currentObservation(ctx context.Context, userID string) (ValuationObservation, error) {
+	if observed, ok := s.valuator.(ObservedValuator); ok {
+		return observed.PortfolioValueObservation(ctx, userID)
 	}
+	portfolioID, value, active, err := s.valuator.PortfolioValueBase(ctx, userID)
+	return ValuationObservation{
+		PortfolioID: portfolioID, ValueBase: value, HasActive: active,
+		ValuationAsOf: s.now(), DataQualityStatus: "complete",
+	}, err
 }

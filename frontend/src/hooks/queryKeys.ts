@@ -3,10 +3,38 @@
  * badges, so mutations invalidate all four of these.
  */
 export const queryKeys = {
+  activity: {
+    all: ["activity"] as const,
+    list: (params: object = {}) => ["activity", "list", params] as const,
+    detail: (id: string) => ["activity", "detail", id] as const,
+  },
+  portfolio: {
+    all: ["portfolio"] as const,
+    summary: ["portfolio", "summary"] as const,
+    positions: ["portfolio", "positions"] as const,
+    position: (id: string) => ["portfolio", "position", id] as const,
+    closedPositions: ["portfolio", "closedPositions"] as const,
+    closedPosition: (id: string) => ["portfolio", "closedPosition", id] as const,
+    cash: ["portfolio", "cash"] as const,
+    allocation: ["portfolio", "allocation"] as const,
+    sellPreview: (positionId: string, quantity: number, price: number, fee: number) =>
+      ["portfolio", "sellPreview", positionId, quantity, price, fee] as const,
+  },
+  performance: {
+    all: ["performance"] as const,
+    history: (timeframe: string) => ["performance", "history", timeframe] as const,
+    attribution: ["performance", "attribution"] as const,
+    benchmarks: ["performance", "benchmarks"] as const,
+    achievements: ["performance", "achievements"] as const,
+    leaderboardStanding: ["performance", "leaderboardStanding"] as const,
+  },
   positions: ["positions"] as const,
   closedPositions: ["positions", "closed"] as const,
   portfolioSummary: ["portfolioSummary"] as const,
-  portfolioArchives: (timeframe: string) => ["portfolioArchives", timeframe] as const,
+  cash: ["portfolioCash"] as const,
+  activities: ["portfolioActivities"] as const,
+  corporateActions: ["portfolioCorporateActions"] as const,
+  incomeEvents: ["portfolioIncomeEvents"] as const,
   leaderboard: ["leaderboard"] as const,
   dashboardLeaderboard: ["leaderboard", "dashboard"] as const,
   leaderboardMe: ["leaderboardMe"] as const,
@@ -30,10 +58,16 @@ export const queryKeys = {
 
 /** Queries to invalidate after any successful position mutation. */
 export const POSITION_MUTATION_INVALIDATIONS = [
+  queryKeys.activity.all,
+  queryKeys.portfolio.all,
+  queryKeys.performance.all,
   queryKeys.positions,
   queryKeys.closedPositions,
   queryKeys.portfolioSummary,
-  ["portfolioArchives"],
+  queryKeys.cash,
+  queryKeys.activities,
+  queryKeys.corporateActions,
+  queryKeys.incomeEvents,
   queryKeys.leaderboard,
   queryKeys.leaderboardMe,
   queryKeys.achievements,

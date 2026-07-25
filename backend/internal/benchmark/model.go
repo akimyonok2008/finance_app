@@ -10,6 +10,8 @@
 // swappable without touching the math.
 package benchmark
 
+import "time"
+
 // Difficulty tiers order badges from onboarding-easy to elite.
 type Difficulty string
 
@@ -81,24 +83,105 @@ type Badge struct {
 // carries only percentages, dates, and the benchmark id — never monetary
 // values, holdings, or identifiers.
 type AchievementEvidence struct {
-	Period             PeriodCode `json:"period"`
-	StartDate          string     `json:"start_date"`
-	EndDate            string     `json:"end_date"`
-	PortfolioReturnPct float64    `json:"portfolio_return_pct"`
-	BenchmarkReturnPct float64    `json:"benchmark_return_pct"`
-	EdgePoints         float64    `json:"edge_points"`
-	BenchmarkRecipeID  string     `json:"benchmark_recipe_id"`
+	Period              PeriodCode `json:"period"`
+	StartDate           string     `json:"start_date"`
+	EndDate             string     `json:"end_date"`
+	PortfolioReturnPct  float64    `json:"portfolio_return_pct"`
+	BenchmarkReturnPct  float64    `json:"benchmark_return_pct"`
+	EdgePoints          float64    `json:"edge_points"`
+	BenchmarkRecipeID   string     `json:"benchmark_recipe_id"`
+	EvaluationModel     string     `json:"evaluation_model,omitempty"`
+	EvidenceVersion     int        `json:"evidence_version,omitempty"`
+	TrackingEpoch       string     `json:"tracking_epoch,omitempty"`
+	StartRankedIndex    float64    `json:"start_ranked_index,omitempty"`
+	EndRankedIndex      float64    `json:"end_ranked_index,omitempty"`
+	StartSnapshotAt     string     `json:"start_snapshot_at,omitempty"`
+	EndSnapshotAt       string     `json:"end_snapshot_at,omitempty"`
+	ActiveCoveragePct   float64    `json:"active_coverage_percentage,omitempty"`
+	TrustedCoveragePct  float64    `json:"trusted_data_coverage_percentage,omitempty"`
+	BenchmarkDataSource string     `json:"benchmark_data_source,omitempty"`
+	SnapshotFrequency   string     `json:"snapshot_frequency,omitempty"`
+
+	// Benchmark data-integrity provenance (evidence v2). These record exactly
+	// which recipe version, price methodology, data quality and verification
+	// level produced the award, so it is reproducible and audit-safe.
+	BenchmarkRecipeVersion string                 `json:"benchmark_recipe_version,omitempty"`
+	Verification           AwardVerification      `json:"verification,omitempty"`
+	RebalancingPolicy      RebalancingPolicy      `json:"rebalancing_policy,omitempty"`
+	BenchmarkInputHash     string                 `json:"benchmark_input_hash,omitempty"`
+	DataSourceSummary      *BenchmarkDataEvidence `json:"benchmark_data,omitempty"`
 }
 
-// PricePoint is a single adjusted-close observation. Adjusted closes are
-// required so splits and dividends do not distort benchmark returns.
+// BenchmarkDataEvidence is the privacy-safe provenance of the benchmark leg of
+// an award: which providers, price methodology, data quality, and — for dynamic
+// 13F recipes — the filing source and mapping coverage. It contains no monetary
+// values, holdings, or identifiers.
+type BenchmarkDataEvidence struct {
+	Providers             []string   `json:"providers,omitempty"`
+	Symbols               []string   `json:"symbols,omitempty"`
+	PriceType             string     `json:"price_type,omitempty"`
+	Quality               string     `json:"quality,omitempty"`
+	IsSynthetic           bool       `json:"is_synthetic"`
+	UsedStaleData         bool       `json:"used_stale_data"`
+	IncludesDividends     bool       `json:"includes_dividends"`
+	IncludesSplits        bool       `json:"includes_splits"`
+	TotalReturnMethod     string     `json:"total_return_method,omitempty"`
+	RetrievedAt           time.Time  `json:"retrieved_at,omitempty"`
+	RecipeSourceType      string     `json:"recipe_source_type,omitempty"`
+	RecipeSourceAccession string     `json:"recipe_source_accession,omitempty"`
+	RecipeSourceURL       string     `json:"recipe_source_url,omitempty"`
+	RecipeReportPeriodEnd *time.Time `json:"recipe_report_period_end,omitempty"`
+	RecipePubliclyKnownAt *time.Time `json:"recipe_publicly_known_at,omitempty"`
+	MappingCoveragePct    *float64   `json:"mapping_coverage_percentage,omitempty"`
+}
+
+// EvidenceFromResult projects a benchmark evaluation's provenance into the
+// privacy-safe evidence summary.
+func EvidenceFromResult(result BenchmarkReturnResult) BenchmarkDataEvidence {
+	m := result.DataMetadata
+	priceType := ""
+	if len(m.PriceTypes) > 0 {
+		priceType = string(m.PriceTypes[0])
+	}
+	trMethod := "none"
+	if m.AllSeriesTotalReturn {
+		trMethod = "total_return"
+	} else if m.AllSeriesAdjusted {
+		trMethod = "adjusted_close"
+	}
+	ev := BenchmarkDataEvidence{
+		Providers:          m.Providers,
+		Symbols:            m.Symbols,
+		PriceType:          priceType,
+		Quality:            string(m.Quality),
+		IsSynthetic:        m.IsSynthetic,
+		UsedStaleData:      m.UsedStaleData,
+		IncludesDividends:  m.IncludesDividends,
+		IncludesSplits:     m.IncludesSplits,
+		TotalReturnMethod:  trMethod,
+		RetrievedAt:        m.EvaluatedAt,
+		RecipeSourceType:   result.RecipeVersion.SourceType,
+		RecipeSourceURL:    result.RecipeVersion.SourceURL,
+		MappingCoveragePct: result.RecipeVersion.MappingCoverage,
+	}
+	if result.RecipeVersion.SourceAccession != "" {
+		ev.RecipeSourceAccession = result.RecipeVersion.SourceAccession
+	}
+	ev.RecipeReportPeriodEnd = result.RecipeVersion.ReportPeriodEnd
+	ev.RecipePubliclyKnownAt = result.RecipeVersion.PubliclyKnownAt
+	return ev
+}
+
+// PricePoint is a single benchmark price observation. AdjustedClose is the
+// provider-neutral legacy field name; the Twelve Data adapter currently puts
+// unadjusted daily closes here, a limitation documented in the backend README.
 type PricePoint struct {
 	Date          string  `json:"date"` // YYYY-MM-DD
 	AdjustedClose float64 `json:"adjusted_close"`
 }
 
-// IndexPoint is a single point on a normalized index series (e.g. a portfolio
-// TWR index).
+// IndexPoint is a generic normalized index point. Ranked achievements do not
+// use this legacy archive-series type.
 type IndexPoint struct {
 	Date  string  `json:"date"`
 	Index float64 `json:"index"`

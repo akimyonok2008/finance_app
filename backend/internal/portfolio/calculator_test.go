@@ -56,7 +56,7 @@ func TestCalculatePortfolioSummary_AggregatesBaseValues(t *testing.T) {
 	assert.InDelta(t, 2864.5, sum.CurrentValue, 0.01)
 	assert.InDelta(t, 289.5, sum.GainLoss, 0.01)
 	assert.InDelta(t, 11.24, sum.GainLossPercentage, 0.05)
-	assert.InDelta(t, 111.24, sum.PortfolioIndex, 0.05)
+	assert.Equal(t, 100.0, sum.PortfolioIndex, "accounting calculator must not fabricate ranked performance")
 }
 
 func TestCalculatePortfolioSummary_ZeroCostBasis(t *testing.T) {

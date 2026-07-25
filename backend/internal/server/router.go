@@ -30,6 +30,11 @@ type Deps struct {
 	Strategy     *strategy.Service
 	MarketData   *marketdata.Service
 	Social       *social.Service
+	// CorporateActionView is the optional read-only automatic-adjustments reader.
+	CorporateActionView portfolio.CorporateActionViewReader
+	// IncomeEventView is the optional read-only automatic-income reader + the
+	// constrained correction path.
+	IncomeEventView portfolio.IncomeEventViewReader
 
 	// ReadinessChecks are dependency probes for GET /ready (postgres, redis, ...).
 	ReadinessChecks []ReadinessCheck
@@ -51,6 +56,12 @@ func New(d Deps) http.Handler {
 	authHandler := auth.NewHandler(d.Auth)
 	portfolioHandler := portfolio.NewHandler(d.Portfolio)
 	portfolioHandler.SetAchievementEvaluator(d.Achievements) // trigger badges on add/summary
+	if d.CorporateActionView != nil {
+		portfolioHandler.SetCorporateActionView(d.CorporateActionView)
+	}
+	if d.IncomeEventView != nil {
+		portfolioHandler.SetIncomeEventView(d.IncomeEventView)
+	}
 	leaderboardHandler := leaderboard.NewHandler(d.Leaderboard)
 	competitionHandler := competitions.NewHandler(d.Competitions, d.Achievements)
 	achievementHandler := achievements.NewHandler(d.Achievements)
@@ -109,12 +120,32 @@ func New(d Deps) http.Handler {
 		r.Get("/portfolio", portfolioHandler.GetPortfolio)
 		r.Get("/portfolio/summary", portfolioHandler.Summary)
 		r.Get("/portfolio/archives", portfolioHandler.Archives)
-		r.Post("/portfolio/positions", portfolioHandler.AddPosition)
+		r.Post("/portfolio/deposits", portfolioHandler.DepositCash)
+		r.Post("/portfolio/withdrawals", portfolioHandler.WithdrawCash)
+		r.Post("/portfolio/buys", portfolioHandler.BuyPosition)
+		r.Post("/portfolio/sells/preview", portfolioHandler.PreviewSell)
+		r.Post("/portfolio/sells", portfolioHandler.SellPosition)
+		r.Post("/portfolio/fees", portfolioHandler.RecordFee)
+		// Ordinary income (dividends, ETF/fund distributions, bond coupons, return
+		// of capital, stock dividends) is detected and credited AUTOMATICALLY by the
+		// background pipeline. Users cannot create arbitrary income; these endpoints
+		// are read-only plus a constrained, account-specific correction path.
+		r.Get("/portfolio/income-events", portfolioHandler.ListIncomeEvents)
+		r.Get("/portfolio/income-events/{id}", portfolioHandler.GetIncomeEvent)
+		r.Post("/portfolio/income-events/{id}/correction", portfolioHandler.CorrectIncomeEvent)
+		// Corporate actions are applied automatically by the background pipeline;
+		// users cannot record them. This is a read-only, owner-private view.
+		r.Get("/portfolio/corporate-actions", portfolioHandler.ListCorporateActions)
+		r.Get("/portfolio/cash", portfolioHandler.ListCash)
+		r.Get("/portfolio/activities", portfolioHandler.ListActivities)
+		r.Post("/portfolio/activities/{id}/correction", portfolioHandler.CorrectActivity)
 		r.Get("/portfolio/positions/closed", portfolioHandler.ListClosedPositions)
 		r.Get("/portfolio/positions", portfolioHandler.ListPositions)
-		r.Post("/portfolio/positions/{positionId}/close", portfolioHandler.ClosePosition)
-		r.Put("/portfolio/positions/{positionId}", portfolioHandler.UpdatePosition)
-		r.Delete("/portfolio/positions/{positionId}", portfolioHandler.DeletePosition)
+
+		r.Get("/activity", portfolioHandler.ActivityList)
+		r.Get("/activity/{activityId}", portfolioHandler.ActivityDetail)
+		r.Get("/performance/summary", portfolioHandler.PerformanceSummary)
+		r.Get("/performance/history", portfolioHandler.Archives)
 
 		r.Get("/leaderboard", leaderboardHandler.GetLeaderboard)
 		r.Get("/leaderboard/me", leaderboardHandler.GetMyStanding)

@@ -12,21 +12,24 @@ import (
 // Default values used for local development when env vars are unset. The JWT
 // secret MUST be overridden in production (see README).
 const (
-	defaultPort             = "8080"
-	defaultJWTSecret        = "dev-secret-change-me"
-	defaultJWTExpiryHr      = 24
-	defaultPriceProvider    = "mock"
-	defaultStorageProvider  = "memory"
-	defaultAppEnv           = "development"
-	defaultLeaderboardSecs  = 60
-	defaultPriceCacheSecs   = 300
-	defaultQuoteRefreshSecs = 600
-	defaultQuoteCacheSecs   = 600
-	defaultTwelveRPM        = 6
-	defaultTwelveDaily      = 500
-	defaultTwelveTimeout    = 10
-	defaultBaseCurrency     = "USD"
-	defaultEnableBackground = false
+	defaultPort                   = "8080"
+	defaultJWTSecret              = "dev-secret-change-me"
+	defaultJWTExpiryHr            = 24
+	defaultPriceProvider          = "mock"
+	defaultStorageProvider        = "memory"
+	defaultAppEnv                 = "development"
+	defaultLeaderboardSecs        = 60
+	defaultPriceCacheSecs         = 300
+	defaultQuoteRefreshSecs       = 600
+	defaultQuoteCacheSecs         = 600
+	defaultTwelveRPM              = 6
+	defaultTwelveDaily            = 500
+	defaultTwelveTimeout          = 10
+	defaultBaseCurrency           = "USD"
+	defaultEnableBackground       = false
+	defaultRankedSnapshotInterval = 4 * time.Hour
+	defaultRankedRetentionDays    = 120
+	defaultBenchmarkAwardMode     = "verified_only"
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -55,6 +58,37 @@ type Config struct {
 	EnableQuoteRefreshWorker       bool
 	QuoteStaleAfter                time.Duration
 	QuoteAllowStaleOnProviderError bool
+	RankedSnapshotInterval         time.Duration
+	RankedSnapshotRetention        time.Duration
+	RankedBoundaryTolerance        time.Duration
+	RankedEndFreshness             time.Duration
+	RankedActiveCoverage           float64
+
+	// BenchmarkAwardMode is the permanent-award policy for benchmark badges:
+	// "disabled", "demo", or "verified_only" (default). It is independent of the
+	// price provider so production status is never inferred from an API key.
+	BenchmarkAwardMode string
+
+	// Automatic corporate-action pipeline.
+	CorporateActionsEnabled      bool
+	CorporateActionPrimary       string
+	CorporateActionFallback      string
+	CorporateActionReference     string
+	CorporateActionPollInterval  time.Duration
+	CorporateActionLookback      time.Duration
+	CorporateActionRetryInterval time.Duration
+
+	// Automatic provider-driven income pipeline.
+	IncomeTrackingEnabled     bool
+	IncomePrimaryProvider     string
+	IncomeFallbackProvider    string
+	IncomePollInterval        time.Duration
+	IncomeLookback            time.Duration
+	IncomeApplicationInterval time.Duration
+	IncomeRetryInterval       time.Duration
+	IncomeReinvestByDefault   bool
+	IncomeUseEstimatedGross   bool
+	IncomeWithholdingDefault  float64
 
 	GoogleAuthEnabled bool
 	GoogleClientID    string
@@ -96,6 +130,30 @@ func Load() Config {
 		EnableQuoteRefreshWorker:       getEnvBool("ENABLE_QUOTE_REFRESH_WORKER", false),
 		QuoteStaleAfter:                time.Duration(getEnvInt("QUOTE_STALE_AFTER_SECONDS", 900)) * time.Second,
 		QuoteAllowStaleOnProviderError: getEnvBool("QUOTE_ALLOW_STALE_ON_PROVIDER_ERROR", true),
+		RankedSnapshotInterval:         getEnvDuration("RANKED_SNAPSHOT_INTERVAL", defaultRankedSnapshotInterval),
+		RankedSnapshotRetention:        time.Duration(getEnvInt("RANKED_INTRADAY_RETENTION_DAYS", defaultRankedRetentionDays)) * 24 * time.Hour,
+		RankedBoundaryTolerance:        getEnvDuration("RANKED_BOUNDARY_TOLERANCE", 36*time.Hour),
+		RankedEndFreshness:             getEnvDuration("RANKED_END_FRESHNESS", 8*time.Hour),
+		RankedActiveCoverage:           getEnvFloat("RANKED_ACTIVE_COVERAGE_THRESHOLD", 0.90),
+		BenchmarkAwardMode:             getEnv("BENCHMARK_AWARD_MODE", defaultBenchmarkAwardMode),
+		CorporateActionsEnabled:        getEnvBool("CORPORATE_ACTIONS_ENABLED", false),
+		CorporateActionPrimary:         getEnv("CORPORATE_ACTION_PRIMARY_PROVIDER", "manual_dev"),
+		CorporateActionFallback:        getEnv("CORPORATE_ACTION_FALLBACK_PROVIDER", ""),
+		CorporateActionReference:       getEnv("CORPORATE_ACTION_REFERENCE_PROVIDER", "twelve_data"),
+		CorporateActionPollInterval:    getEnvDuration("CORPORATE_ACTION_POLL_INTERVAL", 24*time.Hour),
+		CorporateActionLookback:        getEnvDuration("CORPORATE_ACTION_LOOKBACK", 7*24*time.Hour),
+		CorporateActionRetryInterval:   getEnvDuration("CORPORATE_ACTION_RETRY_INTERVAL", time.Hour),
+
+		IncomeTrackingEnabled:     getEnvBool("INCOME_TRACKING_ENABLED", false),
+		IncomePrimaryProvider:     getEnv("INCOME_PRIMARY_PROVIDER", "manual_dev"),
+		IncomeFallbackProvider:    getEnv("INCOME_FALLBACK_PROVIDER", ""),
+		IncomePollInterval:        getEnvDuration("INCOME_EVENT_POLL_INTERVAL", 24*time.Hour),
+		IncomeLookback:            getEnvDuration("INCOME_EVENT_LOOKBACK", 14*24*time.Hour),
+		IncomeApplicationInterval: getEnvDuration("INCOME_APPLICATION_INTERVAL", time.Hour),
+		IncomeRetryInterval:       getEnvDuration("INCOME_RETRY_INTERVAL", time.Hour),
+		IncomeReinvestByDefault:   getEnvBool("INCOME_REINVEST_BY_DEFAULT", false),
+		IncomeUseEstimatedGross:   getEnvBool("INCOME_USE_ESTIMATED_GROSS", true),
+		IncomeWithholdingDefault:  getEnvFloat("INCOME_WITHHOLDING_DEFAULT_RATE", 0),
 
 		GoogleAuthEnabled: getEnvBool("GOOGLE_AUTH_ENABLED", false),
 		GoogleClientID:    getEnv("GOOGLE_CLIENT_ID", ""),
@@ -156,6 +214,24 @@ func getEnvBool(key string, fallback bool) bool {
 	if v, ok := os.LookupEnv(key); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
+		}
+	}
+	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if value, ok := os.LookupEnv(key); ok {
+		if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if value, ok := os.LookupEnv(key); ok {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed
 		}
 	}
 	return fallback

@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Activity, Coins, TrendingUp, Wallet } from "lucide-react";
+import { Banknote, Coins, TrendingUp, Wallet, WalletCards } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
@@ -91,7 +91,7 @@ function SummarySkeletons() {
 export function PortfolioSummaryCards() {
   const { data, isLoading, isError } = usePortfolioSummary();
 
-  const grid = "grid grid-cols-2 gap-4 lg:grid-cols-4";
+  const grid = "grid grid-cols-2 gap-4 lg:grid-cols-5";
 
   if (isLoading) {
     return (
@@ -104,47 +104,59 @@ export function PortfolioSummaryCards() {
   // On error (or no summary yet) render neutral placeholders rather than crash.
   const summary = data;
   const currency = summary?.base_currency ?? "USD";
-  const gainPct = summary?.gain_loss_percentage;
+  const holdingsPnl = summary?.open_holdings.unrealized_pnl_base;
+  const holdingsReturn = summary?.open_holdings.unrealized_return_percentage;
 
   const specs: CardSpec[] = [
     {
-      key: "index",
-      label: "Portfolio Index",
-      value:
-        summary?.portfolio_index !== undefined
-          ? summary.portfolio_index.toFixed(2)
-          : "—",
-      icon: Activity,
-      valueClassName: "text-cyan-100",
-      hint: "Baseline 100.00",
-      tone: "cyan",
-    },
-    {
-      key: "gain",
-      label: "Gain / Loss",
-      value: formatPercent(gainPct),
-      icon: TrendingUp,
-      valueClassName: gainLossColor(gainPct),
-      hint:
-        summary?.gain_loss !== undefined
-          ? formatMoney(summary.gain_loss, currency)
-          : undefined,
-      tone: (gainPct ?? 0) < 0 ? "rose" : "emerald",
-    },
-    {
       key: "value",
-      label: "Current Value",
-      value: formatMoney(summary?.current_value, currency),
+      label: "Current Portfolio Value",
+      value: formatMoney(summary?.valuation.current_portfolio_value_base, currency),
       icon: Wallet,
       valueClassName: "text-violet-100",
+      hint: "Holdings plus cash",
       tone: "violet",
     },
     {
-      key: "cost",
-      label: "Cost Basis",
-      value: formatMoney(summary?.total_cost_basis, currency),
+      key: "holdings-value",
+      label: "Holdings Value",
+      value: formatMoney(summary?.valuation.open_holdings_market_value_base, currency),
+      icon: WalletCards,
+      valueClassName: "text-cyan-100",
+      hint: "Open positions only",
+      tone: "cyan",
+    },
+    {
+      key: "cash-value",
+      label: "Cash Value",
+      value: formatMoney(summary?.valuation.cash_value_base, currency),
+      icon: Banknote,
+      valueClassName: "text-emerald-100",
+      hint: "All currencies in base value",
+      tone: "emerald",
+    },
+    {
+      key: "holdings-pnl",
+      label: "Current Holdings P&L",
+      value:
+        holdingsReturn === null
+          ? "—"
+          : formatMoney(holdingsPnl, currency),
+      icon: TrendingUp,
+      valueClassName: gainLossColor(holdingsPnl),
+      hint:
+        holdingsReturn === null
+          ? "No open holdings cost basis"
+          : `${formatPercent(holdingsReturn)} · Open holdings only`,
+      tone: (holdingsPnl ?? 0) < 0 ? "rose" : "emerald",
+    },
+    {
+      key: "basis",
+      label: "Holdings Cost Basis",
+      value: formatMoney(summary?.open_holdings.cost_basis_base, currency),
       icon: Coins,
       valueClassName: "text-amber-100",
+      hint: "Remaining open-position basis",
       tone: "amber",
     },
   ];

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,12 +17,15 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/clock"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/config"
+	"github.com/ardakimyonok/finance_app/internal/corpactions"
 	"github.com/ardakimyonok/finance_app/internal/db"
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/income"
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
 	"github.com/ardakimyonok/finance_app/internal/performance"
+	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/profile"
@@ -48,8 +52,8 @@ func (p summaryProvider) GetSummary(ctx context.Context, userID string) (*portfo
 
 type positionProvider struct{ s *portfolio.Service }
 
-func (p positionProvider) ListPositions(_ context.Context, userID string) ([]portfolio.Position, error) {
-	ptrs, err := p.s.ListPositions(userID)
+func (p positionProvider) ListPositions(ctx context.Context, userID string) ([]portfolio.Position, error) {
+	ptrs, err := p.s.ListPositions(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -84,8 +88,8 @@ func (a benchmarkHistoryAdapter) GetAdjustedCloseSeries(ctx context.Context, sym
 	return out, nil
 }
 
-// portfolioSnapshotAdapter records daily portfolio snapshots for every user,
-// giving benchmark evaluation a continuous portfolio index series.
+// portfolioSnapshotAdapter preserves the private daily cost-basis/composition
+// archive. Ranked leaderboards, profiles, and achievements do not consume it.
 type portfolioSnapshotAdapter struct {
 	portfolio *portfolio.Service
 	users     *auth.Service
@@ -110,32 +114,69 @@ func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, er
 	return recorded, nil
 }
 
-// achievementPerformanceProvider adapts the portfolio archive engine to the
-// benchmark index series the achievements module needs. It sources the real
-// portfolio TWR index (never recomputed from trades) and filters to the window.
-type achievementPerformanceProvider struct{ s *portfolio.Service }
+type rankedMutationSnapshotAdapter struct{ history *performancehistory.Service }
 
-func (a achievementPerformanceProvider) GetPortfolioIndexSeries(ctx context.Context, userID string, start, end time.Time) ([]benchmark.IndexPoint, error) {
-	// 1Y archives cover every badge period; filter points to [start, end].
-	archives, err := a.s.Archives(ctx, userID, portfolio.ArchiveTimeframe1Y)
+func (a rankedMutationSnapshotAdapter) RecordMutationSnapshot(ctx context.Context, ev portfolio.OutboxEvent) error {
+	_, err := a.history.RecordTransitionIfChanged(ctx, performance.TransitionSnapshot{
+		PortfolioID: ev.AggregateID, UserID: ev.UserID,
+		TrackingStartedAt: ev.TrackingStartedAt,
+		RankedIndex:       ev.RankedIndex, Status: performance.Status(ev.RankingStatus),
+		CapturedAt: ev.CreatedAt, ValuationAsOf: ev.ValuationAsOf,
+		DataQualityStatus: ev.DataQualityStatus,
+	})
+	return err
+}
+
+type rankedSnapshotJobAdapter struct {
+	users        *auth.Service
+	history      *performancehistory.Service
+	achievements *achievements.Service
+}
+
+func (a rankedSnapshotJobAdapter) SnapshotAll(ctx context.Context) performancehistory.BatchResult {
+	result := performancehistory.BatchResult{}
+	users, err := a.users.ListUsers(ctx)
 	if err != nil {
-		return nil, err
+		result.Failures++
+		return result
 	}
-	out := make([]benchmark.IndexPoint, 0, len(archives.Points))
-	for _, p := range archives.Points {
-		captured, err := time.Parse(time.RFC3339, p.CapturedAt)
+	for _, user := range users {
+		result.UsersProcessed++
+		created, snapshotQuality, err := a.history.RecordCurrent(ctx, user.ID)
 		if err != nil {
+			result.SkippedValuations++
 			continue
 		}
-		if captured.Before(start) || captured.After(end) {
-			continue
+		result.SnapshotsCreated += created
+		if snapshotQuality == performancehistory.QualityStale {
+			result.StaleSnapshots++
 		}
-		out = append(out, benchmark.IndexPoint{
-			Date:  captured.UTC().Format("2006-01-02"),
-			Index: p.PortfolioIndex,
-		})
 	}
-	return out, nil
+	return result
+}
+
+func (a rankedSnapshotJobAdapter) ProcessEvaluations(ctx context.Context) (processed, failed int) {
+	claims, err := a.history.ClaimEvaluations(ctx, 100)
+	if err != nil {
+		return 0, 1
+	}
+	for _, claim := range claims {
+		if err := a.achievements.EvaluateLocked(ctx, claim.UserID); err != nil {
+			failed++
+			_ = a.history.FailEvaluation(ctx, claim.SnapshotID, err)
+			continue
+		}
+		if err := a.history.CompleteEvaluation(ctx, claim.SnapshotID); err != nil {
+			failed++
+			continue
+		}
+		processed++
+	}
+	return processed, failed
+}
+
+func (a rankedSnapshotJobAdapter) Compact(ctx context.Context) (int64, error) {
+	return a.history.Compact(ctx)
 }
 
 // leaderboardProfileAdapter joins public profile data onto leaderboard rows,
@@ -177,6 +218,28 @@ func (a rankedPerformanceAdapter) CurrentRankedPerformance(ctx context.Context, 
 	}, nil
 }
 
+type rankedCacheStateAdapter struct {
+	users       *auth.Service
+	performance *performance.Service
+}
+
+func (a rankedCacheStateAdapter) CurrentRankedCacheState(ctx context.Context, userID string) (jobs.RankedCacheState, bool, error) {
+	if _, err := a.users.UserByID(userID); err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			return jobs.RankedCacheState{}, false, nil
+		}
+		return jobs.RankedCacheState{}, false, err
+	}
+	ranked, err := a.performance.CurrentRankedPerformance(ctx, userID)
+	if err != nil {
+		return jobs.RankedCacheState{}, false, err
+	}
+	return jobs.RankedCacheState{
+		Active: ranked.Status == performance.StatusActive,
+		Score:  ranked.RankedReturnPercentage,
+	}, true, nil
+}
+
 // profileRankedAdapter bridges the ranked-performance service to the profile
 // module's port so public profiles surface the trusted ranked index.
 type profileRankedAdapter struct{ s *performance.Service }
@@ -191,6 +254,24 @@ func (a profileRankedAdapter) CurrentRankedPerformance(ctx context.Context, user
 		RankedReturnPercentage: rp.RankedReturnPercentage,
 		Paused:                 rp.Status == performance.StatusPaused,
 	}, nil
+}
+
+type profileHistoryAdapter struct{ s *performancehistory.Service }
+
+func (a profileHistoryAdapter) RankedHistory(ctx context.Context, userID string, start, end time.Time) ([]profile.PublicPerformancePoint, error) {
+	points, err := a.s.Series(ctx, userID, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]profile.PublicPerformancePoint, 0, len(points))
+	for _, point := range points {
+		out = append(out, profile.PublicPerformancePoint{
+			CapturedAt:       point.CapturedAt.Format(time.RFC3339),
+			PortfolioIndex:   point.RankedIndex,
+			ReturnPercentage: point.RankedIndex - 100,
+		})
+	}
+	return out, nil
 }
 
 type profileTimeframeRankAdapter struct{ s *leaderboard.Service }
@@ -216,11 +297,11 @@ func (a profileTimeframeRankAdapter) UserRankings(ctx context.Context, timeframe
 type repositories struct {
 	users        auth.UserRepository
 	portfolio    portfolio.Repository
-	performance  performance.Repository
+	performance  performance.StateReader
+	history      performancehistory.Repository
 	competitions competitions.CompetitionRepository
 	achievements achievements.AchievementRepository
 	profiles     profile.Repository
-	snapshots    leaderboard.SnapshotStore
 	marketdata   marketdata.Repository
 	social       social.Repository
 }
@@ -261,19 +342,22 @@ func main() {
 
 	// --- storage ---
 	var (
-		repos           repositories
-		readinessChecks []server.ReadinessCheck
+		repos            repositories
+		readinessChecks  []server.ReadinessCheck
+		corpActionStorer corpactions.Store // durable when postgres; in-memory otherwise
+		incomeStorer     income.Store      // durable when postgres; in-memory otherwise
 	)
 	switch cfg.StorageProvider {
 	case "memory":
+		memPortfolio := portfolio.NewInMemoryRepository()
 		repos = repositories{
 			users:        auth.NewInMemoryUserRepository(),
-			portfolio:    portfolio.NewInMemoryRepository(),
-			performance:  performance.NewInMemoryRepository(),
+			portfolio:    memPortfolio,
+			performance:  memPortfolio,
+			history:      performancehistory.NewInMemoryRepository(),
 			competitions: competitions.NewInMemoryCompetitionRepository(),
 			achievements: achievements.NewInMemoryAchievementRepository(),
 			profiles:     profile.NewInMemoryRepository(),
-			snapshots:    leaderboard.NewInMemorySnapshotStore(),
 			marketdata:   marketdata.NewInMemoryRepository(),
 			social:       social.NewInMemoryRepository(),
 		}
@@ -296,14 +380,16 @@ func main() {
 		repos = repositories{
 			users:        auth.NewPostgresUserRepository(pool),
 			portfolio:    portfolio.NewPostgresRepository(pool),
-			performance:  performance.NewPostgresRepository(pool),
+			performance:  performance.NewPostgresStateReader(pool),
+			history:      performancehistory.NewPostgresRepository(pool),
 			competitions: competitions.NewPostgresCompetitionRepository(pool),
 			achievements: achRepo,
 			profiles:     profile.NewPostgresRepository(pool),
-			snapshots:    leaderboard.NewPostgresSnapshotStore(pool),
 			marketdata:   marketdata.NewPostgresRepository(pool),
 			social:       social.NewPostgresRepository(pool),
 		}
+		corpActionStorer = corpactions.NewPostgresStore(pool)
+		incomeStorer = income.NewPostgresStore(pool)
 		readinessChecks = append(readinessChecks, server.ReadinessCheck{
 			Name:  "postgres",
 			Check: func(ctx context.Context) error { return pool.Ping(ctx) },
@@ -379,22 +465,31 @@ func main() {
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
 	// Ranked-performance engine: the single trusted source of global ranked
-	// performance. The portfolio service checkpoints into it on every mutation
-	// and supplies the current valuation it reads back.
+	// performance. It is READ-ONLY — ranked state is written exclusively inside
+	// the portfolio aggregate transaction (portfolio.MutationCoordinator), so a
+	// checkpoint can never commit apart from the position write that caused it.
 	performanceSvc := performance.NewService(repos.performance)
 	performanceSvc.SetValuator(portfolioSvc)
-	portfolioSvc.SetCheckpointer(performanceSvc)
+	portfolioSvc.SetRankedPerformanceProvider(performanceSvc)
+	// Ranked-index history: the evidence series behind timeframe leaderboards and
+	// benchmark badges. It reads ranked performance, never portfolio values.
+	historySvc := performancehistory.NewService(repos.history, performanceSvc, performancehistory.Config{
+		IntradayInterval:     cfg.RankedSnapshotInterval,
+		BoundaryTolerance:    cfg.RankedBoundaryTolerance,
+		EndFreshness:         cfg.RankedEndFreshness,
+		EligibilityThreshold: cfg.RankedActiveCoverage,
+		IntradayRetention:    cfg.RankedSnapshotRetention,
+	})
 	leaderboardSvc := leaderboard.NewService(authSvc, rankedPerformanceAdapter{performanceSvc})
-	leaderboardSvc.SetSnapshotStore(repos.snapshots)
+	leaderboardSvc.SetSnapshotStore(historySvc)
 	competitionsSvc := competitions.NewService(
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
 	)
-	// Benchmark badge engine. The portfolio side always uses the real archive
-	// index series; the benchmark side uses real Twelve Data historical closes
-	// when the real feed is enabled, and falls back to a deterministic offline
-	// provider only for local dev/tests without an API key. The Berkshire 13F
-	// basket resolves from real disclosed holdings.
+	// Benchmark badge engine. The portfolio side uses canonical ranked snapshots;
+	// the benchmark side uses Twelve Data historical closes when enabled. The
+	// deterministic offline provider supports previews in local development but
+	// is not eligible to create permanent awards.
 	var benchmarkHistory benchmark.HistoricalPriceProvider
 	if twelveData != nil {
 		benchmarkHistory = benchmarkHistoryAdapter{
@@ -413,16 +508,37 @@ func main() {
 	rulesEngine := benchmark.NewRulesEngine(benchmark.DefaultEvaluators())
 	achievementsSvc := achievements.NewService(
 		repos.achievements,
-		achievementPerformanceProvider{portfolioSvc},
+		historySvc,
 		benchmarkEngine,
 		rulesEngine,
 	)
+	if twelveData != nil {
+		achievementsSvc.SetBenchmarkDataSource("twelvedata_close")
+	} else {
+		achievementsSvc.SetBenchmarkDataSource("mock")
+	}
+	// Permanent-award policy. The environment and mode come from configuration,
+	// never inferred from whether an API key is present. Verified awards require
+	// real, adjusted/total-return data AND a valid recipe version; misconfigured
+	// production is downgraded to disabled with a prominent warning.
+	awardMode := benchmark.ParseAwardMode(cfg.BenchmarkAwardMode)
+	environment := benchmark.EnvironmentMode(cfg.AppEnv)
+	if awardMode == benchmark.AwardModeVerifiedOnly && twelveData == nil {
+		slog.Warn("BENCHMARK_AWARD_MODE=verified_only but no real price provider is configured; verified awards are impossible with mock data — disabling permanent awards",
+			"price_provider", cfg.PriceProvider, "app_env", cfg.AppEnv)
+		if environment == benchmark.EnvironmentProduction {
+			slog.Error("refusing to issue verified benchmark awards in production without a verified price provider")
+		}
+		awardMode = benchmark.AwardModeDisabled
+	}
+	achievementsSvc.SetAwardPolicy(awardMode, environment)
+	slog.Info("benchmark award policy configured", "mode", string(awardMode), "environment", string(environment))
 	profileSvc := profile.NewService(repos.profiles, userProvider{authSvc}, summaryProvider{portfolioSvc})
 	profileSvc.SetAchievementProvider(achievementsSvc)
 	profileSvc.SetSprintRankProvider(competitionsSvc)
 	profileSvc.SetGlobalRankProvider(leaderboardSvc)
 	profileSvc.SetTimeframeRankProvider(profileTimeframeRankAdapter{leaderboardSvc})
-	profileSvc.SetPerformanceHistoryProvider(portfolioSvc)
+	profileSvc.SetPerformanceHistoryProvider(profileHistoryAdapter{historySvc})
 	profileSvc.SetRankedPerformanceProvider(profileRankedAdapter{performanceSvc})
 	// Enrich leaderboard rows with public profile data (handle/tag/weights).
 	leaderboardSvc.SetProfileProvider(leaderboardProfileAdapter{profileSvc})
@@ -437,9 +553,12 @@ func main() {
 	if existingUsers, err := authSvc.ListUsers(ctx); err == nil {
 		backfilled := 0
 		for _, u := range existingUsers {
-			if err := performanceSvc.EnsureEpoch(ctx, u.ID); err != nil {
+			if err := portfolioSvc.Coordinator().EnsureRankedEpoch(ctx, u.ID); err != nil {
 				slog.Warn("ranked-epoch backfill failed for user", "user_id", u.ID, "error", err)
 				continue
+			}
+			if _, err := historySvc.RecordCurrentTransition(ctx, u.ID); err != nil {
+				slog.Warn("initial ranked snapshot failed for user", "user_id", u.ID, "error", err)
 			}
 			backfilled++
 		}
@@ -451,19 +570,42 @@ func main() {
 	}
 
 	// --- leaderboard caches (Redis only) ---
+	var rankedCache *leaderboard.RedisLeaderboardCache
 	if redisClient != nil {
-		cache := leaderboard.NewRedisLeaderboardCache(redisClient)
-		leaderboardSvc.SetCache(cache)
-		competitionsSvc.SetCache(cache)
+		rankedCache = leaderboard.NewRedisLeaderboardCache(redisClient)
+		leaderboardSvc.SetCache(rankedCache)
+		competitionsSvc.SetCache(rankedCache)
+	}
+
+	// --- transactional outbox processor ---
+	// Derived work (leaderboard cache sync, daily archive snapshots) runs AFTER
+	// the mutation commits, driven by durable events written inside the same
+	// transaction. A projection failure retries; it can never roll back or fail a
+	// portfolio mutation, and Redis being down cannot corrupt core state.
+	if store, ok := repos.portfolio.(jobs.EventSource); ok && cfg.EnableBackgroundWorkers {
+		outboxProcessor := jobs.NewOutboxProcessor(store, cfg.LeaderboardRefreshInterval)
+		if rankedCache != nil {
+			outboxProcessor.SetCache(rankedCache, rankedCacheStateAdapter{
+				users: authSvc, performance: performanceSvc,
+			})
+		}
+		outboxProcessor.SetSnapshotRecorder(portfolioSvc)
+		outboxProcessor.SetRankedSnapshotRecorder(rankedMutationSnapshotAdapter{history: historySvc})
+		outboxProcessor.Start(ctx)
+		slog.Info("portfolio outbox processor started")
 	}
 
 	// --- background workers ---
 	if cfg.EnableBackgroundWorkers {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
-		// Daily portfolio snapshots keep a continuous index series for benchmark
-		// evaluation; the recorder is idempotent per UTC day.
+		// Private daily portfolio archives remain available for owner analytics;
+		// ranked achievements use the independent canonical snapshot worker below.
 		worker.SetPortfolioSnapshotter(portfolioSnapshotAdapter{portfolio: portfolioSvc, users: authSvc})
 		worker.Start(ctx)
+		rankedWorker := jobs.NewRankedSnapshotWorker(rankedSnapshotJobAdapter{
+			users: authSvc, history: historySvc, achievements: achievementsSvc,
+		}, cfg.RankedSnapshotInterval)
+		rankedWorker.Start(ctx)
 	} else {
 		slog.Info("background workers disabled (ENABLE_BACKGROUND_WORKERS=false)")
 	}
@@ -475,18 +617,78 @@ func main() {
 		slog.Info("quote refresh worker disabled (ENABLE_QUOTE_REFRESH_WORKER=false)")
 	}
 
+	// Automatic corporate-action pipeline. Users never enter corporate actions;
+	// the worker ingests provider events and applies routine transformations
+	// (splits, ticker changes) automatically through the aggregate coordinator.
+	// The manual development provider needs no API keys, so the pipeline runs
+	// offline; swap in a real provider adapter via configuration.
+	var corpActionView portfolio.CorporateActionViewReader
+	if cfg.CorporateActionsEnabled {
+		corpProvider := corpactions.NewManualDevelopmentProvider()
+		var corpStore corpactions.Store = corpActionStorer
+		if corpStore == nil {
+			corpStore = corpactions.NewInMemoryStore()
+		}
+		corpSvc := corpactions.NewService(corpProvider, corpStore, corpActionGateway{svc: portfolioSvc})
+		corpSvc.SetLookback(cfg.CorporateActionLookback)
+		corpActionView = corpActionViewAdapter{svc: corpSvc}
+		if cfg.EnableBackgroundWorkers {
+			jobs.NewCorporateActionWorker(corpSvc, cfg.CorporateActionPollInterval).Start(ctx)
+			slog.Info("corporate-action pipeline enabled",
+				"primary_provider", cfg.CorporateActionPrimary,
+				"poll_interval", cfg.CorporateActionPollInterval.String())
+		}
+	} else {
+		slog.Info("corporate-action pipeline disabled (CORPORATE_ACTIONS_ENABLED=false)")
+	}
+
+	// Automatic provider-driven income pipeline. Users never enter ordinary
+	// dividends or distributions; the worker ingests provider income events and
+	// credits cash (or reinvested shares) automatically through the aggregate
+	// coordinator, using HISTORICAL holdings for entitlement. The manual
+	// development provider needs no API keys, so the pipeline runs offline; swap in
+	// a real provider adapter via configuration.
+	var incomeView portfolio.IncomeEventViewReader
+	if cfg.IncomeTrackingEnabled {
+		incomeProvider := income.NewManualDevelopmentProvider()
+		var incomeStore income.Store = incomeStorer
+		if incomeStore == nil {
+			incomeStore = income.NewInMemoryStore()
+		}
+		incomeSvc := income.NewService(incomeProvider, incomeStore, incomeGateway{svc: portfolioSvc})
+		incomeSvc.SetLookback(cfg.IncomeLookback)
+		incomeSvc.SetRetryInterval(cfg.IncomeRetryInterval)
+		incomeSvc.SetPreferences(income.Preferences{
+			ReinvestByDefault: cfg.IncomeReinvestByDefault,
+			UseEstimatedGross: cfg.IncomeUseEstimatedGross,
+			Withholding:       income.WithholdingProfile{DefaultRate: cfg.IncomeWithholdingDefault},
+		})
+		incomeView = incomeViewAdapter{svc: incomeSvc}
+		if cfg.EnableBackgroundWorkers {
+			jobs.NewIncomeWorker(incomeSvc, cfg.IncomePollInterval).Start(ctx)
+			slog.Info("income pipeline enabled",
+				"primary_provider", cfg.IncomePrimaryProvider,
+				"poll_interval", cfg.IncomePollInterval.String(),
+				"reinvest_by_default", cfg.IncomeReinvestByDefault)
+		}
+	} else {
+		slog.Info("income pipeline disabled (INCOME_TRACKING_ENABLED=false)")
+	}
+
 	handler := server.New(server.Deps{
-		Auth:            authSvc,
-		Tokens:          tokens,
-		Portfolio:       portfolioSvc,
-		Leaderboard:     leaderboardSvc,
-		Competitions:    competitionsSvc,
-		Achievements:    achievementsSvc,
-		Profile:         profileSvc,
-		Strategy:        strategySvc,
-		MarketData:      marketDataSvc,
-		Social:          socialSvc,
-		ReadinessChecks: readinessChecks,
+		Auth:                authSvc,
+		Tokens:              tokens,
+		Portfolio:           portfolioSvc,
+		Leaderboard:         leaderboardSvc,
+		Competitions:        competitionsSvc,
+		Achievements:        achievementsSvc,
+		Profile:             profileSvc,
+		Strategy:            strategySvc,
+		MarketData:          marketDataSvc,
+		Social:              socialSvc,
+		CorporateActionView: corpActionView,
+		IncomeEventView:     incomeView,
+		ReadinessChecks:     readinessChecks,
 		Info: map[string]string{
 			"storage_provider": cfg.StorageProvider,
 			"price_provider":   priceProviderName,

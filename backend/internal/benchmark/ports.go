@@ -5,11 +5,21 @@ import (
 	"time"
 )
 
-// HistoricalPriceProvider supplies adjusted-close series for a symbol over a
-// date range. Implement it with a licensed feed, a cache, or the bundled mock.
-// Prices MUST be adjusted closes so splits/dividends do not distort returns.
+// HistoricalPriceProvider supplies a close series for a symbol over a date
+// range. This is the legacy port: it returns bare points with no provenance, so
+// the engine wraps any such provider as raw-close/unverified data that cannot
+// back a verified award. Prefer HistoricalSeriesProvider for new providers.
 type HistoricalPriceProvider interface {
 	GetAdjustedCloseSeries(ctx context.Context, symbol string, start, end time.Time) ([]PricePoint, error)
+}
+
+// HistoricalSeriesProvider supplies a price series together with its provenance
+// (provider, price type, adjustment/total-return capability, freshness). The
+// engine requests the data quality it needs via SeriesRequirement and the
+// provider must fail rather than silently downgrade — e.g. it must not relabel a
+// raw close as an adjusted close.
+type HistoricalSeriesProvider interface {
+	GetSeries(ctx context.Context, symbol string, start, end time.Time, req SeriesRequirement) (BenchmarkPriceSeries, error)
 }
 
 // DynamicRecipeResolver resolves a dynamic recipe (e.g. a Berkshire 13F basket)

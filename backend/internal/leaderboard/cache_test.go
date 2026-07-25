@@ -38,6 +38,26 @@ func TestRedisCache_GlobalUpsertAndTop(t *testing.T) {
 	assert.Equal(t, "u3", top[2].UserID)
 }
 
+func TestRedisCache_GlobalRemovalIsIdempotentAndIsolated(t *testing.T) {
+	c := newTestCache(t)
+	ctx := context.Background()
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 12))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", 8))
+
+	require.NoError(t, c.RemoveGlobalScore(ctx, "u1"))
+	require.NoError(t, c.RemoveGlobalScore(ctx, "u1"), "removing an absent member must succeed")
+	top, err := c.GetGlobalTop(ctx, 0)
+	require.NoError(t, err)
+	require.Len(t, top, 1)
+	assert.Equal(t, "u2", top[0].UserID)
+
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 15))
+	top, err = c.GetGlobalTop(ctx, 0)
+	require.NoError(t, err)
+	require.Len(t, top, 2)
+	assert.Equal(t, "u1", top[0].UserID, "upsert after removal restores ranking membership")
+}
+
 func TestRedisCache_GlobalTopRespectsLimit(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()

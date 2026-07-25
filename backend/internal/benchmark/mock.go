@@ -44,6 +44,37 @@ func (m *MockHistoricalPriceProvider) GetAdjustedCloseSeries(_ context.Context, 
 	return out, nil
 }
 
+// GetSeries implements HistoricalSeriesProvider, returning the synthetic path
+// wrapped in metadata that labels it explicitly as synthetic. Synthetic data is
+// admissible for progress previews and demo awards, never for verified awards —
+// validateSeries enforces that from the metadata, not the caller's trust.
+func (m *MockHistoricalPriceProvider) GetSeries(ctx context.Context, symbol string, start, end time.Time, _ SeriesRequirement) (BenchmarkPriceSeries, error) {
+	points, err := m.GetAdjustedCloseSeries(ctx, symbol, start, end)
+	if err != nil {
+		return BenchmarkPriceSeries{}, err
+	}
+	now := time.Now().UTC()
+	return BenchmarkPriceSeries{
+		Symbol: symbol,
+		Points: points,
+		Metadata: BenchmarkDataMetadata{
+			Provider:          "mock",
+			ProviderMode:      "mock",
+			PriceType:         PriceTypeTotalReturn, // synthetic path is total-return by construction
+			IncludesDividends: true,
+			IncludesSplits:    true,
+			IsAdjusted:        true,
+			IsTotalReturn:     true,
+			IsSynthetic:       true,
+			CorpActionsKnown:  true,
+			Quality:           DataQualitySynthetic,
+			RetrievedAt:       now,
+			SourceAsOf:        now,
+			ProviderDataset:   "deterministic_synthetic",
+		},
+	}, nil
+}
+
 // dailyDates returns each UTC day from start to end inclusive.
 func dailyDates(start, end time.Time) []time.Time {
 	var dates []time.Time

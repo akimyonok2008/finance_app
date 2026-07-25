@@ -7,15 +7,9 @@ import (
 	"time"
 )
 
-// SnapshotStore persists periodic portfolio-index points per user so the
-// leaderboard can compute trailing-window (1W/1M/…) performance. The background
-// worker records one point per user per tick via the service's RefreshCache.
-//
-// TODO: prune points older than the longest supported window (1Y) to bound
-// growth; for the prototype we keep them all.
+// SnapshotStore reads the canonical ranked-performance history used by
+// trailing-window leaderboards.
 type SnapshotStore interface {
-	// Record stores a user's ranked index at a point in time.
-	Record(ctx context.Context, userID string, index float64, at time.Time) error
 	// IndexAtOrBefore returns the most recent recorded index at or before cutoff
 	// and at or after notBefore. notBefore is the user's ranking-epoch timestamp:
 	// legacy snapshots recorded before the epoch are ignored so timeframe returns

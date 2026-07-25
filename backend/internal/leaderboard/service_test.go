@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -225,6 +226,93 @@ func TestRefreshCache_PopulatesScores(t *testing.T) {
 	require.Len(t, top, 2)
 	assert.Equal(t, "u2", top[0].UserID)
 	assert.InDelta(t, 12.4, top[0].Score, 0.001)
+}
+
+func TestRefreshCache_ReconcilesPausedDeletedAndPreservesValuationFailures(t *testing.T) {
+	users := fakeUsers{users: []auth.User{
+		user("active", "Active"), user("paused", "Paused"), user("unpriced", "Unpriced"),
+	}}
+	paused := summary(12, 112)
+	paused.Paused = true
+	sums := fakeRanked{
+		byUser: map[string]RankedPerformance{
+			"active": summary(8, 108),
+			"paused": paused,
+		},
+		errs: map[string]error{"unpriced": errors.New("temporary quote failure")},
+	}
+	svc := NewService(users, sums)
+	cache := newTestCache(t)
+	svc.SetCache(cache)
+	ctx := context.Background()
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "paused", 12))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "deleted", 40))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "unpriced", 5))
+
+	skipped, err := svc.RefreshCache(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, skipped)
+	top, err := cache.GetGlobalTop(ctx, 0)
+	require.NoError(t, err)
+	require.Len(t, top, 2)
+	assert.ElementsMatch(t, []string{"active", "unpriced"},
+		[]string{top[0].UserID, top[1].UserID})
+
+	// Reconciliation is idempotent.
+	skipped, err = svc.RefreshCache(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, skipped)
+	top, err = cache.GetGlobalTop(ctx, 0)
+	require.NoError(t, err)
+	assert.Len(t, top, 2)
+}
+
+func TestRefreshCache_ConcurrentWorkersConvergeIdempotently(t *testing.T) {
+	users := cacheUsers()
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
+		"u1": summary(8.1, 108.1), "u2": summary(12.4, 112.4),
+	}}
+	cache := newTestCache(t)
+	services := []*Service{NewService(users, sums), NewService(users, sums)}
+	for _, svc := range services {
+		svc.SetCache(cache)
+	}
+
+	var wg sync.WaitGroup
+	for _, svc := range services {
+		wg.Add(1)
+		go func(svc *Service) {
+			defer wg.Done()
+			_, err := svc.RefreshCache(context.Background())
+			assert.NoError(t, err)
+		}(svc)
+	}
+	wg.Wait()
+	top, err := cache.GetGlobalTop(context.Background(), 0)
+	require.NoError(t, err)
+	require.Len(t, top, 2)
+	assert.Equal(t, "u2", top[0].UserID)
+}
+
+func TestCachedReadRemovesUnknownUserMember(t *testing.T) {
+	svc := NewService(
+		fakeUsers{users: []auth.User{user("active", "Active")}},
+		fakeRanked{byUser: map[string]RankedPerformance{"active": summary(8, 108)}},
+	)
+	cache := newTestCache(t)
+	svc.SetCache(cache)
+	ctx := context.Background()
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "ghost", 99))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "active", 8))
+
+	board, err := svc.Build(ctx)
+	require.NoError(t, err)
+	require.Len(t, board, 1)
+	assert.Equal(t, "Active", board[0].DisplayName)
+	top, err := cache.GetGlobalTop(ctx, 0)
+	require.NoError(t, err)
+	require.Len(t, top, 1)
+	assert.Equal(t, "active", top[0].UserID)
 }
 
 func TestBuild_ListUsersErrorIsReturned(t *testing.T) {

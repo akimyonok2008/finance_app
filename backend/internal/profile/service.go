@@ -47,7 +47,7 @@ type TimeframeRankProvider interface {
 }
 
 type PerformanceHistoryProvider interface {
-	Archives(ctx context.Context, userID, timeframe string) (*portfolio.PortfolioArchives, error)
+	RankedHistory(ctx context.Context, userID string, start, end time.Time) ([]PublicPerformancePoint, error)
 }
 
 // RankedPerformance is the persistent ranked standing surfaced on public

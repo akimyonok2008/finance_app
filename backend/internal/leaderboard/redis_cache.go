@@ -30,6 +30,16 @@ func (c *RedisLeaderboardCache) UpsertGlobalScore(ctx context.Context, userID st
 	return c.upsert(ctx, globalKey, userID, score)
 }
 
+// RemoveGlobalScore evicts a user from the global sorted set. Removing a member
+// that is not present is a no-op in Redis, so this is safely idempotent and can
+// be retried by the outbox processor.
+func (c *RedisLeaderboardCache) RemoveGlobalScore(ctx context.Context, userID string) error {
+	if err := c.client.ZRem(ctx, globalKey, userID).Err(); err != nil {
+		return fmt.Errorf("leaderboard cache: remove %s: %w", globalKey, err)
+	}
+	return nil
+}
+
 func (c *RedisLeaderboardCache) UpsertCompetitionScore(ctx context.Context, competitionID, userID string, score float64) error {
 	return c.upsert(ctx, competitionKey(competitionID), userID, score)
 }
@@ -50,7 +60,11 @@ func (c *RedisLeaderboardCache) GetCompetitionTop(ctx context.Context, competiti
 }
 
 func (c *RedisLeaderboardCache) top(ctx context.Context, key string, limit int) ([]CachedLeaderboardScore, error) {
-	zs, err := c.client.ZRevRangeWithScores(ctx, key, 0, int64(limit-1)).Result()
+	end := int64(-1)
+	if limit > 0 {
+		end = int64(limit - 1)
+	}
+	zs, err := c.client.ZRevRangeWithScores(ctx, key, 0, end).Result()
 	if err != nil {
 		return nil, fmt.Errorf("leaderboard cache: top %s: %w", key, err)
 	}

@@ -15,6 +15,10 @@ type CachedLeaderboardScore struct {
 // the cache is empty or unavailable.
 type LeaderboardCache interface {
 	UpsertGlobalScore(ctx context.Context, userID string, score float64) error
+	// RemoveGlobalScore evicts a user from the global ranking. Called when a
+	// portfolio pauses (empty) or the user no longer exists, so a stale score can
+	// never keep an unrankable user visible on the board.
+	RemoveGlobalScore(ctx context.Context, userID string) error
 	GetGlobalTop(ctx context.Context, limit int) ([]CachedLeaderboardScore, error)
 
 	UpsertCompetitionScore(ctx context.Context, competitionID, userID string, score float64) error
@@ -30,6 +34,7 @@ type LeaderboardCache interface {
 type NoopLeaderboardCache struct{}
 
 func (NoopLeaderboardCache) UpsertGlobalScore(context.Context, string, float64) error { return nil }
+func (NoopLeaderboardCache) RemoveGlobalScore(context.Context, string) error          { return nil }
 func (NoopLeaderboardCache) GetGlobalTop(context.Context, int) ([]CachedLeaderboardScore, error) {
 	return nil, nil
 }

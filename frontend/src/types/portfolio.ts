@@ -16,6 +16,8 @@ export type Position = {
   baseline_price: number;
   currency: string;
   status?: "open" | "closed";
+  position_episode_id: string;
+  opened_at: string;
 };
 
 export type ClosedPosition = {
@@ -90,7 +92,134 @@ export type PortfolioSummary = {
   closed_cost_basis_base?: number;
   realized_gain_loss_base?: number;
   quote_status?: QuoteStatus;
+  cash_balances?: CashBalance[];
+  total_cash_value_base?: number;
+  ranked_performance: {
+    index: number;
+    return_percentage: number;
+    tracking_status: "active" | "paused" | "unavailable";
+  };
+  valuation: {
+    open_holdings_market_value_base: number;
+    cash_value_base: number;
+    current_portfolio_value_base: number;
+  };
+  open_holdings: {
+    cost_basis_base: number;
+    unrealized_pnl_base: number;
+    unrealized_return_percentage: number | null;
+  };
+  realized: {
+    realized_pnl_base: number;
+  };
+  income: {
+    dividends_base: number;
+    distributions_base: number;
+    interest_base: number;
+    other_income_base: number;
+    total_income_base: number;
+  };
+  fees: {
+    transaction_fees_base: number;
+    management_fees_base: number;
+    custody_fees_base: number;
+    other_fees_base: number;
+    total_fees_base: number;
+  };
+  economic_performance: {
+    total_pnl_base: number | null;
+    net_contributions_base: number | null;
+    return_percentage: number | null;
+    calculation_status: "complete" | "legacy_estimate" | "insufficient_history";
+    is_complete: boolean;
+  };
+  reconciliation: {
+    is_complete: boolean;
+    is_consistent: boolean;
+    difference: number;
+    reasons?: string[];
+  };
 };
+
+export type CashBalance = {
+  currency: CurrencyCode;
+  amount: number;
+  value_base: number;
+  weight_percentage: number;
+};
+
+export type CashResponse = {
+  cash_balances: CashBalance[];
+  total_cash_value_base: number;
+  base_currency: string;
+};
+
+export type PortfolioActivity = {
+  id: string;
+  activity_type:
+    | "deposit" | "withdrawal" | "buy" | "sell" | "opening_balance"
+    | "cash_dividend" | "etf_distribution" | "interest_income"
+    | "reinvested_dividend" | "buy_fee" | "sell_fee"
+    | "management_fee" | "custody_fee" | "other_fee"
+    | "stock_split" | "reverse_split" | "symbol_change" | "write_off";
+  symbol?: string;
+  asset_type?: AssetType;
+  currency: CurrencyCode;
+  quantity?: number;
+  unit_price?: number;
+  gross_amount: number;
+  cost_basis_allocated?: number;
+  realized_gain_loss_base?: number;
+  realized_gain_loss_percentage?: number;
+  occurred_at: string;
+  portfolio_version: number;
+  origin: "user_recorded" | "system_generated" | "provider_generated" | "migration_generated";
+  status: "completed" | "pending" | "processing" | "corrected" | "reversed" | "failed";
+  group_id?: string;
+  position_episode_id?: string;
+  fee_amount?: number;
+  net_amount?: number;
+};
+
+export type ActivityMutationResponse = {
+  position?: Position;
+  activity?: PortfolioActivity;
+  portfolio_version: number;
+  ranked_index: number;
+  ranking_status: "active" | "paused";
+};
+
+export type CashFlowInput = { currency: CurrencyCode; amount: number };
+export type SellPositionInput = {
+  position_id: string;
+  quantity: number;
+  execution_price?: number;
+  fee?: number;
+  effective_at?: string;
+};
+
+export type SellPreview = {
+  position_id: string;
+  position_episode_id: string;
+  symbol: string;
+  available_quantity: number;
+  sold_quantity: number;
+  remaining_quantity: number;
+  execution_price: number;
+  gross_proceeds: number;
+  fee: number;
+  net_proceeds: number;
+  allocated_basis: number;
+  estimated_realized_pnl: number;
+  will_close_position: boolean;
+  proceeds_currency: string;
+  base_currency: string;
+};
+
+export type PortfolioStateSummary = Pick<
+  PortfolioSummary,
+  "base_currency" | "valuation" | "open_holdings" | "positions" | "closed_positions" | "cash_balances"
+>;
 
 export type PortfolioArchiveTimeframe = "1W" | "1M" | "3M" | "6M" | "1Y";
 
@@ -110,6 +239,8 @@ export type PortfolioArchiveSnapshot = {
   realized_gain_loss_base?: number;
   positions?: PositionSummary[];
   closed_positions?: ClosedPosition[];
+  cash_balances?: CashBalance[];
+  total_cash_value_base?: number;
 };
 
 export type PortfolioArchives = {

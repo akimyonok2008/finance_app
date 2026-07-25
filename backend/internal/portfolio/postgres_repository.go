@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostgresRepository is the durable implementation of Repository. NUMERIC
-// columns are scanned into float64, which is acceptable at prototype precision
-// (positions round to 8 decimal places).
+// PostgresRepository is the durable implementation of Repository and
+// AggregateStore. Every method takes the caller's context — none fabricates a
+// context.Background() — so cancellation, deadlines and tracing propagate and a
+// client disconnect rolls the transaction back.
 type PostgresRepository struct {
 	pool *pgxpool.Pool
 }
@@ -22,31 +25,43 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
-// CreatePortfolio persists a portfolio.
-func (r *PostgresRepository) CreatePortfolio(p *Portfolio) error {
-	_, err := r.pool.Exec(context.Background(),
-		`INSERT INTO portfolios (id, user_id, name, currency, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		p.ID, p.UserID, p.Name, p.Currency, p.CreatedAt, p.UpdatedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("portfolio repository: create portfolio: %w", err)
+// EnsureDefaultPortfolio returns the user's single default portfolio, creating
+// it on first access. The insert relies on UNIQUE (user_id) (migration 0010):
+// on conflict it does nothing and the row is re-read, so two concurrent first
+// requests always converge on the same portfolio instead of creating two.
+func (r *PostgresRepository) EnsureDefaultPortfolio(ctx context.Context, userID string) (*Portfolio, error) {
+	if pf, err := r.GetPortfolioByUser(ctx, userID); err == nil {
+		return pf, nil
+	} else if !errors.Is(err, ErrPortfolioNotFound) {
+		return nil, err
 	}
-	return nil
+
+	now := time.Now().UTC()
+	if _, err := r.pool.Exec(ctx,
+		`INSERT INTO portfolios (id, user_id, name, currency, version, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,1,$5,$6)
+		 ON CONFLICT (user_id) DO NOTHING`,
+		uuid.NewString(), userID, DefaultPortfolioName, "USD", now, now,
+	); err != nil {
+		return nil, fmt.Errorf("portfolio: create default portfolio: %w", err)
+	}
+	// Re-read: this returns OUR row if we inserted, or the winner's row if a
+	// concurrent request got there first.
+	return r.GetPortfolioByUser(ctx, userID)
 }
 
 // GetPortfolioByUser returns the user's (single default) portfolio.
-func (r *PostgresRepository) GetPortfolioByUser(userID string) (*Portfolio, error) {
+func (r *PostgresRepository) GetPortfolioByUser(ctx context.Context, userID string) (*Portfolio, error) {
 	var p Portfolio
-	err := r.pool.QueryRow(context.Background(),
-		`SELECT id, user_id, name, currency, created_at, updated_at
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, user_id, name, currency, COALESCE(version,1), created_at, updated_at
 		 FROM portfolios WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID,
-	).Scan(&p.ID, &p.UserID, &p.Name, &p.Currency, &p.CreatedAt, &p.UpdatedAt)
+	).Scan(&p.ID, &p.UserID, &p.Name, &p.Currency, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPortfolioNotFound
 		}
-		return nil, fmt.Errorf("portfolio repository: get portfolio: %w", err)
+		return nil, fmt.Errorf("portfolio: get portfolio: %w", err)
 	}
 	return &p, nil
 }
@@ -66,44 +81,16 @@ func scanPosition(row pgx.Row) (*Position, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPositionNotFound
 		}
-		return nil, fmt.Errorf("portfolio repository: scan position: %w", err)
+		return nil, fmt.Errorf("portfolio: scan position: %w", err)
 	}
 	return &p, nil
 }
 
-// CreatePosition persists a position.
-func (r *PostgresRepository) CreatePosition(p *Position) error {
-	_, err := r.pool.Exec(context.Background(),
-		`INSERT INTO positions (
-			id, user_id, portfolio_id, symbol, asset_type, quantity, average_buy_price,
-			currency, status, closed_at, close_price, close_price_currency,
-			realized_gain_loss_base, realized_gain_loss_percentage, created_at, updated_at
-		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-		p.ID, p.UserID, p.PortfolioID, p.Symbol, p.AssetType,
-		p.Quantity, p.AverageBuyPrice, p.Currency, firstNonEmptyStatus(p.Status),
-		p.ClosedAt, p.ClosePrice, p.CloseCurrency, p.RealizedGainLossBase,
-		p.RealizedGainLossPercentage, p.CreatedAt, p.UpdatedAt,
-	)
+// scanPositions runs a position query through any pool/transaction querier.
+func scanPositions(ctx context.Context, q DBTX, sql string, args ...any) ([]*Position, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
-		return fmt.Errorf("portfolio repository: create position: %w", err)
-	}
-	return nil
-}
-
-// GetPosition returns a position by id.
-func (r *PostgresRepository) GetPosition(id string) (*Position, error) {
-	row := r.pool.QueryRow(context.Background(),
-		`SELECT `+positionColumns+` FROM positions WHERE id = $1`, id)
-	return scanPosition(row)
-}
-
-// ListPositionsByUser returns the user's positions in insertion order.
-func (r *PostgresRepository) ListPositionsByUser(userID string) ([]*Position, error) {
-	rows, err := r.pool.Query(context.Background(),
-		`SELECT `+positionColumns+` FROM positions WHERE user_id = $1 ORDER BY created_at`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("portfolio repository: list positions: %w", err)
+		return nil, fmt.Errorf("portfolio: list positions: %w", err)
 	}
 	defer rows.Close()
 
@@ -114,159 +101,191 @@ func (r *PostgresRepository) ListPositionsByUser(userID string) ([]*Position, er
 			&p.Quantity, &p.AverageBuyPrice, &p.Currency, &p.Status, &p.ClosedAt,
 			&p.ClosePrice, &p.CloseCurrency, &p.RealizedGainLossBase,
 			&p.RealizedGainLossPercentage, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("portfolio repository: scan position row: %w", err)
+			return nil, fmt.Errorf("portfolio: scan position row: %w", err)
 		}
 		out = append(out, &p)
 	}
 	return out, rows.Err()
 }
 
-func (r *PostgresRepository) ListActiveSymbols() ([]string, error) {
-	rows, err := r.pool.Query(context.Background(), `SELECT DISTINCT symbol FROM positions WHERE COALESCE(status, 'open') = 'open' ORDER BY symbol`)
+// GetPosition returns a position by id.
+func (r *PostgresRepository) GetPosition(ctx context.Context, id string) (*Position, error) {
+	return scanPosition(r.pool.QueryRow(ctx, `SELECT `+positionColumns+` FROM positions WHERE id = $1`, id))
+}
+
+// ListPositionsByUser returns the user's positions in insertion order.
+func (r *PostgresRepository) ListPositionsByUser(ctx context.Context, userID string) ([]*Position, error) {
+	return scanPositions(ctx, r.pool,
+		`SELECT `+positionColumns+` FROM positions WHERE user_id = $1 ORDER BY created_at`, userID)
+}
+
+func (r *PostgresRepository) ListOpenPositionsBySymbol(ctx context.Context, symbol string) ([]*Position, error) {
+	return scanPositions(ctx, r.pool,
+		`SELECT `+positionColumns+` FROM positions WHERE symbol = $1 AND COALESCE(status, 'open') = 'open' ORDER BY created_at`, symbol)
+}
+
+func (r *PostgresRepository) ListActiveSymbols(ctx context.Context) ([]string, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT DISTINCT symbol FROM positions WHERE COALESCE(status, 'open') = 'open' ORDER BY symbol`)
 	if err != nil {
-		return nil, fmt.Errorf("portfolio repository: list active symbols: %w", err)
+		return nil, fmt.Errorf("portfolio: list active symbols: %w", err)
 	}
 	defer rows.Close()
 	out := make([]string, 0)
 	for rows.Next() {
 		var symbol string
 		if err := rows.Scan(&symbol); err != nil {
-			return nil, fmt.Errorf("portfolio repository: scan active symbol: %w", err)
+			return nil, fmt.Errorf("portfolio: scan active symbol: %w", err)
 		}
 		out = append(out, symbol)
 	}
 	return out, rows.Err()
 }
 
-// UpdatePosition replaces the mutable fields of a position.
-func (r *PostgresRepository) UpdatePosition(p *Position) error {
-	tag, err := r.pool.Exec(context.Background(),
-		`UPDATE positions
-		 SET symbol = $2, asset_type = $3, quantity = $4, average_buy_price = $5,
-		     currency = $6, status = $7, closed_at = $8, close_price = $9,
-		     close_price_currency = $10, realized_gain_loss_base = $11,
-		     realized_gain_loss_percentage = $12, updated_at = $13
-		 WHERE id = $1`,
-		p.ID, p.Symbol, p.AssetType, p.Quantity, p.AverageBuyPrice, p.Currency,
-		firstNonEmptyStatus(p.Status), p.ClosedAt, p.ClosePrice, p.CloseCurrency,
-		p.RealizedGainLossBase, p.RealizedGainLossPercentage, p.UpdatedAt,
-	)
+func (r *PostgresRepository) ListCashBalances(ctx context.Context, userID string) ([]CashBalance, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT c.portfolio_id, c.currency, c.amount, c.created_at, c.updated_at
+		FROM portfolio_cash_balances c
+		JOIN portfolios p ON p.id=c.portfolio_id
+		WHERE p.user_id=$1
+		ORDER BY c.currency`, userID)
 	if err != nil {
-		return fmt.Errorf("portfolio repository: update position: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrPositionNotFound
-	}
-	return nil
-}
-
-func (r *PostgresRepository) CreateArchiveSnapshot(s *PortfolioArchiveSnapshot) error {
-	positionsJSON, err := json.Marshal(s.Positions)
-	if err != nil {
-		return fmt.Errorf("portfolio repository: marshal archive positions: %w", err)
-	}
-	closedJSON, err := json.Marshal(s.ClosedPositions)
-	if err != nil {
-		return fmt.Errorf("portfolio repository: marshal archive closed positions: %w", err)
-	}
-	_, err = r.pool.Exec(context.Background(),
-		`INSERT INTO portfolio_archive_snapshots (
-			id, user_id, portfolio_id, captured_at, base_currency, portfolio_index,
-			gain_loss_percentage, total_cost_basis, current_value,
-			unrealized_gain_loss_base, realized_gain_loss_base,
-			positions_snapshot, closed_positions_snapshot
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		s.ID, s.UserID, s.PortfolioID, s.CapturedAt, s.BaseCurrency, s.PortfolioIndex,
-		s.GainLossPercentage, s.TotalCostBasis, s.CurrentValue, s.UnrealizedGainLossBase,
-		s.RealizedGainLossBase, positionsJSON, closedJSON,
-	)
-	if err != nil {
-		return fmt.Errorf("portfolio repository: create archive snapshot: %w", err)
-	}
-	return nil
-}
-
-func (r *PostgresRepository) ListArchiveSnapshots(userID string, from, to string) ([]*PortfolioArchiveSnapshot, error) {
-	rows, err := r.pool.Query(context.Background(),
-		`SELECT id, user_id, portfolio_id, captured_at, base_currency, portfolio_index,
-		        gain_loss_percentage, total_cost_basis, current_value,
-		        unrealized_gain_loss_base, realized_gain_loss_base,
-		        positions_snapshot, closed_positions_snapshot
-		 FROM portfolio_archive_snapshots
-		 WHERE user_id = $1 AND captured_at >= $2 AND captured_at <= $3
-		 ORDER BY captured_at ASC`, userID, from, to)
-	if err != nil {
-		return nil, fmt.Errorf("portfolio repository: list archive snapshots: %w", err)
+		return nil, fmt.Errorf("portfolio: list cash balances: %w", err)
 	}
 	defer rows.Close()
-	out := make([]*PortfolioArchiveSnapshot, 0)
+	out := make([]CashBalance, 0)
 	for rows.Next() {
-		var s PortfolioArchiveSnapshot
-		var positionsRaw, closedRaw []byte
-		if err := rows.Scan(&s.ID, &s.UserID, &s.PortfolioID, &s.CapturedAt, &s.BaseCurrency,
-			&s.PortfolioIndex, &s.GainLossPercentage, &s.TotalCostBasis, &s.CurrentValue,
-			&s.UnrealizedGainLossBase, &s.RealizedGainLossBase, &positionsRaw, &closedRaw); err != nil {
-			return nil, fmt.Errorf("portfolio repository: scan archive snapshot: %w", err)
+		var balance CashBalance
+		if err := rows.Scan(&balance.PortfolioID, &balance.Currency, &balance.Amount,
+			&balance.CreatedAt, &balance.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("portfolio: scan cash balance: %w", err)
 		}
-		if len(positionsRaw) > 0 {
-			if err := json.Unmarshal(positionsRaw, &s.Positions); err != nil {
-				return nil, fmt.Errorf("portfolio repository: unmarshal archive positions: %w", err)
-			}
-		}
-		if len(closedRaw) > 0 {
-			if err := json.Unmarshal(closedRaw, &s.ClosedPositions); err != nil {
-				return nil, fmt.Errorf("portfolio repository: unmarshal archive closed positions: %w", err)
-			}
-		}
-		out = append(out, &s)
+		out = append(out, balance)
 	}
 	return out, rows.Err()
 }
 
-// DeletePosition removes a position by id.
-func (r *PostgresRepository) DeletePosition(id string) error {
-	tag, err := r.pool.Exec(context.Background(), `DELETE FROM positions WHERE id = $1`, id)
+func (r *PostgresRepository) ListActivities(ctx context.Context, userID string, limit int) ([]Activity, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 100000 {
+		limit = 100000
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, COALESCE(request_id,''), portfolio_id, user_id, activity_type,
+		       COALESCE(symbol,''), COALESCE(asset_type,''), currency, quantity,
+		       unit_price, gross_amount, cost_basis_allocated,
+		       realized_gain_loss_base, realized_gain_loss_percentage,
+		       occurred_at, portfolio_version, metadata_json, created_at,
+		       position_episode_id
+		FROM portfolio_activities
+		WHERE user_id=$1
+		ORDER BY occurred_at DESC, created_at DESC
+		LIMIT $2`, userID, limit)
 	if err != nil {
-		return fmt.Errorf("portfolio repository: delete position: %w", err)
+		return nil, fmt.Errorf("portfolio: list activities: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrPositionNotFound
+	defer rows.Close()
+	out := make([]Activity, 0)
+	for rows.Next() {
+		var activity Activity
+		var activityType string
+		var metadata []byte
+		var episodeID *string
+		if err := rows.Scan(&activity.ID, &activity.RequestID, &activity.PortfolioID,
+			&activity.UserID, &activityType, &activity.Symbol, &activity.AssetType,
+			&activity.Currency, &activity.Quantity, &activity.UnitPrice,
+			&activity.GrossAmount, &activity.CostBasisAllocated,
+			&activity.RealizedGainLossBase, &activity.RealizedGainLossPercentage,
+			&activity.OccurredAt, &activity.PortfolioVersion, &metadata,
+			&activity.CreatedAt, &episodeID); err != nil {
+			return nil, fmt.Errorf("portfolio: scan activity: %w", err)
+		}
+		activity.Type = ActivityType(activityType)
+		_ = json.Unmarshal(metadata, &activity.Metadata)
+		if episodeID != nil {
+			activity.PositionEpisodeID = *episodeID
+		}
+		out = append(out, activity)
 	}
-	return nil
+	return out, rows.Err()
 }
 
-// ReplaceOpenPositions swaps the user's open positions inside a single
-// transaction, so a strategy copy either fully lands or fully rolls back.
-func (r *PostgresRepository) ReplaceOpenPositions(userID string, newPositions []*Position) error {
-	ctx := context.Background()
-	tx, err := r.pool.Begin(ctx)
+// CreateArchiveSnapshot inserts at most one snapshot per portfolio per UTC day.
+// Uniqueness is enforced by the database (migration 0010), so concurrent workers
+// cannot create duplicates; inserted=false means today's row already existed.
+func (r *PostgresRepository) CreateArchiveSnapshot(ctx context.Context, s *PortfolioArchiveSnapshot) (bool, error) {
+	positionsJSON, err := json.Marshal(s.Positions)
 	if err != nil {
-		return fmt.Errorf("portfolio repository: begin replace tx: %w", err)
+		return false, fmt.Errorf("portfolio: marshal archive positions: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	closedJSON, err := json.Marshal(s.ClosedPositions)
+	if err != nil {
+		return false, fmt.Errorf("portfolio: marshal archive closed positions: %w", err)
+	}
+	cashJSON, err := json.Marshal(s.CashBalances)
+	if err != nil {
+		return false, fmt.Errorf("portfolio: marshal archive cash: %w", err)
+	}
+	tag, err := r.pool.Exec(ctx,
+		`INSERT INTO portfolio_archive_snapshots (
+			id, user_id, portfolio_id, captured_at, base_currency, portfolio_index,
+			gain_loss_percentage, total_cost_basis, current_value,
+			unrealized_gain_loss_base, realized_gain_loss_base,
+			positions_snapshot, closed_positions_snapshot, total_cash_value_base,
+			cash_balances_snapshot
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		ON CONFLICT (portfolio_id, captured_date) DO NOTHING`,
+		s.ID, s.UserID, s.PortfolioID, s.CapturedAt, s.BaseCurrency, s.PortfolioIndex,
+		s.GainLossPercentage, s.TotalCostBasis, s.CurrentValue, s.UnrealizedGainLossBase,
+		s.RealizedGainLossBase, positionsJSON, closedJSON, s.TotalCashValueBase, cashJSON,
+	)
+	if err != nil {
+		return false, fmt.Errorf("portfolio: create archive snapshot: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
 
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM positions WHERE user_id = $1 AND COALESCE(status, 'open') = 'open'`, userID); err != nil {
-		return fmt.Errorf("portfolio repository: replace delete: %w", err)
+func (r *PostgresRepository) ListArchiveSnapshots(ctx context.Context, userID string, from, to string) ([]*PortfolioArchiveSnapshot, error) {
+	fromTime, err := timeFromRFC3339(from)
+	if err != nil {
+		return nil, err
 	}
-	for _, p := range newPositions {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO positions (
-				id, user_id, portfolio_id, symbol, asset_type, quantity, average_buy_price,
-				currency, status, closed_at, close_price, close_price_currency,
-				realized_gain_loss_base, realized_gain_loss_percentage, created_at, updated_at
-			)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-			p.ID, p.UserID, p.PortfolioID, p.Symbol, p.AssetType,
-			p.Quantity, p.AverageBuyPrice, p.Currency, firstNonEmptyStatus(p.Status),
-			p.ClosedAt, p.ClosePrice, p.CloseCurrency, p.RealizedGainLossBase,
-			p.RealizedGainLossPercentage, p.CreatedAt, p.UpdatedAt,
-		); err != nil {
-			return fmt.Errorf("portfolio repository: replace insert: %w", err)
+	toTime, err := timeFromRFC3339(to)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, user_id, portfolio_id, captured_at, base_currency, portfolio_index,
+		        gain_loss_percentage, total_cost_basis, current_value,
+		        unrealized_gain_loss_base, realized_gain_loss_base,
+		        positions_snapshot, closed_positions_snapshot, total_cash_value_base,
+		        cash_balances_snapshot
+		 FROM portfolio_archive_snapshots
+		 WHERE user_id = $1 AND captured_at >= $2 AND captured_at <= $3
+		 ORDER BY captured_at`, userID, fromTime, toTime)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list archive snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*PortfolioArchiveSnapshot, 0)
+	for rows.Next() {
+		var (
+			s                                   PortfolioArchiveSnapshot
+			positionsJSON, closedJSON, cashJSON []byte
+		)
+		if err := rows.Scan(&s.ID, &s.UserID, &s.PortfolioID, &s.CapturedAt, &s.BaseCurrency,
+			&s.PortfolioIndex, &s.GainLossPercentage, &s.TotalCostBasis, &s.CurrentValue,
+			&s.UnrealizedGainLossBase, &s.RealizedGainLossBase, &positionsJSON,
+			&closedJSON, &s.TotalCashValueBase, &cashJSON); err != nil {
+			return nil, fmt.Errorf("portfolio: scan archive snapshot: %w", err)
 		}
+		_ = json.Unmarshal(positionsJSON, &s.Positions)
+		_ = json.Unmarshal(closedJSON, &s.ClosedPositions)
+		_ = json.Unmarshal(cashJSON, &s.CashBalances)
+		out = append(out, &s)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("portfolio repository: commit replace tx: %w", err)
-	}
-	return nil
+	return out, rows.Err()
 }

@@ -55,8 +55,9 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) PublicProfile
 	}
 
 	if s.history != nil {
-		if history, err := s.history.Archives(ctx, p.UserID, portfolio.ArchiveTimeframe1Y); err == nil && history != nil {
-			out.PerformanceHistory = publicPerformanceHistory(history.Points)
+		end := s.now()
+		if history, err := s.history.RankedHistory(ctx, p.UserID, end.AddDate(-1, 0, 0), end); err == nil {
+			out.PerformanceHistory = history
 		}
 	}
 	if len(out.PerformanceHistory) == 0 && hasSummary {
@@ -303,18 +304,6 @@ func minInt(a, b int) int {
 	return b
 }
 
-func publicPerformanceHistory(points []portfolio.PortfolioArchivePoint) []PublicPerformancePoint {
-	out := make([]PublicPerformancePoint, 0, len(points))
-	for _, point := range points {
-		out = append(out, PublicPerformancePoint{
-			CapturedAt:       point.CapturedAt,
-			PortfolioIndex:   round2(point.PortfolioIndex),
-			ReturnPercentage: round2(point.GainLossPercentage),
-		})
-	}
-	return out
-}
-
 func buildClosedPositions(positions []portfolio.ClosedPositionSummary) []PublicClosedPosition {
 	out := make([]PublicClosedPosition, 0, len(positions))
 	for _, position := range positions {
@@ -349,6 +338,16 @@ func buildComposition(summary *portfolio.PortfolioSummary) ([]PublicWeight, []Ex
 		})
 		assetTypes[position.AssetType] += position.CurrentValueBase
 		currencies[position.CurrentPriceCurrency] += position.CurrentValueBase
+	}
+	if summary.TotalCashValueBase > 0 {
+		weights = append(weights, PublicWeight{
+			Symbol: "CASH", AssetType: portfolio.AssetTypeCash,
+			Weight: round2(summary.TotalCashValueBase / summary.CurrentValue * 100),
+		})
+		assetTypes[portfolio.AssetTypeCash] += summary.TotalCashValueBase
+		for _, balance := range summary.CashBalances {
+			currencies[balance.Currency] += balance.ValueBase
+		}
 	}
 	sort.Slice(weights, func(i, j int) bool {
 		if weights[i].Weight == weights[j].Weight {

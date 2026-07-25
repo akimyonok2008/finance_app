@@ -8,80 +8,92 @@ import (
 )
 
 // BenchmarkConstructionService builds daily-rebalanced benchmark index returns
-// from recipes. It performs no scoring — only return construction.
+// from recipes. It performs no scoring — only return construction and
+// provenance aggregation.
 type BenchmarkConstructionService struct {
 	prices          HistoricalPriceProvider
+	series          HistoricalSeriesProvider
 	recipes         map[string]BenchmarkRecipe
-	dynamicResolver DynamicRecipeResolver // optional
+	dynamicResolver DynamicRecipeResolver // legacy, retained for compatibility
+	versions        *VersionedRecipeStore
+	now             func() time.Time
 }
 
-// NewBenchmarkConstructionService wires the engine. dynamicResolver may be nil
-// if no dynamic recipes are used.
+// NewBenchmarkConstructionService wires the engine. dynamicResolver may be nil.
+// The provider is adapted to a HistoricalSeriesProvider: providers that only
+// implement the legacy port are treated as raw-close/unverified data (they can
+// power previews but never a verified award). A default version store is built
+// from the catalogue plus the authoritative Berkshire 13F versions.
 func NewBenchmarkConstructionService(prices HistoricalPriceProvider, recipes map[string]BenchmarkRecipe, dynamicResolver DynamicRecipeResolver) *BenchmarkConstructionService {
-	return &BenchmarkConstructionService{prices: prices, recipes: recipes, dynamicResolver: dynamicResolver}
+	store, _ := DefaultVersionStore(recipes)
+	return &BenchmarkConstructionService{
+		prices:          prices,
+		series:          asSeriesProvider(prices),
+		recipes:         recipes,
+		dynamicResolver: dynamicResolver,
+		versions:        store,
+		now:             func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// SetVersionStore overrides the version store (e.g. a durable, DB-backed store).
+func (s *BenchmarkConstructionService) SetVersionStore(store *VersionedRecipeStore) {
+	if store != nil {
+		s.versions = store
+	}
+}
+
+// SetClock overrides the clock, for deterministic tests.
+func (s *BenchmarkConstructionService) SetClock(now func() time.Time) { s.now = now }
+
+// asSeriesProvider adapts any provider to a HistoricalSeriesProvider. A provider
+// that already implements the richer port is used directly; a legacy provider is
+// wrapped so its output is explicitly labelled raw-close with unknown corporate
+// actions — which fails closed under an award-grade requirement.
+func asSeriesProvider(p HistoricalPriceProvider) HistoricalSeriesProvider {
+	if sp, ok := p.(HistoricalSeriesProvider); ok {
+		return sp
+	}
+	if p == nil {
+		return nil
+	}
+	return legacySeriesAdapter{p: p}
+}
+
+type legacySeriesAdapter struct{ p HistoricalPriceProvider }
+
+func (a legacySeriesAdapter) GetSeries(ctx context.Context, symbol string, start, end time.Time, _ SeriesRequirement) (BenchmarkPriceSeries, error) {
+	pts, err := a.p.GetAdjustedCloseSeries(ctx, symbol, start, end)
+	if err != nil {
+		return BenchmarkPriceSeries{}, err
+	}
+	now := time.Now().UTC()
+	return BenchmarkPriceSeries{
+		Symbol: symbol,
+		Points: pts,
+		Metadata: BenchmarkDataMetadata{
+			Provider:         "legacy_provider",
+			ProviderMode:     "real",
+			PriceType:        PriceTypeRawClose,
+			CorpActionsKnown: false,
+			Quality:          DataQualityAcceptable,
+			RetrievedAt:      now,
+			SourceAsOf:       now,
+		},
+	}, nil
 }
 
 // CalculateReturnPct returns the total benchmark return (percentage points) over
-// [start, end], assuming daily rebalancing back to target weights.
-//
-// Daily benchmark return: R_day = Σ(weight_i × R_i_day)
-// Index:                  index_t = index_{t-1} × (1 + R_day), starting at 100
-// Result:                 index_end - 100
+// [start, end] under daily rebalancing. It is the preview-grade wrapper around
+// CalculateReturn: it permits synthetic/stale/raw data (no permanent award is
+// issued from a preview) and returns only the number. Award decisions must use
+// CalculateReturn and inspect the provenance.
 func (s *BenchmarkConstructionService) CalculateReturnPct(ctx context.Context, recipeID string, start, end time.Time) (float64, error) {
-	recipe, err := s.resolveRecipe(ctx, recipeID, end)
+	res, err := s.CalculateReturn(ctx, recipeID, start, end, RequirementForPreview())
 	if err != nil {
 		return 0, err
 	}
-	flattened, err := s.flattenRecipe(ctx, recipe, end, 1)
-	if err != nil {
-		return 0, err
-	}
-	if err := validateWeights(flattened); err != nil {
-		return 0, fmt.Errorf("recipe %s: %w", recipeID, err)
-	}
-
-	pricesBySymbol := make(map[string][]PricePoint, len(flattened))
-	for _, component := range flattened {
-		series, err := s.prices.GetAdjustedCloseSeries(ctx, component.Symbol, start, end)
-		if err != nil {
-			return 0, fmt.Errorf("prices for %s: %w", component.Symbol, err)
-		}
-		if len(series) < 2 {
-			return 0, fmt.Errorf("not enough price data for %s", component.Symbol)
-		}
-		pricesBySymbol[component.Symbol] = series
-	}
-
-	alignedDates := commonDates(pricesBySymbol)
-	if len(alignedDates) < 2 {
-		return 0, fmt.Errorf("not enough common dates across benchmark components")
-	}
-
-	priceMaps := make(map[string]map[string]float64, len(pricesBySymbol))
-	for symbol, series := range pricesBySymbol {
-		priceMaps[symbol] = toPriceMap(series)
-	}
-
-	index := 100.0
-	for i := 1; i < len(alignedDates); i++ {
-		prevDate := alignedDates[i-1]
-		currDate := alignedDates[i]
-
-		weightedDailyReturn := 0.0
-		for _, component := range flattened {
-			pm := priceMaps[component.Symbol]
-			prev, okPrev := pm[prevDate]
-			curr, okCurr := pm[currDate]
-			if !okPrev || !okCurr || prev == 0 {
-				return 0, fmt.Errorf("missing aligned price for %s", component.Symbol)
-			}
-			assetDailyReturn := curr/prev - 1
-			weightedDailyReturn += component.Weight * assetDailyReturn
-		}
-		index *= 1 + weightedDailyReturn
-	}
-
-	return round(index-100, 4), nil
+	return res.ReturnPercentage, nil
 }
 
 func (s *BenchmarkConstructionService) resolveRecipe(ctx context.Context, recipeID string, asOf time.Time) (BenchmarkRecipe, error) {

@@ -19,8 +19,8 @@ import {
 } from "recharts";
 
 import { DashboardMetricCard } from "@/pages/Dashboard/components/DashboardMetricCard";
-import { buildPrototypeIndexSeries } from "@/pages/Dashboard/utils/buildPrototypeIndexSeries";
 import { getPerformanceTone } from "@/pages/Dashboard/utils/dashboardFormatters";
+import { usePerformanceHistory } from "@/hooks/usePerformance";
 import type { DashboardPortfolioSummary } from "@/types/dashboard";
 import { formatMoney } from "@/utils/formatMoney";
 import { formatPercent } from "@/utils/formatPercent";
@@ -86,13 +86,27 @@ export function PerformanceChartCard({
   isError,
   onRetry,
 }: Props) {
-  const index = summary?.portfolio_index ?? 100;
-  const gainPct = summary?.gain_loss_percentage ?? 0;
-  const tone = getPerformanceTone(gainPct);
+  const index = summary?.ranked_performance.index ?? 100;
+  const rankedReturn = summary?.ranked_performance.return_percentage ?? 0;
+  const tone = getPerformanceTone(rankedReturn);
   const palette = PALETTE[tone];
-  const series = buildPrototypeIndexSeries(index);
+  const history = usePerformanceHistory("1M");
+  const series = (history.data?.points ?? []).map((point) => ({
+    label: new Date(point.captured_at).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    }),
+    index: point.portfolio_index,
+  }));
   const currency = summary?.base_currency ?? "USD";
-  const isEmpty = !summary || summary.current_value === 0;
+  const isEmpty = !summary || summary.valuation.current_portfolio_value_base === 0;
+  const holdingsPnl = summary?.open_holdings.unrealized_pnl_base;
+  const holdingsTone = getPerformanceTone(holdingsPnl ?? 0);
+  const totalPnl = summary?.economic_performance.total_pnl_base;
+  const totalPnlComplete = summary?.economic_performance.is_complete;
+  const economicTone = getPerformanceTone(totalPnl);
+  const totalPnlTone =
+    economicTone === "neutral" ? "default" : economicTone;
 
   const TrendIcon =
     tone === "positive" ? TrendingUp : tone === "negative" ? TrendingDown : Activity;
@@ -105,7 +119,7 @@ export function PerformanceChartCard({
     >
       <div className="flex items-center justify-between gap-4">
         <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-indigo-100/55">
-          Portfolio performance
+          Ranked performance
         </p>
         <Link
           to="/portfolio"
@@ -117,7 +131,7 @@ export function PerformanceChartCard({
       </div>
 
       <div className="mt-5 text-center sm:mt-6">
-        <p className="text-xs font-medium text-zinc-500">Portfolio Index</p>
+        <p className="text-xs font-medium text-zinc-500">Ranked Performance Index</p>
         <div className={cn("mt-1.5 font-mono text-4xl font-medium tabular-nums tracking-[-0.04em] sm:text-5xl", palette.text)}>
           {index.toFixed(2)}
         </div>
@@ -133,37 +147,45 @@ export function PerformanceChartCard({
             )}
           >
             <TrendIcon className="h-3.5 w-3.5" />
-            {formatPercent(gainPct)}
+            Ranked Return {formatPercent(rankedReturn)}
           </div>
         </div>
       </div>
 
       <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <DashboardMetricCard
-          label="Value"
-          value={formatMoney(summary?.current_value, currency)}
+          label="Portfolio value"
+          value={formatMoney(summary?.valuation.current_portfolio_value_base, currency)}
           icon={<Wallet className="h-3.5 w-3.5" />}
           className="border-cyan-300/10 bg-cyan-300/[0.035]"
         />
         <DashboardMetricCard
-          label="Cost basis"
-          value={formatMoney(summary?.total_cost_basis, currency)}
+          label="Holdings basis"
+          value={formatMoney(summary?.open_holdings.cost_basis_base, currency)}
           icon={<Coins className="h-3.5 w-3.5" />}
           className="border-violet-300/10 bg-violet-300/[0.035]"
         />
         <DashboardMetricCard
-          label="Gain / Loss"
-          value={formatMoney(summary?.gain_loss, currency)}
-          tone={tone === "neutral" ? "default" : tone}
+          label="Holdings P&L"
+          value={
+            summary?.open_holdings.unrealized_return_percentage === null
+              ? "—"
+              : formatMoney(holdingsPnl, currency)
+          }
+          tone={holdingsTone === "neutral" ? "default" : holdingsTone}
           className={cn(
-            tone === "positive" && "border-emerald-300/10 bg-emerald-300/[0.035]",
-            tone === "negative" && "border-rose-300/10 bg-rose-300/[0.035]",
+            holdingsTone === "positive" && "border-emerald-300/10 bg-emerald-300/[0.035]",
+            holdingsTone === "negative" && "border-rose-300/10 bg-rose-300/[0.035]",
           )}
         />
         <DashboardMetricCard
-          label="Gain %"
-          value={formatPercent(gainPct)}
-          tone={tone === "neutral" ? "default" : tone}
+          label="Total portfolio P&L"
+          value={
+            totalPnlComplete && totalPnl !== null
+              ? formatMoney(totalPnl, currency)
+              : "Unavailable"
+          }
+          tone={totalPnlComplete ? totalPnlTone : "default"}
           className="border-amber-300/10 bg-amber-300/[0.035]"
         />
       </div>
@@ -190,6 +212,26 @@ export function PerformanceChartCard({
             >
               Add your first position
             </Link>
+          </div>
+        ) : history.isLoading ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="h-5 w-5 animate-spin rounded-full border border-zinc-700 border-t-zinc-300" />
+          </div>
+        ) : history.isError ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-slate-500">
+            <span>Ranked history is unavailable.</span>
+            <Link
+              to="/portfolio"
+              className="text-xs font-medium text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
+            >
+              View portfolio
+            </Link>
+          </div>
+        ) : series.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+            <p className="text-sm text-slate-400">
+              Ranked history will appear after the first trusted snapshot.
+            </p>
           </div>
         ) : (
           <ResponsiveContainer

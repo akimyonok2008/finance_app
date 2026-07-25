@@ -7,7 +7,7 @@ import (
 )
 
 type ActiveSymbolProvider interface {
-	ListActiveSymbols() ([]string, error)
+	ListActiveSymbols(ctx context.Context) ([]string, error)
 }
 
 type QuoteRefreshWorker struct {
@@ -39,7 +39,7 @@ func (w *QuoteRefreshWorker) Start(ctx context.Context) {
 }
 
 func (w *QuoteRefreshWorker) refresh(ctx context.Context) {
-	symbols, err := w.symbols.ListActiveSymbols()
+	symbols, err := w.symbols.ListActiveSymbols(ctx)
 	if err != nil {
 		slog.Warn("quote refresh skipped: could not list active symbols", "error", err)
 		return

@@ -15,6 +15,8 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
+	"github.com/ardakimyonok/finance_app/internal/performance"
+	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 )
 
 // stubPerformance yields a two-point index series for a configured return.
@@ -22,11 +24,56 @@ type stubPerformance struct {
 	returnPct map[string]float64
 }
 
-func (s stubPerformance) GetPortfolioIndexSeries(_ context.Context, userID string, start, end time.Time) ([]benchmark.IndexPoint, error) {
+func (s stubPerformance) Window(_ context.Context, userID string, start, end time.Time) (performancehistory.Window, error) {
 	ret := s.returnPct[userID]
-	return []benchmark.IndexPoint{
-		{Date: start.UTC().Format("2006-01-02"), Index: 100},
-		{Date: end.UTC().Format("2006-01-02"), Index: 100 * (1 + ret/100)},
+	epoch := start.Add(-24 * time.Hour)
+	mk := func(id string, at time.Time, idx float64) performancehistory.Snapshot {
+		return performancehistory.Snapshot{
+			ID: id, UserID: userID, PortfolioID: "pf1", CapturedAt: at,
+			RankedIndex: idx, RankingStatus: performance.StatusActive,
+			TrackingStartedAt: epoch, DataQualityStatus: "complete",
+		}
+	}
+	startSnap := mk("s-start", start, 100)
+	endSnap := mk("s-end", end, 100*(1+ret/100))
+	return performancehistory.Window{
+		StartSnapshot: startSnap, EndSnapshot: endSnap,
+		Points:          []performancehistory.Snapshot{startSnap, endSnap},
+		HistoryCoverage: 1, ActiveCoverage: 1, TrustedCoverage: 1,
+	}, nil
+}
+
+func (stubPerformance) ProtectEvidence(_ context.Context, _ ...string) error { return nil }
+func (stubPerformance) EligibilityThreshold() float64                        { return 0.9 }
+func (stubPerformance) SnapshotFrequency() string                            { return "24h0m0s" }
+
+// verifiedHandlerPrices labels the deterministic mock path as verified,
+// adjusted/total-return data so the handler tests can exercise genuine verified
+// awards end-to-end.
+type verifiedHandlerPrices struct {
+	inner *benchmark.MockHistoricalPriceProvider
+}
+
+func (v verifiedHandlerPrices) GetAdjustedCloseSeries(ctx context.Context, symbol string, start, end time.Time) ([]benchmark.PricePoint, error) {
+	return v.inner.GetAdjustedCloseSeries(ctx, symbol, start, end)
+}
+
+func (v verifiedHandlerPrices) GetSeries(ctx context.Context, symbol string, start, end time.Time, _ benchmark.SeriesRequirement) (benchmark.BenchmarkPriceSeries, error) {
+	pts, err := v.inner.GetAdjustedCloseSeries(ctx, symbol, start, end)
+	if err != nil {
+		return benchmark.BenchmarkPriceSeries{}, err
+	}
+	now := time.Now().UTC()
+	return benchmark.BenchmarkPriceSeries{
+		Symbol: symbol, Points: pts,
+		Metadata: benchmark.BenchmarkDataMetadata{
+			Provider: "test_feed", ProviderMode: "real",
+			PriceType:         benchmark.PriceTypeAdjustedClose,
+			IncludesDividends: true, IncludesSplits: true,
+			IsAdjusted: true, IsTotalReturn: true, CorpActionsKnown: true,
+			Quality:     benchmark.DataQualityVerified,
+			RetrievedAt: now, SourceAsOf: now,
+		},
 	}, nil
 }
 
@@ -34,13 +81,14 @@ func newEnv(t *testing.T) (http.Handler, *auth.TokenManager, *achievements.Servi
 	t.Helper()
 	tm := auth.NewTokenManager("test-secret", time.Hour)
 	engine := benchmark.NewBenchmarkConstructionService(
-		benchmark.NewMockHistoricalPriceProvider(benchmark.DefaultMockReturns()),
+		verifiedHandlerPrices{benchmark.NewMockHistoricalPriceProvider(benchmark.DefaultMockReturns())},
 		benchmark.Recipes,
-		benchmark.NewSnapshotRecipeResolver(benchmark.DefaultRecipeSnapshots()),
+		nil,
 	)
 	rules := benchmark.NewRulesEngine(benchmark.DefaultEvaluators())
 	perf := stubPerformance{returnPct: map[string]float64{"u1": 25}}
 	svc := achievements.NewService(achievements.NewInMemoryAchievementRepository(), perf, engine, rules)
+	svc.SetAwardPolicy(benchmark.AwardModeVerifiedOnly, benchmark.EnvironmentProduction)
 	h := achievements.NewHandler(svc)
 
 	r := chi.NewRouter()

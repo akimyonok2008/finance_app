@@ -24,7 +24,7 @@ type SprintMaintainer interface {
 }
 
 // PortfolioSnapshotter records daily portfolio archive snapshots for all users,
-// giving benchmark/achievement evaluation a continuous portfolio index series.
+// preserving a continuous private portfolio-summary archive for owner analytics.
 // It is idempotent per UTC day, so calling it every tick writes at most one
 // snapshot per user per day. Implemented by an adapter over the portfolio and
 // auth services.

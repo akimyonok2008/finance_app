@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertCircle, Loader2, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -10,14 +10,17 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { PositionFormFields } from "@/components/portfolio/PositionFormFields";
+import { PreviewRow } from "@/components/portfolio/PreviewRow";
 import {
   EMPTY_POSITION_FORM,
   validatePositionForm,
   type PositionFormErrors,
   type PositionFormState,
 } from "@/components/portfolio/positionForm";
-import { useCreatePosition } from "@/hooks/usePositions";
+import { useCreatePosition, useCashBalances } from "@/hooks/usePositions";
+import { useQuotes } from "@/hooks/useQuotes";
 import { cn } from "@/utils/cn";
+import { formatMoney } from "@/utils/formatMoney";
 
 export type AddPositionFormProps = {
   /** Called after a successful add (e.g. to close the mobile drawer). */
@@ -32,6 +35,32 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
   const [backendError, setBackendError] = useState<string | null>(null);
 
   const createPosition = useCreatePosition();
+
+  // Live cost preview: debounce the symbol so we don't fire a quote lookup on
+  // every keystroke, then compute total cost and remaining cash once both a
+  // symbol and a valid quantity are present.
+  const [debouncedSymbol, setDebouncedSymbol] = useState(state.symbol);
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setDebouncedSymbol(state.symbol.trim().toUpperCase()),
+      350,
+    );
+    return () => window.clearTimeout(timer);
+  }, [state.symbol]);
+
+  const quantityValue = Number(state.quantity);
+  const hasValidQuantity = Number.isFinite(quantityValue) && quantityValue > 0;
+  const quotes = useQuotes(debouncedSymbol && hasValidQuantity ? [debouncedSymbol] : []);
+  const quote = quotes.data?.quotes.find((q) => q.symbol === debouncedSymbol);
+  const cash = useCashBalances();
+
+  const totalCost = quote ? quantityValue * quote.price : null;
+  const availableCash = quote
+    ? cash.data?.cash_balances.find((b) => b.currency === quote.currency)?.amount ?? 0
+    : null;
+  const remainingCash =
+    totalCost !== null && availableCash !== null ? availableCash - totalCost : null;
+  const insufficientCash = remainingCash !== null && remainingCash < 0;
 
   const onChange = (patch: Partial<PositionFormState>) => {
     setState((prev) => ({ ...prev, ...patch }));
@@ -91,21 +120,53 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
         onChange={onChange}
       />
 
+      {debouncedSymbol && hasValidQuantity && (
+        <div
+          aria-live="polite"
+          className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-xs"
+        >
+          {quotes.isLoading ? (
+            <div className="flex items-center gap-2 text-zinc-500">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Calculating cost…
+            </div>
+          ) : !quote ? (
+            <p className="text-rose-300">Price unavailable for {debouncedSymbol}.</p>
+          ) : (
+            <dl className="grid grid-cols-2 gap-y-1.5">
+              <PreviewRow label="Price" value={formatMoney(quote.price, quote.currency)} />
+              <PreviewRow label="Total cost" value={formatMoney(totalCost, quote.currency)} emphasize />
+              <PreviewRow label="Available cash" value={formatMoney(availableCash, quote.currency)} />
+              <PreviewRow
+                label="Remaining after buy"
+                value={formatMoney(remainingCash, quote.currency)}
+                tone={insufficientCash ? "negative" : "positive"}
+              />
+              {insufficientCash && (
+                <p className="col-span-2 mt-1 text-rose-300">
+                  Insufficient cash for this purchase.
+                </p>
+              )}
+            </dl>
+          )}
+        </div>
+      )}
+
       <Button
         type="submit"
         variant="accent"
         className="w-full"
-        disabled={pending}
+        disabled={pending || insufficientCash}
       >
         {pending ? (
           <>
             <Loader2 className="animate-spin" />
-            Adding…
+            Recording…
           </>
         ) : (
           <>
             <Plus />
-            Add Position
+            Record buy
           </>
         )}
       </Button>
@@ -123,9 +184,9 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
       )}
     >
       <CardHeader>
-        <CardTitle className="portfolio-display text-xl">Add Position</CardTitle>
+        <CardTitle className="portfolio-display text-xl">Record buy</CardTitle>
         <CardDescription>
-          Add a holding to track.
+          Uses available cash in the asset’s quote currency. No brokerage order is placed.
         </CardDescription>
       </CardHeader>
       <CardContent>{formBody}</CardContent>

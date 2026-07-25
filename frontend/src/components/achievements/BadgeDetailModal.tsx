@@ -20,6 +20,29 @@ function pts(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)} pts`;
 }
 
+function verificationLabel(v: string): string {
+  switch (v) {
+    case "verified":
+      return "Verified data";
+    case "demo":
+      return "Demo data";
+    case "legacy":
+      return "Legacy award";
+    default:
+      return "Unverified";
+  }
+}
+
+function priceMethodologyLabel(method: string): string {
+  switch (method) {
+    case "total_return":
+    case "adjusted_close":
+      return "Total-return benchmark";
+    default:
+      return "Price-return benchmark";
+  }
+}
+
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start justify-between gap-4 py-2">
@@ -95,6 +118,18 @@ export function BadgeDetailModal({
                   value={`${Math.round(badge.historyCoveragePct)}%`}
                 />
               )}
+              {typeof badge.activeCoveragePct === "number" && (
+                <Row
+                  label="Active coverage"
+                  value={`${Math.round(badge.activeCoveragePct)}%`}
+                />
+              )}
+              {typeof badge.trustedDataCoveragePct === "number" && (
+                <Row
+                  label="Trusted-data coverage"
+                  value={`${Math.round(badge.trustedDataCoveragePct)}%`}
+                />
+              )}
               <Row label="Benchmark recipe" value={badge.benchmark} />
               <Row label="Unlock rule" value={badge.unlockRule} />
               {badge.status === "unlocked" && badge.evidence ? (
@@ -112,6 +147,86 @@ export function BadgeDetailModal({
                     label="Evaluated"
                     value={`${badge.evidence.startDate} → ${badge.evidence.endDate}`}
                   />
+                  {badge.legacyEvidence && (
+                    <Row label="Evidence model" value="Legacy archive model" />
+                  )}
+                  {!badge.legacyEvidence &&
+                    badge.evidence.evaluationModel && (
+                      <Row
+                        label="Evidence model"
+                        value={badge.evidence.evaluationModel}
+                      />
+                    )}
+                  {badge.evidence.snapshotFrequency && (
+                    <Row
+                      label="Snapshot cadence"
+                      value={badge.evidence.snapshotFrequency}
+                    />
+                  )}
+                  {typeof badge.evidence.activeCoveragePct === "number" && (
+                    <Row
+                      label="Award active coverage"
+                      value={`${Math.round(badge.evidence.activeCoveragePct)}%`}
+                    />
+                  )}
+                  {typeof badge.evidence.trustedCoveragePct === "number" && (
+                    <Row
+                      label="Award trusted coverage"
+                      value={`${Math.round(badge.evidence.trustedCoveragePct)}%`}
+                    />
+                  )}
+                  {badge.evidence.benchmarkDataSource && (
+                    <Row
+                      label="Benchmark source"
+                      value={badge.evidence.benchmarkDataSource}
+                    />
+                  )}
+                  {badge.evidence.verification && (
+                    <Row
+                      label="Award"
+                      value={verificationLabel(badge.evidence.verification)}
+                    />
+                  )}
+                  {badge.evidence.totalReturnMethod && (
+                    <Row
+                      label="Price methodology"
+                      value={priceMethodologyLabel(
+                        badge.evidence.totalReturnMethod,
+                      )}
+                    />
+                  )}
+                  {badge.evidence.benchmarkRecipeVersion && (
+                    <Row
+                      label="Recipe version"
+                      value={badge.evidence.benchmarkRecipeVersion}
+                    />
+                  )}
+                  {badge.evidence.dataQuality && (
+                    <Row
+                      label="Data quality"
+                      value={badge.evidence.dataQuality}
+                    />
+                  )}
+                  {badge.evidence.recipeSourceAccession && (
+                    <Row
+                      label="Filing"
+                      value={badge.evidence.recipeSourceAccession}
+                    />
+                  )}
+                  {typeof badge.evidence.mappingCoveragePct === "number" && (
+                    <Row
+                      label="Holdings coverage"
+                      value={`${Math.round(
+                        badge.evidence.mappingCoveragePct * 100,
+                      )}%`}
+                    />
+                  )}
+                  {badge.category === "investor" && (
+                    <p className="pt-2 text-[10px] leading-relaxed text-zinc-500">
+                      A proxy portfolio inspired by this investor, not a replica
+                      of their actual holdings or performance.
+                    </p>
+                  )}
                   {badge.awardedAt && (
                     <Row
                       label="Awarded"
