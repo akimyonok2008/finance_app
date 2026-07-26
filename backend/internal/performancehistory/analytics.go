@@ -134,6 +134,14 @@ type RankedHistory struct {
 	EndingIndex               *float64             `json:"ending_index,omitempty"`
 	TimeframeReturnPercentage *float64             `json:"timeframe_return_percentage,omitempty"`
 	MaxDrawdownPercentage     *float64             `json:"max_drawdown_percentage,omitempty"`
+
+	// Risk is always present (even with no snapshots) so the UI can render a
+	// truthful "not enough history" state per metric instead of one blanket
+	// empty card.
+	Risk RiskConsistency `json:"risk"`
+	// Benchmark is the like-for-like comparison against the reference benchmark
+	// over IDENTICAL boundary dates, or an explicit unavailable state.
+	Benchmark BenchmarkComparison `json:"benchmark"`
 }
 
 const reasonNoSnapshots = "Performance history will appear after the first trusted snapshot."
@@ -170,13 +178,19 @@ func (s *Service) RankedHistory(ctx context.Context, userID, rawTimeframe string
 
 	if len(points) == 0 {
 		out.Reason = reasonNoSnapshots
+		out.Risk = CalculateRiskConsistency(nil, to)
+		out.Benchmark = s.benchmarkComparison(ctx, nil)
 		return out, nil
 	}
 
 	indexes := make([]float64, 0, len(points))
+	riskPoints := make([]indexPoint, 0, len(points))
 	for _, p := range points {
 		indexes = append(indexes, p.RankedIndex)
+		riskPoints = append(riskPoints, indexPoint{at: p.CapturedAt.UTC(), index: p.RankedIndex})
 	}
+	out.Risk = CalculateRiskConsistency(riskPoints, to)
+	out.Benchmark = s.benchmarkComparison(ctx, points)
 	drawdowns := DrawdownSeriesPercent(indexes)
 	starting := indexes[0]
 	ending := indexes[len(indexes)-1]

@@ -255,6 +255,36 @@ from the ranked index; the frontend only formats those values. When no trusted
 snapshot exists yet the response reports `available: false` with a reason and
 omits the analytics rather than returning zeros.
 
+The same response also carries two blocks that stay inside the ranked-history
+service, never in React:
+
+- `risk` — maximum drawdown, current drawdown (final index vs. its running
+  peak), positive share of COMPLETE calendar weeks (the running week is
+  excluded), and best/worst COMPLETE calendar month. Every field is `null` with
+  a `*_reason` when there is not enough history; it is never 0.
+- `benchmark` — a like-for-like comparison against `SPY` built by the SAME
+  `internal/benchmark` construction engine the achievement pipeline uses,
+  reached through a narrow `BenchmarkReturner` port so `performancehistory` does
+  not import `internal/benchmark`. The engine reports the ACTUAL trading dates
+  it could measure between, and the portfolio leg is then re-derived from the
+  ranked snapshots inside exactly that window. If the two windows cannot be made
+  identical the comparison is withheld with a reason — a timeframe mismatch is
+  never papered over with a number.
+
+`GET /performance/summary` additionally serves `economic_breakdown` (realized,
+unrealized, net income, standalone fees, total economic P&L) and `contributions`
+(top 3 contributors/detractors in percentage points). Both are computed from
+Step 1's existing ledger figures — `StandaloneFeesBase` is the single definition
+shared with `ReconcilePortfolioFinancials`, so the displayed breakdown and the
+reconciliation check can never drift. Contribution is `weight x instrument
+return`, never standalone instrument return, and declares
+`basis: "since_inception"` because no per-instrument daily valuation history
+exists; portfolio-level results (cash interest, management/custody fees) are
+reported as `unattributed_percentage_points` rather than assigned to a symbol.
+These two blocks are serialized ONLY by the performance DTO — the
+portfolio-state DTO (`GET /portfolio/summary`) deliberately does not carry them,
+so the three layers stay separately owned.
+
 The Dashboard graph renders `GET /performance/history` ranked-index points
 (1M window) with its own independent loading/error/empty states — a
 history-fetch failure never blanks the rest of the Dashboard.

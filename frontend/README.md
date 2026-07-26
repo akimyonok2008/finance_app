@@ -154,9 +154,18 @@ never wipes a sibling's loaded data. Within the Portfolio tab:
 - Closed positions: lifecycle summaries (opened/closed dates, realized P&L)
   for episodes that have gone to zero quantity.
 - Cash: per-currency balances and base-value weights.
+- Allocation: each holding's share of total holdings value, derived from the
+  position values `GET /portfolio/summary` already returns. Cash is excluded
+  and labelled as such (it has its own subview).
 
 A compact **Ranked Return** card sits above the subview switcher and links to
 `/portfolio?tab=performance`.
+
+**Episode deep-links.** Activities that carry a `position_episode_id` link to
+`/portfolio?tab=state&episode=<id>`. Episode identity IS the `positions` row id
+(migration 0018), so the tab resolves whether the episode is open or closed from
+the data and switches subview itself — the link never has to guess. The target
+card is focused and marked `aria-current`, with a text status announcing it.
 
 Portfolio mutations invalidate summaries, rankings, profiles, Explore, and
 achievement queries.
@@ -166,7 +175,29 @@ achievement queries.
 Three overview cards — **Ranked Return** (selected timeframe), **Economic P&L**
 (ledger reconciliation), and **Maximum Drawdown** — plus one chart with a
 Return / Portfolio Value / Drawdown mode switch and `1W/1M/3M/6M/1Y/ALL`
-timeframes.
+timeframes, then four analytic sections:
+
+- **Economic breakdown** — Realized P&L, Unrealized P&L, Net Income, Standalone
+  Fees, and Total Economic P&L from `GET /performance/summary`'s
+  `economic_breakdown`. This is the exact decomposition the backend's
+  reconciliation verifies; nothing is summed in the browser. Each row deep-links
+  to the activities that produced it (`?tab=transactions&category=trades|income|fees`).
+  "Standalone" fees exclude trade fees already netted into cost basis and
+  realized P&L, so they are never double-counted.
+- **Risk & consistency** — Maximum Drawdown, Current Drawdown, Positive Weeks
+  (complete calendar weeks only, current week excluded) and Best/Worst Month
+  (complete calendar months only), all from `performancehistory`'s `risk` block.
+  Insufficient history renders "Not enough history", never 0%.
+- **Benchmark & competition** — Benchmark Difference against `SPY` and the
+  caller's global rank/percentile. The difference is only shown when the backend
+  confirms both returns were measured between the SAME boundary dates, which it
+  discloses; otherwise the reason is shown. Rank comes from
+  `GET /leaderboard/me` at the SAME timeframe as the chart.
+- **Contributors & detractors** — top 3 each, ranked by contribution in
+  percentage points (weight x instrument return), never by standalone return.
+  Its basis is `since_inception`, and the UI says so whenever a shorter
+  timeframe is selected, because no per-instrument daily valuation history
+  exists to support period attribution.
 
 Return and Drawdown come from `GET /performance/history`, the canonical ranked
 snapshot history. Portfolio Value comes from `GET /portfolio/archives`, the
@@ -175,6 +206,13 @@ therefore never used for return or drawdown. Every number is computed by the
 backend; nothing is recalculated in the browser. Missing analytics render as
 "—" with a reason ("Performance history will appear after the first trusted
 snapshot."), never as zero.
+
+**Accessibility.** The Portfolio tab strip is a real ARIA `tablist` with
+`role="tab"`, `aria-selected`, a roving tabindex and Arrow/Home/End keyboard
+navigation, each tab wired to its `tabpanel`. Chart mode and timeframe controls
+are labelled groups; loading and error states are `role="status"` / `role="alert"`
+live regions; and every gain/loss value carries an explicit `+`/`-` sign so
+colour is never the only signal.
 
 ### Leaderboard
 

@@ -695,6 +695,13 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 	summary.EconomicPerformance = calculateEconomicPerformance(
 		summary.CurrentValue, ledger, len(summaries)+len(closedSummaries) > 0,
 	)
+	summary.EconomicAttribution = CalculateEconomicAttribution(
+		summary.OpenHoldings, summary.Realized, summary.Income,
+		summary.Fees, summary.EconomicPerformance,
+	)
+	summary.Contributions = CalculateContributions(
+		buildInstrumentEconomics(summaries, closedSummaries, ledger), ledger.portfolioLevel,
+	)
 	summary.Reconciliation = ReconcilePortfolioFinancials(
 		summary.RankedPerformance, summary.Valuation, summary.OpenHoldings,
 		summary.Realized, summary.Income, summary.Fees, summary.EconomicPerformance,
@@ -725,14 +732,55 @@ type ledgerMetrics struct {
 	income                                   IncomeMetrics
 	fees                                     FeeMetrics
 	hasBuy, hasOpening                       bool
+	// bySymbol carries the instrument-attributable slice of the SAME ledger
+	// figures above, keyed by normalized symbol. It is an aggregation of the
+	// ledger, never a second calculation of it.
+	bySymbol map[string]*InstrumentEconomics
+	// portfolioLevel is the economic result that belongs to no instrument
+	// (cash interest, management/custody fees). Disclosed as unattributed.
+	portfolioLevel float64
+}
+
+func (l *ledgerMetrics) instrument(symbol string) *InstrumentEconomics {
+	key := normalizeSymbol(symbol)
+	if l.bySymbol == nil {
+		l.bySymbol = map[string]*InstrumentEconomics{}
+	}
+	entry, ok := l.bySymbol[key]
+	if !ok {
+		entry = &InstrumentEconomics{Symbol: key}
+		l.bySymbol[key] = entry
+	}
+	return entry
 }
 
 func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (ledgerMetrics, error) {
 	var result ledgerMetrics
+	result.bySymbol = map[string]*InstrumentEconomics{}
 	for _, activity := range activities {
 		amountBase, err := s.fx.Convert(ctx, activity.GrossAmount, activity.Currency, fx.BaseCurrency)
 		if err != nil {
 			return ledgerMetrics{}, fmt.Errorf("%w: ledger %s: %v", ErrPriceProvider, activity.Type, err)
+		}
+		// Instrument attribution of the same figure. An activity with no symbol
+		// is portfolio-level and is never assigned to an instrument.
+		attributeIncome := func(value float64) {
+			if normalizeSymbol(activity.Symbol) == "" {
+				result.portfolioLevel += value
+				return
+			}
+			entry := result.instrument(activity.Symbol)
+			if entry.AssetType == "" {
+				entry.AssetType = activity.AssetType
+			}
+			entry.IncomeBase += value
+		}
+		attributeFee := func(value float64) {
+			if normalizeSymbol(activity.Symbol) == "" {
+				result.portfolioLevel -= value
+				return
+			}
+			result.instrument(activity.Symbol).FeesBase += value
 		}
 		switch activity.Type {
 		case ActivityDeposit:
@@ -747,11 +795,22 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 		case ActivitySell:
 			if activity.RealizedGainLossBase != nil {
 				result.realized += *activity.RealizedGainLossBase
+				if normalizeSymbol(activity.Symbol) == "" {
+					result.portfolioLevel += *activity.RealizedGainLossBase
+				} else {
+					entry := result.instrument(activity.Symbol)
+					if entry.AssetType == "" {
+						entry.AssetType = activity.AssetType
+					}
+					entry.RealizedPnLBase += *activity.RealizedGainLossBase
+				}
 			}
 		case ActivityCashDividend, ActivityReinvestedDividend:
 			result.income.DividendsBase += amountBase
+			attributeIncome(amountBase)
 		case ActivityETFDistribution, ActivityCapitalGainsDistribution:
 			result.income.DistributionsBase += amountBase
+			attributeIncome(amountBase)
 		case ActivityReturnOfCapital:
 			// Return of capital is NOT ordinary income (it reduces the paying
 			// position's cost basis rather than representing a return on it), so
@@ -759,8 +818,10 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 			result.income.ReturnOfCapitalBase += amountBase
 		case ActivityInterestIncome, ActivityBondCoupon, ActivityCashInterest:
 			result.income.InterestBase += amountBase
+			attributeIncome(amountBase)
 		case ActivityStakingReward, ActivityOtherIncome:
 			result.income.OtherIncomeBase += amountBase
+			attributeIncome(amountBase)
 		case ActivityBuyFee, ActivitySellFee:
 			result.fees.TransactionFeesBase += amountBase
 			// Every sell_fee/buy_fee activity is created exclusively as a grouped
@@ -770,11 +831,20 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 			result.fees.EmbeddedInRealizedPnLBase += amountBase
 		case ActivityManagementFee:
 			result.fees.ManagementFeesBase += amountBase
+			attributeFee(amountBase)
 		case ActivityCustodyFee:
 			result.fees.CustodyFeesBase += amountBase
+			attributeFee(amountBase)
 		case ActivityOtherFee:
 			result.fees.OtherFeesBase += amountBase
+			attributeFee(amountBase)
 		}
+	}
+	result.portfolioLevel = round2(result.portfolioLevel)
+	for _, entry := range result.bySymbol {
+		entry.IncomeBase = round2(entry.IncomeBase)
+		entry.FeesBase = round2(entry.FeesBase)
+		entry.RealizedPnLBase = round2(entry.RealizedPnLBase)
 	}
 	result.income.DividendsBase = round2(result.income.DividendsBase)
 	result.income.DistributionsBase = round2(result.income.DistributionsBase)

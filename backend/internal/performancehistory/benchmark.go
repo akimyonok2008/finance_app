@@ -1,0 +1,143 @@
+package performancehistory
+
+import (
+	"context"
+	"math"
+	"time"
+)
+
+// BenchmarkReturn is the result of evaluating a benchmark over a requested
+// window. EffectiveStart/EffectiveEnd are the ACTUAL aligned trading dates the
+// benchmark could be measured between — they are almost never exactly the
+// requested bounds (weekends, holidays, provider coverage), and reporting a
+// benchmark difference without them would be a silent timeframe mismatch.
+type BenchmarkReturn struct {
+	RecipeID         string
+	Name             string
+	ReturnPercentage float64
+	EffectiveStart   time.Time
+	EffectiveEnd     time.Time
+	Quality          string
+	Synthetic        bool
+}
+
+// BenchmarkReturner is the optional port to the benchmark construction engine.
+// performancehistory deliberately does NOT import internal/benchmark: the ranked
+// history service owns ranked snapshots only, and the benchmark engine stays a
+// separately-owned service behind this narrow interface.
+type BenchmarkReturner interface {
+	ReturnOver(ctx context.Context, recipeID string, start, end time.Time) (BenchmarkReturn, error)
+}
+
+// DefaultBenchmarkRecipeID is the comparison benchmark shown on the Performance
+// tab.
+const DefaultBenchmarkRecipeID = "SPY"
+
+// SetBenchmark wires the optional benchmark comparison. When it is not wired the
+// Benchmark block reports available:false with a reason instead of a zero.
+func (s *Service) SetBenchmark(b BenchmarkReturner) { s.benchmark = b }
+
+// BenchmarkComparison is the Benchmark section of the Performance tab.
+//
+// The comparison is only emitted when BOTH legs are measured over the SAME
+// boundary dates. The portfolio leg is re-derived from the ranked snapshots that
+// fall inside the benchmark's effective window — not from the whole chart
+// window — so "you beat SPY by X points" is a like-for-like statement.
+type BenchmarkComparison struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	RecipeID  string `json:"recipe_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+
+	// AlignedFrom/AlignedTo are the shared boundary dates both returns use.
+	AlignedFrom string `json:"aligned_from,omitempty"`
+	AlignedTo   string `json:"aligned_to,omitempty"`
+
+	BenchmarkReturnPercentage *float64 `json:"benchmark_return_percentage,omitempty"`
+	// PortfolioReturnPercentage is the ranked return over the ALIGNED window. It
+	// can differ from the chart's headline timeframe return, which covers the
+	// full requested window; both are disclosed rather than conflated.
+	PortfolioReturnPercentage  *float64 `json:"portfolio_return_percentage,omitempty"`
+	DifferencePercentagePoints *float64 `json:"difference_percentage_points,omitempty"`
+
+	DataQuality string `json:"data_quality,omitempty"`
+	IsSynthetic bool   `json:"is_synthetic,omitempty"`
+}
+
+const (
+	reasonBenchmarkUnavailable = "Benchmark comparison is unavailable: no benchmark price source is configured."
+	reasonBenchmarkNoData      = "Benchmark comparison is unavailable: the benchmark has no usable price series for this window."
+	reasonBenchmarkNoOverlap   = "Benchmark comparison is unavailable: no ranked snapshots fall inside the benchmark's trading window, so the two returns could not be measured over the same dates."
+)
+
+// benchmarkComparison aligns the benchmark's own return with the portfolio's
+// ranked return over identical boundary dates.
+func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) BenchmarkComparison {
+	out := BenchmarkComparison{RecipeID: DefaultBenchmarkRecipeID}
+	if s.benchmark == nil {
+		out.RecipeID = ""
+		out.Reason = reasonBenchmarkUnavailable
+		return out
+	}
+	if len(points) < 2 {
+		out.Reason = reasonBenchmarkNoData
+		return out
+	}
+
+	result, err := s.benchmark.ReturnOver(
+		ctx, DefaultBenchmarkRecipeID,
+		points[0].CapturedAt.UTC(), points[len(points)-1].CapturedAt.UTC(),
+	)
+	if err != nil {
+		out.Reason = reasonBenchmarkNoData
+		return out
+	}
+	out.Name = result.Name
+	out.DataQuality = result.Quality
+	out.IsSynthetic = result.Synthetic
+
+	// The benchmark's effective window is a pair of trading DAYS. Take the last
+	// ranked snapshot at or before the end of each boundary day so both legs
+	// describe the same calendar interval.
+	from := result.EffectiveStart.UTC()
+	to := result.EffectiveEnd.UTC()
+	startIdx, startOK := indexAtOrBeforeEndOfDay(points, from)
+	endIdx, endOK := indexAtOrBeforeEndOfDay(points, to)
+	if !startOK || !endOK {
+		out.Reason = reasonBenchmarkNoOverlap
+		return out
+	}
+	portfolioReturn, err := TimeframeReturnPercent(startIdx, endIdx)
+	if err != nil {
+		out.Reason = reasonBenchmarkNoOverlap
+		return out
+	}
+
+	benchmarkReturn := round4(result.ReturnPercentage)
+	portfolio := round4(portfolioReturn)
+	difference := round4(portfolio - benchmarkReturn)
+	out.Available = true
+	out.AlignedFrom = from.Format("2006-01-02")
+	out.AlignedTo = to.Format("2006-01-02")
+	out.BenchmarkReturnPercentage = &benchmarkReturn
+	out.PortfolioReturnPercentage = &portfolio
+	out.DifferencePercentagePoints = &difference
+	return out
+}
+
+// indexAtOrBeforeEndOfDay returns the ranked index of the newest snapshot that
+// is not after the END of the given UTC day.
+func indexAtOrBeforeEndOfDay(points []Snapshot, day time.Time) (float64, bool) {
+	cutoff := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC).
+		AddDate(0, 0, 1)
+	for i := len(points) - 1; i >= 0; i-- {
+		if points[i].CapturedAt.UTC().Before(cutoff) {
+			idx := points[i].RankedIndex
+			if idx > 0 && !math.IsNaN(idx) && !math.IsInf(idx, 0) {
+				return idx, true
+			}
+			return 0, false
+		}
+	}
+	return 0, false
+}

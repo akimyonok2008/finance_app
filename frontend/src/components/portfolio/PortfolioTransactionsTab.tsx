@@ -314,11 +314,18 @@ function ActivityRow({ activity }: { activity: PortfolioActivity }) {
           {automatic ? " · No action required" : ""}
         </p>
         {activity.position_episode_id && (
+          /*
+           * Deep-link into the Portfolio State tab. The subview is deliberately
+           * NOT hard-coded to open or closed: an activity does not know whether
+           * its episode is still open, so the State tab resolves that from the
+           * data and switches itself.
+           */
           <Link
-            to={`/portfolio?episode=${activity.position_episode_id}`}
-            className="mt-2 inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-100"
+            to={`/portfolio?tab=state&episode=${encodeURIComponent(activity.position_episode_id)}`}
+            aria-label={`View the ${activity.symbol ?? ""} position episode this activity belongs to`}
+            className="mt-2 inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/40"
           >
-            View position <ArrowRight className="h-3 w-3" />
+            View position episode <ArrowRight className="h-3 w-3" />
           </Link>
         )}
       </div>

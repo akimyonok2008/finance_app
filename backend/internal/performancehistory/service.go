@@ -41,6 +41,9 @@ type Service struct {
 	ranked RankedProvider
 	cfg    Config
 	now    func() time.Time
+	// benchmark is OPTIONAL. When nil, the benchmark comparison reports
+	// available:false with a reason rather than a fabricated zero.
+	benchmark BenchmarkReturner
 }
 
 func NewService(repo Repository, ranked RankedProvider, cfg Config) *Service {

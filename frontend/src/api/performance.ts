@@ -1,10 +1,22 @@
 import { apiRequest } from "@/api/client";
 import type { PortfolioArchiveTimeframe } from "@/types/portfolio";
 import type {
+  PerformanceSummary,
   PerformanceTimeframe,
   PortfolioValueHistory,
   RankedPerformanceHistory,
 } from "@/types/performance";
+
+/**
+ * The performance layer's own summary DTO. The economic breakdown and the
+ * contributor analysis come from here — NOT from the portfolio-state summary,
+ * which deliberately does not carry them.
+ */
+export function getPerformanceSummary(
+  signal?: AbortSignal,
+): Promise<PerformanceSummary> {
+  return apiRequest<PerformanceSummary>("/performance/summary", { signal });
+}
 
 /**
  * Canonical ranked-performance history. The backend computes the timeframe

@@ -22,6 +22,7 @@ export const queryKeys = {
   },
   performance: {
     all: ["performance"] as const,
+    summary: ["performance", "summary"] as const,
     history: (timeframe: string) => ["performance", "history", timeframe] as const,
     valueHistory: (timeframe: string) =>
       ["performance", "valueHistory", timeframe] as const,

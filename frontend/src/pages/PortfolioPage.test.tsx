@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import {
   MemoryRouter,
   Navigate,
@@ -144,7 +144,7 @@ describe("unified /portfolio tab routing", () => {
     expect(screen.getByTestId("location").textContent).toBe("/portfolio");
 
     await act(async () => {
-      screen.getByRole("button", { name: /Performance/ }).click();
+      screen.getByRole("tab", { name: /Performance/ }).click();
     });
     expect(screen.getByTestId("location").textContent).toBe(
       "/portfolio?tab=performance",
@@ -182,7 +182,7 @@ describe("unified /portfolio tab routing", () => {
     expect(mountCounts.performance).toBe(0);
 
     await act(async () => {
-      screen.getByRole("button", { name: /Performance/ }).click();
+      screen.getByRole("tab", { name: /Performance/ }).click();
     });
     expect(mountCounts.performance).toBe(1);
     // The transactions tab was not re-mounted or re-fetched by the switch.
@@ -190,10 +190,76 @@ describe("unified /portfolio tab routing", () => {
     expect(mountCounts.state).toBe(0);
 
     await act(async () => {
-      screen.getByRole("button", { name: /Transactions/ }).click();
+      screen.getByRole("tab", { name: /Transactions/ }).click();
     });
     expect(mountCounts.transactions).toBe(2);
     expect(mountCounts.performance).toBe(1);
     expect(mountCounts.state).toBe(0);
+  });
+
+  // The tab strip is a real ARIA tablist: selection state is exposed to
+  // assistive technology and the strip is operable from the keyboard alone.
+  describe("tab accessibility", () => {
+    it("exposes a labelled tablist with aria-selected state", () => {
+      renderAt("/portfolio?tab=performance");
+
+      const tablist = screen.getByRole("tablist", {
+        name: "Portfolio sections",
+      });
+      const tabs = within(tablist).getAllByRole("tab");
+      expect(tabs).toHaveLength(3);
+
+      const selected = tabs.filter(
+        (tab) => tab.getAttribute("aria-selected") === "true",
+      );
+      expect(selected).toHaveLength(1);
+      expect(selected[0].textContent).toContain("Performance");
+    });
+
+    it("uses a roving tabindex so only the selected tab is in the tab order", () => {
+      renderAt("/portfolio");
+      const tabs = within(
+        screen.getByRole("tablist", { name: "Portfolio sections" }),
+      ).getAllByRole("tab");
+
+      const inOrder = tabs.filter((tab) => tab.getAttribute("tabindex") === "0");
+      expect(inOrder).toHaveLength(1);
+      expect(inOrder[0].getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("moves between tabs with the arrow, Home and End keys", async () => {
+      renderAt("/portfolio?tab=transactions");
+      const tablist = screen.getByRole("tablist", {
+        name: "Portfolio sections",
+      });
+
+      await act(async () => {
+        fireEvent.keyDown(tablist, { key: "ArrowRight" });
+      });
+      expect(screen.getByTestId("location").textContent).toBe("/portfolio");
+
+      await act(async () => {
+        fireEvent.keyDown(tablist, { key: "End" });
+      });
+      expect(screen.getByTestId("location").textContent).toBe(
+        "/portfolio?tab=performance",
+      );
+
+      await act(async () => {
+        fireEvent.keyDown(tablist, { key: "Home" });
+      });
+      expect(screen.getByTestId("location").textContent).toBe(
+        "/portfolio?tab=transactions",
+      );
+    });
+
+    it("connects each tab to its panel", () => {
+      renderAt("/portfolio?tab=performance");
+      const panel = screen.getByRole("tabpanel");
+      const tab = screen.getByRole("tab", { name: /Performance/ });
+
+      expect(tab.getAttribute("aria-controls")).toBe(panel.getAttribute("id"));
+      expect(panel.getAttribute("aria-labelledby")).toBe(tab.getAttribute("id"));
+    });
   });
 });

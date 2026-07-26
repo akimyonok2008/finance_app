@@ -15,6 +15,7 @@ import { AssetTypeBadge } from "@/components/portfolio/AssetTypeBadge";
 import { PortfolioEmptyState } from "@/components/portfolio/PortfolioEmptyState";
 import { QuoteFreshnessBadge } from "@/components/portfolio/QuoteFreshnessBadge";
 import { PortfolioTableSkeleton } from "@/components/portfolio/PortfolioSkeleton";
+import { episodeElementId } from "@/components/portfolio/portfolioTabs";
 import {
   rowBaseCurrency,
   rowCurrency,
@@ -34,6 +35,8 @@ type Props = {
   onEdit?: (position: PositionRow) => void;
   onClose: (position: PositionRow) => void;
   onDelete?: (position: PositionRow) => void;
+  /** `?episode=` deep-link target; the matching row is anchored and marked. */
+  highlightedId?: string;
 };
 
 // framer-motion needs a real DOM table row; motion.tr keeps semantics intact.
@@ -41,6 +44,7 @@ const MotionTr = motion.tr;
 
 export function PositionsTable({
   rows,
+  highlightedId,
   isLoading,
   isError,
   errorMessage,
@@ -97,12 +101,19 @@ export function PositionsTable({
               return (
                 <MotionTr
                   key={row.id}
+                  id={episodeElementId(row.id)}
+                  tabIndex={row.id === highlightedId ? -1 : undefined}
+                  aria-current={row.id === highlightedId ? "true" : undefined}
                   layout
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.98 }}
                   transition={{ type: "spring", stiffness: 260, damping: 24 }}
-                  className="border-b border-white/[0.06] transition-colors hover:bg-indigo-300/[0.035]"
+                  className={cn(
+                    "border-b border-white/[0.06] transition-colors hover:bg-indigo-300/[0.035]",
+                    row.id === highlightedId &&
+                      "bg-cyan-300/[0.09] outline outline-1 outline-cyan-300/40",
+                  )}
                 >
                   <TableCell className="font-mono font-medium tracking-wide text-cyan-100">
                     <div className="flex items-center gap-2">

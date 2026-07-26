@@ -1,4 +1,5 @@
-import { ArrowRight, TrendingUp } from "lucide-react";
+import { useEffect, useMemo, useRef } from "react";
+import { ArrowRight, PieChart, TrendingUp } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { AssetTypeBadge } from "@/components/portfolio/AssetTypeBadge";
@@ -9,6 +10,7 @@ import { PortfolioSummaryCards } from "@/components/portfolio/PortfolioSummaryCa
 import { PositionCardList } from "@/components/portfolio/PositionCardList";
 import { PositionsTable } from "@/components/portfolio/PositionsTable";
 import {
+  episodeElementId,
   STATE_VIEW_LABELS,
   STATE_VIEWS,
   type StateView,
@@ -25,6 +27,12 @@ import { gainLossColor } from "@/utils/gainLoss";
 
 type Props = {
   view: StateView;
+  /**
+   * `?episode=<id>` from the Transactions tab. Episode identity is the
+   * `positions` row id, so it matches an open position's id or a closed
+   * episode's id; the correct subview is resolved automatically.
+   */
+  episodeId?: string;
   onViewChange: (view: StateView) => void;
   /** Deep-links a position into the Transactions tab's sell flow. */
   onSell: (positionId: string) => void;
@@ -34,19 +42,38 @@ type Props = {
 /** Portfolio State tab: "what exists now" — positions, closed episodes, cash. */
 export function PortfolioStateTab({
   view,
+  episodeId,
   onViewChange,
   onSell,
   onAddPosition,
 }: Props) {
   const { rows, isLoading, isError, error } = usePositionRows();
+  const closed = useClosedPositions();
   const errorMessage = error?.message;
+
+  // An episode link arrives without knowing whether the episode is still open.
+  // Resolve it from the data instead of guessing, and switch subview once.
+  const resolvedView = useRef<string | null>(null);
+  useEffect(() => {
+    if (!episodeId || resolvedView.current === episodeId) return;
+    const isOpen = rows.some((row) => row.id === episodeId);
+    const isClosed = (closed.data ?? []).some((row) => row.id === episodeId);
+    if (!isOpen && !isClosed) return;
+    resolvedView.current = episodeId;
+    const target: StateView = isOpen ? "open" : "closed";
+    if (view !== target) onViewChange(target);
+  }, [episodeId, rows, closed.data, view, onViewChange]);
 
   return (
     <div>
       <PortfolioSummaryCards />
       <RankedReturnSummaryCard />
 
-      <div className="mb-6 mt-6 inline-flex flex-wrap gap-1 rounded-xl border border-indigo-300/10 bg-zinc-900/45 p-1 shadow-lg shadow-black/10">
+      <div
+        role="group"
+        aria-label="Portfolio view"
+        className="mb-6 mt-6 inline-flex flex-wrap gap-1 rounded-xl border border-indigo-300/10 bg-zinc-900/45 p-1 shadow-lg shadow-black/10"
+      >
         {STATE_VIEWS.map((item) => (
           <button
             key={item}
@@ -67,8 +94,16 @@ export function PortfolioStateTab({
 
       {view === "open" ? (
         <div>
+          {episodeId && (
+            <EpisodeSpotlight
+              episodeId={episodeId}
+              symbol={rows.find((row) => row.id === episodeId)?.symbol}
+              found={rows.some((row) => row.id === episodeId)}
+            />
+          )}
           <PositionsTable
             rows={rows}
+            highlightedId={episodeId}
             isLoading={isLoading}
             isError={isError}
             errorMessage={errorMessage}
@@ -86,11 +121,153 @@ export function PortfolioStateTab({
           <AutomaticAdjustments />
         </div>
       ) : view === "closed" ? (
-        <ClosedPositionsView />
+        <ClosedPositionsView episodeId={episodeId} />
+      ) : view === "allocation" ? (
+        <AllocationView />
       ) : (
         <CashBalancesCard />
       )}
     </div>
+  );
+}
+
+/**
+ * Confirms which episode a `?episode=` deep link landed on, and focuses its
+ * card. The link target is announced in text rather than signalled only by the
+ * temporary highlight, so it works without sighted scanning.
+ */
+function EpisodeSpotlight({
+  episodeId,
+  symbol,
+  found,
+}: {
+  episodeId: string;
+  symbol?: string;
+  found: boolean;
+}) {
+  useEffect(() => {
+    if (!found) return;
+    const element = document.getElementById(episodeElementId(episodeId));
+    if (!element) return;
+    // scrollIntoView is absent in some non-browser environments; focus alone is
+    // the part that actually matters for keyboard and screen-reader users.
+    element.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [episodeId, found]);
+
+  return (
+    <p
+      role="status"
+      aria-live="polite"
+      className="mb-3 rounded-lg border border-cyan-300/25 bg-cyan-300/[0.06] px-3 py-2 text-xs text-cyan-100/90"
+    >
+      {found
+        ? `Showing the position episode this activity belongs to${symbol ? `: ${symbol}` : ""}.`
+        : "That position episode is no longer in this list. It may have been closed or removed."}
+    </p>
+  );
+}
+
+/**
+ * Allocation. Each holding's share of total holdings value, computed from the
+ * position values the summary already returns — there is no new valuation here.
+ * Cash is excluded and stated as such, because it is reported on its own tab.
+ */
+function AllocationView() {
+  const { data, isLoading, isError } = usePortfolioSummary();
+
+  const rows = useMemo(() => {
+    const positions = data?.positions ?? [];
+    const total = positions.reduce(
+      (sum, position) => sum + (position.current_value_base ?? 0),
+      0,
+    );
+    if (total <= 0) return [];
+    return positions
+      .map((position) => ({
+        symbol: position.symbol,
+        assetType: position.asset_type,
+        value: position.current_value_base ?? 0,
+        weight: ((position.current_value_base ?? 0) / total) * 100,
+      }))
+      .sort((a, b) => b.weight - a.weight);
+  }, [data]);
+
+  const currency = data?.base_currency ?? "USD";
+
+  if (isLoading) {
+    return (
+      <Card
+        role="status"
+        aria-live="polite"
+        className="border-cyan-300/10 bg-cyan-300/[0.025] p-6 text-sm text-zinc-400"
+      >
+        Loading allocation…
+      </Card>
+    );
+  }
+  if (isError) {
+    return (
+      <Card role="alert" className="p-6 text-sm text-rose-300">
+        Could not load your allocation.
+      </Card>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <Card className="border-violet-300/10 bg-violet-300/[0.025] p-8 text-center">
+        <h2 className="portfolio-display text-xl font-semibold text-zinc-100">
+          No allocation to show
+        </h2>
+        <p className="mt-2 text-sm text-zinc-400">
+          Allocation appears once you hold at least one position with a current
+          value.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center gap-2">
+        <PieChart className="h-4 w-4 text-zinc-400" />
+        <h2 className="text-sm font-semibold text-zinc-100">
+          Holdings allocation
+        </h2>
+      </div>
+      <p className="mt-1 text-[11px] leading-4 text-zinc-500">
+        Share of your holdings value. Cash is excluded — see the Cash view.
+      </p>
+      <ul className="mt-4 space-y-2">
+        {rows.map((row) => (
+          <li key={row.symbol}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2">
+                <span className="font-mono text-sm text-zinc-100">
+                  {row.symbol}
+                </span>
+                <AssetTypeBadge type={row.assetType} />
+              </span>
+              <span className="font-mono text-sm tabular-nums text-zinc-300">
+                {row.weight.toFixed(1)}%
+                <span className="ml-2 text-zinc-500">
+                  {formatMoney(row.value, currency)}
+                </span>
+              </span>
+            </div>
+            <div
+              className="mt-1 h-1.5 overflow-hidden rounded-full bg-zinc-800"
+              role="presentation"
+            >
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-indigo-300 to-cyan-200"
+                style={{ width: `${Math.min(100, row.weight)}%` }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
@@ -141,9 +318,20 @@ function RankedReturnSummaryCard() {
   );
 }
 
-function ClosedPositionsView() {
+function ClosedPositionsView({ episodeId }: { episodeId?: string }) {
   const { data, isLoading, isError, error } = useClosedPositions();
   const rows = data ?? [];
+  const highlighted = episodeId && rows.some((row) => row.id === episodeId);
+
+  useEffect(() => {
+    if (!highlighted || !episodeId) return;
+    const element = document.getElementById(episodeElementId(episodeId));
+    if (!element) return;
+    // scrollIntoView is absent in some non-browser environments; focus alone is
+    // the part that actually matters for keyboard and screen-reader users.
+    element.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [highlighted, episodeId]);
 
   if (isLoading) {
     return (
@@ -174,19 +362,47 @@ function ClosedPositionsView() {
   }
   return (
     <div className="grid gap-3">
+      {episodeId && !highlighted && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="rounded-lg border border-cyan-300/25 bg-cyan-300/[0.06] px-3 py-2 text-xs text-cyan-100/90"
+        >
+          That position episode is not in your closed positions.
+        </p>
+      )}
       {rows.map((row) => (
-        <ClosedPositionCard key={row.id} row={row} />
+        <ClosedPositionCard
+          key={row.id}
+          row={row}
+          highlighted={row.id === episodeId}
+        />
       ))}
     </div>
   );
 }
 
-function ClosedPositionCard({ row }: { row: ClosedPosition }) {
+function ClosedPositionCard({
+  row,
+  highlighted,
+}: {
+  row: ClosedPosition;
+  highlighted?: boolean;
+}) {
   const closedDate = row.closed_at
     ? new Date(row.closed_at).toLocaleDateString()
     : "—";
   return (
-    <Card className="border-amber-300/10 bg-[linear-gradient(110deg,rgba(251,191,36,0.035),rgba(24,24,27,0.5)_35%)] p-4 transition hover:border-amber-300/20">
+    <Card
+      id={episodeElementId(row.id)}
+      tabIndex={highlighted ? -1 : undefined}
+      aria-current={highlighted ? "true" : undefined}
+      className={cn(
+        "border-amber-300/10 bg-[linear-gradient(110deg,rgba(251,191,36,0.035),rgba(24,24,27,0.5)_35%)] p-4 transition hover:border-amber-300/20",
+        highlighted &&
+          "border-cyan-300/50 ring-2 ring-cyan-300/30 focus-visible:outline-none",
+      )}
+    >
       <div className="grid gap-4 lg:grid-cols-[1fr_repeat(5,minmax(0,0.8fr))] lg:items-center">
         <div>
           <div className="flex items-center gap-2">

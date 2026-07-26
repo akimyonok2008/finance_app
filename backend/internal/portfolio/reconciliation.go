@@ -61,7 +61,7 @@ func ReconcilePortfolioFinancials(
 		// sale fees embedded in RealizedMetrics.RealizedPnLBase (canonical sale
 		// contract, see backend/README.md) are already netted out of that figure,
 		// so subtracting fees.TotalFeesBase in full would double-count them.
-		standaloneFees := fees.TotalFeesBase - fees.EmbeddedInRealizedPnLBase
+		standaloneFees := StandaloneFeesBase(fees)
 		attribution := open.UnrealizedPnLBase + realized.RealizedPnLBase +
 			income.TotalIncomeBase - standaloneFees
 		difference = *economic.TotalPnLBase - attribution

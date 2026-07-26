@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import {
   getPerformanceHistory,
+  getPerformanceSummary,
   getPortfolioValueHistory,
 } from "@/api/performance";
 import { queryKeys } from "@/hooks/queryKeys";
@@ -14,6 +15,17 @@ export function usePerformanceHistory(timeframe: PerformanceTimeframe) {
     queryKey: queryKeys.performance.history(timeframe),
     queryFn: ({ signal }) => getPerformanceHistory(timeframe, signal),
     placeholderData: keepPreviousData,
+  });
+}
+
+/**
+ * The performance layer's summary — economic breakdown and contributors.
+ * Separate from usePortfolioSummary on purpose: the two layers own two DTOs.
+ */
+export function usePerformanceSummary() {
+  return useQuery({
+    queryKey: queryKeys.performance.summary,
+    queryFn: ({ signal }) => getPerformanceSummary(signal),
   });
 }
 

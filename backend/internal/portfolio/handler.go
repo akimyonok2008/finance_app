@@ -644,7 +644,9 @@ func (h *Handler) PerformanceSummary(w http.ResponseWriter, r *http.Request) {
 			IncomeBase:        summary.Income.TotalIncomeBase,
 			FeesBase:          summary.Fees.TotalFeesBase,
 		},
-		Reconciliation: summary.Reconciliation,
+		Reconciliation:    summary.Reconciliation,
+		EconomicBreakdown: summary.EconomicAttribution,
+		Contributions:     summary.Contributions,
 	})
 }
 

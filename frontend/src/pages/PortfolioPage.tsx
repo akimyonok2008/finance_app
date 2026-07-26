@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from "react";
 import type { LucideIcon } from "lucide-react";
 import { ArrowLeftRight, LineChart, WalletCards } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
@@ -72,6 +73,29 @@ export function PortfolioPage() {
     }
     setSearchParams(next);
   };
+  /**
+   * `?episode=<positions.id>` deep-links one position episode. Episode identity
+   * IS the positions row id (see migration 0018), so the same value matches an
+   * open position's `position_id` and a closed episode's `id`.
+   */
+  const episodeId = searchParams.get("episode") ?? undefined;
+
+  const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const index = PORTFOLIO_TABS.indexOf(activeTab);
+    let next: number;
+    if (event.key === "ArrowRight") next = (index + 1) % PORTFOLIO_TABS.length;
+    else if (event.key === "ArrowLeft")
+      next = (index - 1 + PORTFOLIO_TABS.length) % PORTFOLIO_TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = PORTFOLIO_TABS.length - 1;
+    else return;
+
+    event.preventDefault();
+    const target = PORTFOLIO_TABS[next];
+    setActiveTab(target);
+    document.getElementById(`portfolio-tab-${target}`)?.focus();
+  };
+
   const goToSell = (positionId: string) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", "transactions");
@@ -98,7 +122,17 @@ export function PortfolioPage() {
           </p>
         </div>
 
-        <div className="mb-8 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {/*
+          A real ARIA tablist: each control is a native <button role="tab"> with
+          aria-selected, roving tabindex, and Left/Right/Home/End keyboard
+          navigation, so the tab strip is operable without a mouse.
+        */}
+        <div
+          role="tablist"
+          aria-label="Portfolio sections"
+          onKeyDown={onTabKeyDown}
+          className="mb-8 grid grid-cols-1 gap-2 sm:grid-cols-3"
+        >
           {PORTFOLIO_TABS.map((tab) => {
             const meta = TAB_META[tab];
             const Icon = meta.icon;
@@ -107,8 +141,12 @@ export function PortfolioPage() {
               <button
                 key={tab}
                 type="button"
+                role="tab"
+                id={`portfolio-tab-${tab}`}
+                aria-controls={`portfolio-tabpanel-${tab}`}
+                aria-selected={active}
+                tabIndex={active ? 0 : -1}
                 onClick={() => setActiveTab(tab)}
-                aria-current={active ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-3 rounded-2xl border px-4 py-3.5 text-left transition",
                   active
@@ -144,18 +182,26 @@ export function PortfolioPage() {
           })}
         </div>
 
-        {activeTab === "state" ? (
-          <PortfolioStateTab
-            view={activeView}
-            onViewChange={setActiveView}
-            onSell={goToSell}
-            onAddPosition={() => setActiveTab("transactions")}
-          />
-        ) : activeTab === "transactions" ? (
-          <PortfolioTransactionsTab />
-        ) : (
-          <PortfolioPerformanceTab />
-        )}
+        <div
+          role="tabpanel"
+          id={`portfolio-tabpanel-${activeTab}`}
+          aria-labelledby={`portfolio-tab-${activeTab}`}
+          tabIndex={0}
+        >
+          {activeTab === "state" ? (
+            <PortfolioStateTab
+              view={activeView}
+              episodeId={episodeId}
+              onViewChange={setActiveView}
+              onSell={goToSell}
+              onAddPosition={() => setActiveTab("transactions")}
+            />
+          ) : activeTab === "transactions" ? (
+            <PortfolioTransactionsTab />
+          ) : (
+            <PortfolioPerformanceTab />
+          )}
+        </div>
       </main>
     </div>
   );

@@ -89,6 +89,34 @@ func (a benchmarkHistoryAdapter) GetAdjustedCloseSeries(ctx context.Context, sym
 	return out, nil
 }
 
+// benchmarkComparisonAdapter exposes the benchmark construction engine to the
+// ranked-history service through its narrow BenchmarkReturner port, so
+// performancehistory never imports internal/benchmark.
+//
+// It uses the PREVIEW-grade requirement: the Performance tab is a display, not a
+// permanent award, so synthetic/raw data is allowed — but the data quality and
+// synthetic flag travel with the number so the UI can label it honestly.
+type benchmarkComparisonAdapter struct {
+	engine  *benchmark.BenchmarkConstructionService
+	recipes map[string]benchmark.BenchmarkRecipe
+}
+
+func (a benchmarkComparisonAdapter) ReturnOver(ctx context.Context, recipeID string, start, end time.Time) (performancehistory.BenchmarkReturn, error) {
+	result, err := a.engine.CalculateReturn(ctx, recipeID, start, end, benchmark.RequirementForPreview())
+	if err != nil {
+		return performancehistory.BenchmarkReturn{}, err
+	}
+	return performancehistory.BenchmarkReturn{
+		RecipeID:         recipeID,
+		Name:             a.recipes[recipeID].Name,
+		ReturnPercentage: result.ReturnPercentage,
+		EffectiveStart:   result.EffectiveStart,
+		EffectiveEnd:     result.EffectiveEnd,
+		Quality:          string(result.DataMetadata.Quality),
+		Synthetic:        result.DataMetadata.IsSynthetic,
+	}, nil
+}
+
 // portfolioSnapshotAdapter preserves the private daily cost-basis/composition
 // archive. Ranked leaderboards, profiles, and achievements do not consume it.
 type portfolioSnapshotAdapter struct {
@@ -506,6 +534,11 @@ func main() {
 		benchmark.Recipes,
 		benchmark.NewSnapshotRecipeResolver(benchmark.DefaultRecipeSnapshots()),
 	)
+	// The Performance tab's benchmark comparison reuses the SAME construction
+	// engine the achievements pipeline uses — there is no second benchmark path.
+	historySvc.SetBenchmark(benchmarkComparisonAdapter{
+		engine: benchmarkEngine, recipes: benchmark.Recipes,
+	})
 	rulesEngine := benchmark.NewRulesEngine(benchmark.DefaultEvaluators())
 	achievementsSvc := achievements.NewService(
 		repos.achievements,

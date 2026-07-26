@@ -296,6 +296,12 @@ type PerformanceSummaryResponse struct {
 	Economic       EconomicPerformance    `json:"economic"`
 	Attribution    PerformanceAttribution `json:"attribution"`
 	Reconciliation ReconciliationStatus   `json:"reconciliation"`
+	// EconomicBreakdown is the display-ready decomposition reconciliation
+	// already verifies (realized + unrealized + income - standalone fees).
+	EconomicBreakdown EconomicAttribution `json:"economic_breakdown"`
+	// Contributions ranks instruments by contribution in percentage points.
+	// Read ContributionAnalysis' doc comment for its honest scope limits.
+	Contributions ContributionAnalysis `json:"contributions"`
 }
 
 type PerformanceAttribution struct {
@@ -347,6 +353,13 @@ type PortfolioSummary struct {
 	Fees                   FeeMetrics              `json:"fees"`
 	EconomicPerformance    EconomicPerformance     `json:"economic_performance"`
 	Reconciliation         ReconciliationStatus    `json:"reconciliation"`
+
+	// EconomicAttribution and Contributions are computed alongside the summary
+	// but are NOT part of the portfolio-state DTO: they are performance-layer
+	// concerns, serialized only by PerformanceSummaryResponse. `json:"-"` keeps
+	// the two DTOs separately owned even though one calculation feeds both.
+	EconomicAttribution EconomicAttribution  `json:"-"`
+	Contributions       ContributionAnalysis `json:"-"`
 }
 
 // RankedPerformanceView is percentage-only competitive performance. It must
