@@ -778,6 +778,40 @@ adapter does not currently populate it.
 Historical prices are exposed internally for benchmark evaluation only.
 The FX implementation is a fixed development table, not a live currency feed.
 
+## Instrument identity
+
+A ticker is not an identity: it changes (FB to META), it is reused after a
+delisting, and it collides across exchanges. `internal/instrument` adds a stable
+one. `instrument_master` holds an immutable internal UUID plus provider
+identifiers (FIGI, composite/share-class FIGI, ISIN, CUSIP, CIK);
+`instrument_aliases` holds every identifier the instrument is or was known by,
+each with a `valid_from`/`valid_to` window. Uniqueness on tickers is scoped to
+the ACTIVE window and to `(exchange_code, mic)`, never global.
+
+Note the table is `instrument_master`, not `instruments`: `instruments`
+(migration 0004) is the unrelated market-data search catalog and is untouched.
+
+Lookups are active-only by default; `FindInstrumentByAliasAsOf` resolves an
+identifier as it stood at a past instant, which is what historical holdings
+need. `Resolver.ResolveOrCreate` checks the local register first and calls
+OpenFIGI only on a miss. One candidate is `resolved` and creates the instrument
+and its aliases; several candidates are `ambiguous` and create nothing (an
+arbitrary pick would mint a wrong identity); none is `unresolved`, which is an
+expected outcome rather than an error. A rate limit or 5xx surfaces as an error
+and is never flattened into "no data". `Resolver.ChangeTicker` closes the old
+ticker alias and opens a new one, leaving the FIGI and the internal id alone.
+
+Configuration is `OPENFIGI_ENABLED`, `OPENFIGI_API_KEY` (optional — OpenFIGI
+allows unauthenticated low-volume use; never logged), `OPENFIGI_BASE_URL` and
+`OPENFIGI_REQUEST_TIMEOUT`.
+
+**Integration status: standalone.** Nothing consumes this layer yet. Positions
+and activities carry a nullable `instrument_id` column that is never populated;
+the buy path, entitlement discovery and the income/corporate-action pipelines
+still key on the ticker string, and legacy rows are not backfilled. OpenFIGI's
+`/v3/search` and `/v3/filter` endpoints are not implemented. All of that is
+future work.
+
 ## Current, legacy, and not implemented
 
 - **Current:** portfolio lifecycle, atomic persistent ranked state, canonical

@@ -6,6 +6,7 @@
 package providerhttp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -59,11 +60,23 @@ func (e *StatusError) Error() string {
 // returns the response body on success. Retries are applied for 429, 5xx and
 // transport errors; other 4xx fail immediately.
 func (c *Client) GetJSON(ctx context.Context, url string, decorate func(*http.Request)) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, url, nil, decorate)
+}
+
+// PostJSON issues a POST with a JSON body, applying the same retry policy as
+// GetJSON. The body is re-created per attempt so retries are safe. Only use it
+// for idempotent provider endpoints (e.g. OpenFIGI mapping, which is a pure
+// lookup despite being a POST).
+func (c *Client) PostJSON(ctx context.Context, url string, body []byte, decorate func(*http.Request)) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, url, body, decorate)
+}
+
+func (c *Client) do(ctx context.Context, method, url string, body []byte, decorate func(*http.Request)) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= MaxAttempts; attempt++ {
-		body, retryAfter, err := c.attempt(ctx, url, decorate)
+		respBody, retryAfter, err := c.attempt(ctx, method, url, body, decorate)
 		if err == nil {
-			return body, nil
+			return respBody, nil
 		}
 		lastErr = err
 		var statusErr *StatusError
@@ -95,7 +108,7 @@ func (c *Client) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
-func (c *Client) attempt(ctx context.Context, url string, decorate func(*http.Request)) ([]byte, time.Duration, error) {
+func (c *Client) attempt(ctx context.Context, method, url string, reqBody []byte, decorate func(*http.Request)) ([]byte, time.Duration, error) {
 	timeout := c.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -103,11 +116,19 @@ func (c *Client) attempt(ctx context.Context, url string, decorate func(*http.Re
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	// A fresh reader per attempt keeps retries safe.
+	var payload io.Reader
+	if reqBody != nil {
+		payload = bytes.NewReader(reqBody)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, method, url, payload)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if decorate != nil {
 		decorate(req)
 	}

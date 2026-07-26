@@ -35,6 +35,7 @@ const (
 	defaultProviderTimeout        = 10 * time.Second
 	defaultFMPDailyBudget         = 250
 	defaultDataUsageMode          = "personal"
+	defaultOpenFIGIBaseURL        = "https://api.openfigi.com"
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -116,6 +117,13 @@ type Config struct {
 	// beyond a startup log line.
 	DataUsageMode string
 
+	// OpenFIGI instrument identity resolution. The API key is OPTIONAL:
+	// OpenFIGI permits unauthenticated low-volume use. It is never logged.
+	OpenFIGIEnabled        bool
+	OpenFIGIAPIKey         string
+	OpenFIGIBaseURL        string
+	OpenFIGIRequestTimeout time.Duration
+
 	GoogleAuthEnabled bool
 	GoogleClientID    string
 	AppleAuthEnabled  bool
@@ -194,6 +202,11 @@ func Load() Config {
 		FMPDailyRequestBudget: getEnvInt("FMP_DAILY_REQUEST_BUDGET", defaultFMPDailyBudget),
 
 		DataUsageMode: getEnv("DATA_USAGE_MODE", defaultDataUsageMode),
+
+		OpenFIGIEnabled:        getEnvBool("OPENFIGI_ENABLED", false),
+		OpenFIGIAPIKey:         getEnv("OPENFIGI_API_KEY", ""),
+		OpenFIGIBaseURL:        getEnv("OPENFIGI_BASE_URL", defaultOpenFIGIBaseURL),
+		OpenFIGIRequestTimeout: getEnvDuration("OPENFIGI_REQUEST_TIMEOUT", defaultProviderTimeout),
 
 		GoogleAuthEnabled: getEnvBool("GOOGLE_AUTH_ENABLED", false),
 		GoogleClientID:    getEnv("GOOGLE_CLIENT_ID", ""),
