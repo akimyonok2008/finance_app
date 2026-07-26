@@ -212,6 +212,50 @@ func (r *PostgresRepository) ListActivities(ctx context.Context, userID string, 
 	return out, rows.Err()
 }
 
+// ListActivitiesByPositionEpisode returns every activity sharing the given
+// position episode id, scoped to userID for ownership. It uses the
+// (portfolio_id, position_episode_id, occurred_at) index from migration 0018
+// (portfolio_activities_episode_id_idx) rather than scanning the full ledger.
+func (r *PostgresRepository) ListActivitiesByPositionEpisode(ctx context.Context, userID, episodeID string) ([]Activity, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, COALESCE(request_id,''), portfolio_id, user_id, activity_type,
+		       COALESCE(symbol,''), COALESCE(asset_type,''), currency, quantity,
+		       unit_price, gross_amount, cost_basis_allocated,
+		       realized_gain_loss_base, realized_gain_loss_percentage,
+		       occurred_at, portfolio_version, metadata_json, created_at,
+		       position_episode_id
+		FROM portfolio_activities
+		WHERE user_id=$1 AND position_episode_id=$2
+		ORDER BY occurred_at ASC, created_at ASC`, userID, episodeID)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list activities by episode: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Activity, 0)
+	for rows.Next() {
+		var activity Activity
+		var activityType string
+		var metadata []byte
+		var episode *string
+		if err := rows.Scan(&activity.ID, &activity.RequestID, &activity.PortfolioID,
+			&activity.UserID, &activityType, &activity.Symbol, &activity.AssetType,
+			&activity.Currency, &activity.Quantity, &activity.UnitPrice,
+			&activity.GrossAmount, &activity.CostBasisAllocated,
+			&activity.RealizedGainLossBase, &activity.RealizedGainLossPercentage,
+			&activity.OccurredAt, &activity.PortfolioVersion, &metadata,
+			&activity.CreatedAt, &episode); err != nil {
+			return nil, fmt.Errorf("portfolio: scan episode activity: %w", err)
+		}
+		activity.Type = ActivityType(activityType)
+		_ = json.Unmarshal(metadata, &activity.Metadata)
+		if episode != nil {
+			activity.PositionEpisodeID = *episode
+		}
+		out = append(out, activity)
+	}
+	return out, rows.Err()
+}
+
 // CreateArchiveSnapshot inserts at most one snapshot per portfolio per UTC day.
 // Uniqueness is enforced by the database (migration 0010), so concurrent workers
 // cannot create duplicates; inserted=false means today's row already existed.

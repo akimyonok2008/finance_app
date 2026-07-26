@@ -624,14 +624,24 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 			}
 		case ActivityCashDividend, ActivityReinvestedDividend:
 			result.income.DividendsBase += amountBase
-		case ActivityETFDistribution, ActivityCapitalGainsDistribution, ActivityReturnOfCapital:
+		case ActivityETFDistribution, ActivityCapitalGainsDistribution:
 			result.income.DistributionsBase += amountBase
+		case ActivityReturnOfCapital:
+			// Return of capital is NOT ordinary income (it reduces the paying
+			// position's cost basis rather than representing a return on it), so
+			// it is disclosed separately and excluded from TotalIncomeBase.
+			result.income.ReturnOfCapitalBase += amountBase
 		case ActivityInterestIncome, ActivityBondCoupon, ActivityCashInterest:
 			result.income.InterestBase += amountBase
 		case ActivityStakingReward, ActivityOtherIncome:
 			result.income.OtherIncomeBase += amountBase
 		case ActivityBuyFee, ActivitySellFee:
 			result.fees.TransactionFeesBase += amountBase
+			// Every sell_fee/buy_fee activity is created exclusively as a grouped
+			// leg of a buy/sell mutation (coordinator.go), so its amount is always
+			// already netted into that trade's realized P&L / cost basis. Track it
+			// separately so reconciliation doesn't subtract it a second time.
+			result.fees.EmbeddedInRealizedPnLBase += amountBase
 		case ActivityManagementFee:
 			result.fees.ManagementFeesBase += amountBase
 		case ActivityCustodyFee:
@@ -644,6 +654,7 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 	result.income.DistributionsBase = round2(result.income.DistributionsBase)
 	result.income.InterestBase = round2(result.income.InterestBase)
 	result.income.OtherIncomeBase = round2(result.income.OtherIncomeBase)
+	result.income.ReturnOfCapitalBase = round2(result.income.ReturnOfCapitalBase)
 	result.income.TotalIncomeBase = round2(
 		result.income.DividendsBase + result.income.DistributionsBase +
 			result.income.InterestBase + result.income.OtherIncomeBase,
@@ -652,6 +663,7 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 	result.fees.ManagementFeesBase = round2(result.fees.ManagementFeesBase)
 	result.fees.CustodyFeesBase = round2(result.fees.CustodyFeesBase)
 	result.fees.OtherFeesBase = round2(result.fees.OtherFeesBase)
+	result.fees.EmbeddedInRealizedPnLBase = round2(result.fees.EmbeddedInRealizedPnLBase)
 	result.fees.TotalFeesBase = round2(
 		result.fees.TransactionFeesBase + result.fees.ManagementFeesBase +
 			result.fees.CustodyFeesBase + result.fees.OtherFeesBase,
@@ -755,11 +767,38 @@ func (s *Service) recordArchiveSnapshotFrom(ctx context.Context, summary *Portfo
 	return s.repo.CreateArchiveSnapshot(ctx, snapshot)
 }
 
+// closedPositionSummary builds the closed-position card from the COMPLETE
+// position-episode ledger (every partial sale plus the final sale/write-off
+// sharing pos.ID as their position_episode_id), not just the position row's
+// final snapshot. A partial sale never closes an episode; only the last sale
+// (or a write-off) does, so the position row itself only ever reflects that
+// last leg's realized figures. Aggregating across the full episode is what
+// makes a position with multiple partial sales report correct totals.
+//
+// Legacy closed positions recorded before the episode ledger existed (or
+// migrated without complete activity history) fall back to the position row's
+// own fields rather than failing or fabricating history.
 func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (ClosedPositionSummary, error) {
-	costBase, err := s.fx.Convert(ctx, pos.Quantity*pos.AverageBuyPrice, pos.Currency, fx.BaseCurrency)
+	episodeActivities, err := s.repo.ListActivitiesByPositionEpisode(ctx, pos.UserID, pos.ID)
 	if err != nil {
-		return ClosedPositionSummary{}, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
+		return ClosedPositionSummary{}, err
 	}
+
+	var totalRealizedBase, totalBasisLocal float64
+	var haveClosingLeg bool
+	for _, a := range episodeActivities {
+		switch a.Type {
+		case ActivitySell, ActivityWriteOff:
+			haveClosingLeg = true
+			if a.RealizedGainLossBase != nil {
+				totalRealizedBase += *a.RealizedGainLossBase
+			}
+			if a.CostBasisAllocated != nil {
+				totalBasisLocal += *a.CostBasisAllocated
+			}
+		}
+	}
+
 	closePrice := 0.0
 	if pos.ClosePrice != nil {
 		closePrice = *pos.ClosePrice
@@ -767,6 +806,40 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 	closedAt := ""
 	if pos.ClosedAt != nil {
 		closedAt = pos.ClosedAt.Format(time.RFC3339)
+	}
+
+	if !haveClosingLeg {
+		// Legacy fallback: no (or incomplete) episode ledger history. Use the
+		// position row's own final snapshot rather than fabricating a history
+		// we cannot reconstruct.
+		costBase, err := s.fx.Convert(ctx, pos.Quantity*pos.AverageBuyPrice, pos.Currency, fx.BaseCurrency)
+		if err != nil {
+			return ClosedPositionSummary{}, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
+		}
+		return ClosedPositionSummary{
+			ID:                         pos.ID,
+			Symbol:                     pos.Symbol,
+			AssetType:                  pos.AssetType,
+			Quantity:                   pos.Quantity,
+			BaselinePrice:              pos.AverageBuyPrice,
+			BaselineCurrency:           pos.Currency,
+			ClosePrice:                 round2(closePrice),
+			ClosePriceCurrency:         firstNonEmpty(pos.CloseCurrency, pos.Currency),
+			ClosedAt:                   closedAt,
+			RealizedGainLossBase:       round2(pos.RealizedGainLossBase),
+			RealizedGainLossPercentage: round2(pos.RealizedGainLossPercentage),
+			ClosedCostBasisBase:        round2(costBase),
+			BaseCurrency:               fx.BaseCurrency,
+		}, nil
+	}
+
+	basisBase, err := s.fx.Convert(ctx, totalBasisLocal, pos.Currency, fx.BaseCurrency)
+	if err != nil {
+		return ClosedPositionSummary{}, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
+	}
+	realizedPct := pos.RealizedGainLossPercentage
+	if basisBase > 0 {
+		realizedPct = totalRealizedBase / basisBase * 100
 	}
 	return ClosedPositionSummary{
 		ID:                         pos.ID,
@@ -778,9 +851,9 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 		ClosePrice:                 round2(closePrice),
 		ClosePriceCurrency:         firstNonEmpty(pos.CloseCurrency, pos.Currency),
 		ClosedAt:                   closedAt,
-		RealizedGainLossBase:       round2(pos.RealizedGainLossBase),
-		RealizedGainLossPercentage: round2(pos.RealizedGainLossPercentage),
-		ClosedCostBasisBase:        round2(costBase),
+		RealizedGainLossBase:       round2(totalRealizedBase),
+		RealizedGainLossPercentage: round2(realizedPct),
+		ClosedCostBasisBase:        round2(basisBase),
 		BaseCurrency:               fx.BaseCurrency,
 	}, nil
 }

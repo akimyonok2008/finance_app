@@ -309,6 +309,11 @@ type IncomeMetrics struct {
 	InterestBase      float64 `json:"interest_base"`
 	OtherIncomeBase   float64 `json:"other_income_base"`
 	TotalIncomeBase   float64 `json:"total_income_base"`
+	// ReturnOfCapitalBase is disclosed separately for audit visibility. Return
+	// of capital is NOT ordinary income (it is a basis-reducing cash credit),
+	// so it is deliberately excluded from TotalIncomeBase. See
+	// backend/README.md for the documented accounting policy.
+	ReturnOfCapitalBase float64 `json:"return_of_capital_base"`
 }
 
 type FeeMetrics struct {
@@ -317,6 +322,13 @@ type FeeMetrics struct {
 	CustodyFeesBase     float64 `json:"custody_fees_base"`
 	OtherFeesBase       float64 `json:"other_fees_base"`
 	TotalFeesBase       float64 `json:"total_fees_base"`
+	// EmbeddedInRealizedPnLBase discloses the portion of TotalFeesBase that is
+	// a sale fee already netted into RealizedMetrics.RealizedPnLBase (canonical
+	// sale contract: net proceeds = gross proceeds - sale fee, realized P&L =
+	// net proceeds - allocated cost basis). It is shown for fee-reporting
+	// audit purposes only and must never be subtracted a second time from
+	// economic attribution — see ReconcilePortfolioFinancials.
+	EmbeddedInRealizedPnLBase float64 `json:"embedded_in_realized_pnl_base"`
 }
 
 type EconomicPerformance struct {

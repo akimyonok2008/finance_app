@@ -949,11 +949,22 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 	if existing, ok := cashBalance(oldCash, currency); ok {
 		balance.CreatedAt = existing.CreatedAt
 	}
+	// Symbol-specific income (dividends, distributions, coupons, etc.) must
+	// reference the paying instrument's open position episode so the closed-
+	// episode aggregator can find it later; account-level income (interest,
+	// other-provider income with no symbol) has no episode to attach to.
+	episodeID := ""
+	if req.Income.Symbol != "" {
+		if pos := findOpenBySymbol(oldOpen, req.Income.Symbol); pos != nil {
+			episodeID = pos.ID
+		}
+	}
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: incomeActivityType(req.Income.Subtype), Symbol: req.Income.Symbol,
 		Currency: currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
-		CreatedAt: now, Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance,
+		CreatedAt: now, PositionEpisodeID: episodeID,
+		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance,
 			incomeMetadata(req.Income, net)),
 	}
 	return mutationPlan{
@@ -1084,13 +1095,15 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityReinvestedDividend, Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
 		Currency: quote.Currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
-		CreatedAt: now, Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, incomeMeta),
+		CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
+		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, incomeMeta),
 	}
 	buyLeg := Activity{
 		ID: uuid.NewString(), RequestID: "", PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityBuy, Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
 		Currency: quote.Currency, Quantity: floatPointer(qty), UnitPrice: floatPointer(price),
 		GrossAmount: net, OccurredAt: now, CreatedAt: now,
+		GroupID: groupID, PositionEpisodeID: result.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, map[string]any{
 			"activity_group_id":         groupID,
 			"component":                 "reinvestment_buy",
@@ -1164,7 +1177,8 @@ func (c *MutationCoordinator) planReturnOfCapital(req MutationRequest, pf *Portf
 		Type: ActivityReturnOfCapital, Symbol: req.Income.Symbol, AssetType: existing.AssetType,
 		Currency: currency, GrossAmount: net, CostBasisAllocated: floatPointer(round2(basisReduction)),
 		OccurredAt: occurredAt(req.Income.OccurredAt, now), CreatedAt: now,
-		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, meta),
+		PositionEpisodeID: existing.ID,
+		Metadata:          activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, meta),
 	}
 	return mutationPlan{
 		newOpen: replaceOrAppendPosition(oldOpen, &updated), newCash: replaceCash(oldCash, balance),
@@ -1205,6 +1219,7 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 		Type: ActivityStockDividend, Symbol: req.Income.Symbol, AssetType: existing.AssetType,
 		Currency: existing.Currency, Quantity: floatPointer(updated.Quantity - existing.Quantity),
 		OccurredAt: occurredAt(req.Income.OccurredAt, now), CreatedAt: now,
+		PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.Income.Provenance, map[string]any{
 			"income_subtype":    string(IncomeStockDividendSub),
 			"ratio_numerator":   num,
@@ -1292,7 +1307,8 @@ func (c *MutationCoordinator) planWriteOff(req MutationRequest, pf *Portfolio, o
 		Quantity: floatPointer(existing.Quantity), GrossAmount: 0,
 		CostBasisAllocated: floatPointer(allocatedBasis), RealizedGainLossBase: floatPointer(realizedBase),
 		RealizedGainLossPercentage: floatPointer(-100), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
-		CreatedAt: now, Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.CorpAction.Provenance, map[string]any{
+		CreatedAt: now, PositionEpisodeID: existing.ID,
+		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.CorpAction.Provenance, map[string]any{
 			"corporate_action": string(CorpWriteOff),
 		}),
 	}
@@ -1330,7 +1346,8 @@ func (c *MutationCoordinator) planSplit(req MutationRequest, pf *Portfolio, oldO
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: splitActivityType(subtype), Symbol: existing.Symbol, AssetType: existing.AssetType,
 		Currency: existing.Currency, Quantity: floatPointer(updated.Quantity), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
-		CreatedAt: now, Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
+		CreatedAt: now, PositionEpisodeID: existing.ID,
+		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
 			"corporate_action":  string(subtype),
 			"ratio_numerator":   req.CorpAction.RatioNumerator,
 			"ratio_denominator": req.CorpAction.RatioDenominator,
@@ -1361,7 +1378,8 @@ func (c *MutationCoordinator) planSymbolChange(req MutationRequest, pf *Portfoli
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivitySymbolChange, Symbol: req.CorpAction.NewSymbol, AssetType: existing.AssetType,
 		Currency: existing.Currency, OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
-		CreatedAt: now, Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
+		CreatedAt: now, PositionEpisodeID: existing.ID,
+		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
 			"corporate_action": string(CorpSymbolChange),
 			"old_symbol":       existing.Symbol,
 			"new_symbol":       req.CorpAction.NewSymbol,

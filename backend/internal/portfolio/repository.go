@@ -34,6 +34,12 @@ type Repository interface {
 	ListOpenPositionsBySymbol(ctx context.Context, symbol string) ([]*Position, error)
 	ListCashBalances(ctx context.Context, userID string) ([]CashBalance, error)
 	ListActivities(ctx context.Context, userID string, limit int) ([]Activity, error)
+	// ListActivitiesByPositionEpisode returns every activity sharing the given
+	// position episode id (all partial sales, the final sale/write-off, and the
+	// opening buy), scoped to userID for ownership. It is the canonical source
+	// for building a complete closed-position summary — a closed episode must
+	// never be reconstructed from only the final sale.
+	ListActivitiesByPositionEpisode(ctx context.Context, userID, episodeID string) ([]Activity, error)
 
 	// CreateArchiveSnapshot is idempotent per (portfolio, UTC date): it returns
 	// inserted=false when a snapshot for that day already exists, so concurrent
@@ -214,6 +220,36 @@ func (r *InMemoryRepository) ListActivities(ctx context.Context, userID string, 
 	for i := len(items) - 1; i >= 0 && len(out) < limit; i-- {
 		out = append(out, cloneActivity(items[i]))
 	}
+	return out, nil
+}
+
+// ListActivitiesByPositionEpisode returns every activity for the given episode
+// (in chronological order), scoped to the owning user. It uses the in-memory
+// per-portfolio activity slice directly rather than scanning every user's
+// ledger.
+func (r *InMemoryRepository) ListActivitiesByPositionEpisode(ctx context.Context, userID, episodeID string) ([]Activity, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.userPortfolio[userID]
+	if !ok {
+		return []Activity{}, nil
+	}
+	items := r.aggregates[id].activities
+	out := make([]Activity, 0)
+	for _, a := range items {
+		if a.PositionEpisodeID == episodeID {
+			out = append(out, cloneActivity(a))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].OccurredAt.Equal(out[j].OccurredAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].OccurredAt.Before(out[j].OccurredAt)
+	})
 	return out, nil
 }
 

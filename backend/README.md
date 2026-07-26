@@ -18,6 +18,19 @@ mutation. Buys and sales settle immediately and use weighted-average basis; a
 partial sale leaves remaining average basis unchanged. Sale proceeds are cash,
 so realized gain is attribution and is not added to current value twice.
 
+**Canonical sale contract.** `gross proceeds = quantity × execution price`,
+`net proceeds = gross proceeds − sale fee`, `realized P&L = net proceeds −
+allocated cost basis`. Cash is credited the **net** proceeds exactly once, and
+realized P&L already has the sale fee netted in exactly once. The sale also
+posts a separate `sell_fee` ledger row (grouped with the sale via
+`activity_group_id`/`position_episode_id`) purely for fee-reporting and audit
+visibility (`PortfolioSummary.fees.transaction_fees_base` still displays it) —
+it is never deducted a second time. `PortfolioSummary.fees` discloses this via
+`embedded_in_realized_pnl_base`; `ReconcilePortfolioFinancials` subtracts only
+`total_fees_base − embedded_in_realized_pnl_base` (the standalone fees) from
+economic attribution, so the sale fee is never double-counted.
+`SellPreview` and the committed sell share the identical formula.
+
 Legacy create/update/delete handlers remain available to internal correction
 tests but are no longer registered as public routes. Product clients use
 `/portfolio/buys` and `/portfolio/sells`.
@@ -30,8 +43,32 @@ never reopening the closed one. `portfolio_activities.position_episode_id` is
 a first-class, FK-constrained column (migration `0018`) pointing at the
 owning `positions.id`; it was previously derivable only from
 `metadata_json`, which is still populated for backward read-compatibility but
-is no longer the source of truth. `ListClosedPositions` reads directly from
-`positions` rows with `status = 'closed'`.
+is no longer the source of truth. `ListClosedPositions` reads the `positions`
+row with `status = 'closed'` for identity/final fields, but its
+**realized P&L, cost basis, and return percentage are aggregated from every
+activity in the episode** (`Repository.ListActivitiesByPositionEpisode`,
+indexed on `(portfolio_id, position_episode_id, occurred_at)` from migration
+`0018`) — every partial sale plus the final sale/write-off — not just the last
+sale's fields on the position row. A partial sale never closes an episode; a
+rebuy of the same symbol after closure always starts a **new** episode and
+never touches the old one's activities. Closed positions recorded before this
+episode-ledger aggregation existed (or otherwise missing complete activity
+history) fall back to the position row's own final snapshot rather than
+failing or fabricating history.
+
+**Return of capital is not ordinary income.** `RecordIncome` with
+`return_of_capital` credits net cash and reduces the paying position's
+remaining cost basis (floored at zero; any excess recorded separately), but is
+excluded from `PortfolioSummary.income.total_income_base` — it is disclosed
+separately as `income.return_of_capital_base` so reconciliation stays
+consistent without double-counting the basis-reduction effect as ordinary
+income. This is tracking only, never tax advice.
+
+Migration `0019` aligns the Postgres `portfolio_activities` CHECK constraints
+with the full `ActivityType` enum (the earlier `0014` migration only
+whitelisted the first wave of income/fee types); a table-driven Postgres
+integration test enumerates every `ActivityType` constant to prevent future
+enum/whitelist drift.
 
 **Corrections.** `POST /portfolio/activities/{id}/correction` reconciles a
 user-recorded `deposit` or `withdrawal` to its actual amount by posting a
