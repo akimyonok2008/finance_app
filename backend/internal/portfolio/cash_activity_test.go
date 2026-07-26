@@ -193,6 +193,10 @@ func TestCashMutationIdempotencyAndConcurrentOverspend(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, otherUser.Duplicate, "idempotency keys are scoped per portfolio")
 
+	// Concurrent buys against one cash balance. Automatic purchase funding is
+	// the DEFAULT: neither buy is rejected for insufficient cash — the shortfall
+	// is funded automatically, in the instrument's quote currency, and cash can
+	// never go negative.
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for i, symbol := range []string{"MSFT", "NVDA"} {
@@ -205,28 +209,47 @@ func TestCashMutationIdempotencyAndConcurrentOverspend(t *testing.T) {
 		}(i, symbol)
 	}
 	wg.Wait()
-	successes := 0
 	for _, err := range errs {
-		if err == nil {
-			successes++
-		} else {
-			assert.ErrorIs(t, err, ErrInsufficientCash)
-		}
+		require.NoError(t, err, "automatic funding must not reject a purchase")
 	}
-	assert.Equal(t, 1, successes)
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, cash[0].Amount, 0.0)
 
 	activities, err := repo.ListActivities(ctx(), "u1", 100)
 	require.NoError(t, err)
-	deposits := 0
+	userDeposits, autoFunding := 0, 0
 	for _, activity := range activities {
-		if activity.Type == ActivityDeposit {
-			deposits++
+		if activity.Type != ActivityDeposit {
+			continue
+		}
+		if activity.Metadata["funding_reason"] == "purchase_shortfall" {
+			autoFunding++
+			assert.Equal(t, true, activity.Metadata["automatic"])
+			assert.NotEmpty(t, activity.GroupID, "funding must be grouped with its purchase")
+		} else {
+			userDeposits++
 		}
 	}
-	assert.Equal(t, 1, deposits)
+	assert.Equal(t, 1, userDeposits, "the user's own deposit is recorded exactly once")
+	assert.GreaterOrEqual(t, autoFunding, 1, "at least one purchase needed automatic funding")
+}
+
+// TestBuyRejectsWhenAutoFundingDisabled proves the opt-out still works: with the
+// portfolio preference off, a purchase beyond available cash is refused.
+func TestBuyRejectsWhenAutoFundingDisabled(t *testing.T) {
+	svc, repo, _, _ := newTxTestService()
+	_, err := svc.DepositCash(ctx(), "u1", "seed", CashFlowInput{Currency: "USD", Amount: 10})
+	require.NoError(t, err)
+	pf, err := repo.EnsureDefaultPortfolio(ctx(), "u1")
+	require.NoError(t, err)
+	require.True(t, pf.AutoFundPurchases, "automatic funding is on by default")
+	require.NoError(t, repo.SetAutoFundPurchases(ctx(), "u1", false))
+
+	_, err = svc.BuyPosition(ctx(), "u1", "blocked", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 3,
+	})
+	assert.ErrorIs(t, err, ErrInsufficientCash)
 }
 
 func TestCashValidation(t *testing.T) {

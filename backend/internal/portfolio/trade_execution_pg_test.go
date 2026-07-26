@@ -1,0 +1,179 @@
+package portfolio
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/prices"
+)
+
+// TestPG_AutomaticFundingGroupPersists proves against a real database that an
+// automatically-funded purchase commits all three legs (funding deposit, buy,
+// buy fee) under one activity group, that the provenance columns added by
+// migration 0021 are populated, and that the CHECK constraints accept them.
+func TestPG_AutomaticFundingGroupPersists(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresRepository(pool)
+	userID := seedUser(t, pool)
+	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
+	ctx := context.Background()
+
+	// No cash at all: the entire purchase must be funded automatically.
+	_, err := svc.BuyPosition(ctx, userID, "pg-autofund", BuyInput{
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 2, Fee: 4,
+	})
+	require.NoError(t, err)
+
+	pf, err := repo.GetPortfolioByUser(ctx, userID)
+	require.NoError(t, err)
+	require.True(t, pf.AutoFundPurchases, "the preference column defaults to true")
+
+	type row struct {
+		kind        string
+		gross       float64
+		group       *string
+		priceSource *string
+		feeSource   *string
+		recordedAt  *time.Time
+		occurredAt  time.Time
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT activity_type, gross_amount, metadata_json->>'activity_group_id',
+		       execution_price_source, fee_source, recorded_at, occurred_at
+		FROM portfolio_activities WHERE portfolio_id=$1 ORDER BY activity_type`, pf.ID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var found []row
+	for rows.Next() {
+		var r row
+		require.NoError(t, rows.Scan(&r.kind, &r.gross, &r.group, &r.priceSource,
+			&r.feeSource, &r.recordedAt, &r.occurredAt))
+		found = append(found, r)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, found, 3, "funding + buy + fee all committed")
+
+	groups := map[string]bool{}
+	byKind := map[string]row{}
+	for _, r := range found {
+		require.NotNil(t, r.group, "%s must carry an activity group id", r.kind)
+		groups[*r.group] = true
+		byKind[r.kind] = r
+		require.NotNil(t, r.recordedAt, "recorded_at is populated")
+	}
+	assert.Len(t, groups, 1, "one purchase is one activity group")
+
+	// 2 x 195 + 4 = 394 funded, 390 gross buy, 4 fee.
+	assert.InDelta(t, 394.0, byKind["deposit"].gross, 1e-6)
+	assert.InDelta(t, 390.0, byKind["buy"].gross, 1e-6)
+	assert.InDelta(t, 4.0, byKind["buy_fee"].gross, 1e-6)
+
+	require.NotNil(t, byKind["buy"].priceSource)
+	assert.Equal(t, PriceSourceProviderEstimate, *byKind["buy"].priceSource)
+	require.NotNil(t, byKind["buy"].feeSource)
+	assert.Equal(t, FeeSourceUserRecorded, *byKind["buy"].feeSource)
+
+	// Cash landed at exactly zero, and the position basis includes the fee.
+	balances, err := repo.ListCashBalances(ctx, userID)
+	require.NoError(t, err)
+	for _, b := range balances {
+		if b.Currency == "USD" {
+			assert.InDelta(t, 0.0, b.Amount, 1e-6)
+		}
+	}
+	positions, err := svc.ListPositions(ctx, userID)
+	require.NoError(t, err)
+	require.Len(t, positions, 1)
+	assert.InDelta(t, 197.0, positions[0].AverageBuyPrice, 1e-6) // (390 + 4) / 2
+}
+
+// TestPG_BuyIdempotencyConstraint proves the (portfolio_id, request_id) unique
+// constraint plus the audit replay path leave exactly one committed effect when
+// the same idempotency key is retried.
+func TestPG_BuyIdempotencyConstraint(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresRepository(pool)
+	userID := seedUser(t, pool)
+	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
+	ctx := context.Background()
+
+	_, err := svc.DepositCash(ctx, userID, "pg-idem-dep", CashFlowInput{Currency: "USD", Amount: 5000})
+	require.NoError(t, err)
+
+	first, err := svc.BuyPosition(ctx, userID, "pg-idem-buy", BuyInput{
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 3, Fee: 2,
+	})
+	require.NoError(t, err)
+	retry, err := svc.BuyPosition(ctx, userID, "pg-idem-buy", BuyInput{
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 3, Fee: 2,
+	})
+	require.NoError(t, err)
+	assert.True(t, retry.Duplicate)
+	assert.Equal(t, first.PortfolioVersion, retry.PortfolioVersion)
+
+	pf, err := repo.GetPortfolioByUser(ctx, userID)
+	require.NoError(t, err)
+	var buys, fees int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE activity_type='buy'),
+		        count(*) FILTER (WHERE activity_type='buy_fee')
+		 FROM portfolio_activities WHERE portfolio_id=$1`, pf.ID).Scan(&buys, &fees))
+	assert.Equal(t, 1, buys)
+	assert.Equal(t, 1, fees)
+
+	positions, err := svc.ListPositions(ctx, userID)
+	require.NoError(t, err)
+	require.Len(t, positions, 1)
+	assert.InDelta(t, 3.0, positions[0].Quantity, 1e-6)
+}
+
+// TestPG_HistoricalQuantityValidation proves the conservative historical policy
+// reads the ledger through the aggregate transaction against a real database.
+func TestPG_HistoricalQuantityValidation(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresRepository(pool)
+	userID := seedUser(t, pool)
+	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
+	ctx := context.Background()
+
+	early := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	_, err := svc.BuyPosition(ctx, userID, "pg-hist-1", BuyInput{
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 5, EffectiveAt: &early,
+	})
+	require.NoError(t, err)
+	_, err = svc.BuyPosition(ctx, userID, "pg-hist-2", BuyInput{
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 20,
+	})
+	require.NoError(t, err)
+
+	positions, err := svc.ListPositions(ctx, userID)
+	require.NoError(t, err)
+	require.Len(t, positions, 1)
+	require.InDelta(t, 25.0, positions[0].Quantity, 1e-6)
+
+	// Only 5 units were held 9 days ago, even though 25 are held now.
+	backdated := early.Add(24 * time.Hour)
+	_, err = svc.SellPosition(ctx, userID, "pg-hist-sell", SellInput{
+		PositionID: positions[0].ID, Quantity: 10, EffectiveAt: &backdated,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
+
+	// The rejection committed nothing.
+	pf, err := repo.GetPortfolioByUser(ctx, userID)
+	require.NoError(t, err)
+	var sells int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM portfolio_activities WHERE portfolio_id=$1 AND activity_type='sell'`,
+		pf.ID).Scan(&sells))
+	assert.Zero(t, sells)
+	after, err := svc.ListPositions(ctx, userID)
+	require.NoError(t, err)
+	assert.InDelta(t, 25.0, after[0].Quantity, 1e-6)
+}

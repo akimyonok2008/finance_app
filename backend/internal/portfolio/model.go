@@ -117,9 +117,15 @@ type Portfolio struct {
 	// operation detection, and an optimistic check for API clients. It is not a
 	// substitute for the row lock: serialization comes from SELECT ... FOR UPDATE
 	// (Postgres) / the per-portfolio mutex (in-memory).
-	Version   int64
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Version int64
+	// AutoFundPurchases is a portfolio-level preference (default true). When
+	// true, a buy that exceeds the available cash in the instrument's quote
+	// currency automatically records a neutral funding deposit for exactly the
+	// shortfall instead of being rejected. When false, the buy is rejected with
+	// ErrInsufficientCash.
+	AutoFundPurchases bool
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // Position is a single manually-entered holding. AverageBuyPrice is the LOCKED
@@ -181,10 +187,70 @@ type ActivityCorrectionInput struct {
 	Reason       string
 }
 
+// Execution-price and fee provenance labels. They record HOW a recorded trade's
+// price and fee were obtained, so an estimate is never presented as a confirmed
+// broker execution. Stored on the activity (metadata + dedicated columns).
+const (
+	// PriceSourceUserRecorded: the user entered the real execution price.
+	PriceSourceUserRecorded = "user_recorded"
+	// PriceSourceProviderEstimate: no price was entered, so the latest tracked
+	// market quote was used as an estimate.
+	PriceSourceProviderEstimate = "provider_estimate"
+	// PriceSourceLegacyUnknown: backfilled rows recorded before provenance
+	// existed. Never written by new code.
+	PriceSourceLegacyUnknown = "legacy_unknown"
+
+	// FeeSourceUserRecorded: the user entered a fee.
+	FeeSourceUserRecorded = "user_recorded"
+	// FeeSourceDefaultZero: no fee was entered, so zero was assumed.
+	FeeSourceDefaultZero = "default_zero"
+)
+
+// BuyInput records a real-world purchase. Only Symbol/AssetType/Quantity are
+// required: the user records the essential action and the backend infers the
+// accounting consequences.
+//
+//   - ExecutionPrice: the real per-unit price paid. Zero means "estimate it from
+//     the latest tracked quote" (recorded as provider_estimate).
+//   - Fee: the transaction fee actually charged. Zero means default_zero.
+//   - EffectiveAt: when the trade really happened. Nil means now.
+//
+// Basis convention (documented in backend/README.md): a position's cost basis
+// INCLUDES the purchase price and the buy fee, mirroring the canonical sale
+// contract where realized P&L is measured net of the sale fee.
 type BuyInput struct {
-	Symbol    string
-	AssetType string
-	Quantity  float64
+	Symbol         string
+	AssetType      string
+	Quantity       float64
+	ExecutionPrice float64
+	Fee            float64
+	EffectiveAt    *time.Time
+}
+
+// BuyPreview is the non-mutating projection of what a buy would do. It is
+// computed from committed state and never writes anything.
+type BuyPreview struct {
+	Symbol               string  `json:"symbol"`
+	AssetType            string  `json:"asset_type"`
+	Quantity             float64 `json:"quantity"`
+	ExecutionPrice       float64 `json:"execution_price"`
+	ExecutionPriceSource string  `json:"execution_price_source"`
+	Fee                  float64 `json:"fee"`
+	FeeSource            string  `json:"fee_source"`
+	GrossPurchaseAmount  float64 `json:"gross_purchase_amount"`
+	TotalCashRequired    float64 `json:"total_cash_required"`
+	AvailableCash        float64 `json:"available_cash"`
+	CashUsed             float64 `json:"cash_used"`
+	AutomaticFunding     float64 `json:"automatic_funding_amount"`
+	RemainingCash        float64 `json:"remaining_cash"`
+	CreatesNewEpisode    bool    `json:"creates_new_episode"`
+	PositionEpisodeID    string  `json:"position_episode_id,omitempty"`
+	ResultingQuantity    float64 `json:"resulting_quantity"`
+	ResultingAverageCost float64 `json:"resulting_average_cost"`
+	EffectiveAt          string  `json:"effective_at"`
+	Currency             string  `json:"currency"`
+	BaseCurrency         string  `json:"base_currency"`
+	CalculationStatus    string  `json:"calculation_status"`
 }
 
 type SellInput struct {
@@ -204,6 +270,10 @@ type SellPreview struct {
 	SoldQuantity         float64 `json:"sold_quantity"`
 	RemainingQuantity    float64 `json:"remaining_quantity"`
 	ExecutionPrice       float64 `json:"execution_price"`
+	ExecutionPriceSource string  `json:"execution_price_source"`
+	FeeSource            string  `json:"fee_source"`
+	EffectiveAt          string  `json:"effective_at"`
+	CalculationStatus    string  `json:"calculation_status"`
 	GrossProceeds        float64 `json:"gross_proceeds"`
 	Fee                  float64 `json:"fee"`
 	NetProceeds          float64 `json:"net_proceeds"`

@@ -332,6 +332,120 @@ func activityCategory(kind ActivityType) string {
 	}
 }
 
+// PreviewBuy projects what a purchase would do WITHOUT mutating anything. It
+// performs reads only (portfolio, positions, cash, quote) and writes no
+// activity, cash, position, episode, ranked or audit state. Calling it twice is
+// indistinguishable from calling it zero times.
+func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput) (BuyPreview, error) {
+	clean, err := validateAndNormalize(PositionInput{
+		Symbol: input.Symbol, AssetType: input.AssetType, Quantity: input.Quantity,
+	})
+	if err != nil {
+		return BuyPreview{}, err
+	}
+	if input.ExecutionPrice != 0 && !finitePositive(input.ExecutionPrice) {
+		return BuyPreview{}, ErrInvalidBuyPrice
+	}
+	if !isFinite(input.Fee) || input.Fee < 0 {
+		return BuyPreview{}, ErrInvalidBuyFee
+	}
+	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
+	if err != nil {
+		return BuyPreview{}, err
+	}
+
+	quote, quoteErr := s.provider.GetLatestPrice(ctx, clean.Symbol)
+	if quoteErr != nil || quote == nil {
+		return BuyPreview{}, ErrPriceProvider
+	}
+	currency := strings.ToUpper(strings.TrimSpace(quote.Currency))
+	if currency == "" {
+		currency = fx.BaseCurrency
+	}
+	price := input.ExecutionPrice
+	priceSource := PriceSourceUserRecorded
+	if price == 0 {
+		price = quote.Price
+		priceSource = PriceSourceProviderEstimate
+	}
+	if !finitePositive(price) {
+		return BuyPreview{}, ErrInvalidBuyPrice
+	}
+	feeSource := FeeSourceUserRecorded
+	if input.Fee == 0 {
+		feeSource = FeeSourceDefaultZero
+	}
+
+	gross := clean.Quantity * price
+	totalRequired := gross + input.Fee
+
+	balances, err := s.repo.ListCashBalances(ctx, userID)
+	if err != nil {
+		return BuyPreview{}, err
+	}
+	available := 0.0
+	for _, balance := range balances {
+		if balance.Currency == currency {
+			available = balance.Amount
+			break
+		}
+	}
+	funding := totalRequired - available
+	if funding < 1e-9 {
+		funding = 0
+	}
+	cashUsed := math.Min(available, totalRequired)
+	remaining := available + funding - totalRequired
+	if math.Abs(remaining) < 1e-9 {
+		remaining = 0
+	}
+
+	// Episode projection: an open episode in the same instrument/currency is
+	// extended; otherwise a new episode is created (including a rebuy after a
+	// full sale).
+	positions, err := s.repo.ListPositionsByUser(ctx, userID)
+	if err != nil {
+		return BuyPreview{}, err
+	}
+	preview := BuyPreview{
+		Symbol: clean.Symbol, AssetType: clean.AssetType, Quantity: clean.Quantity,
+		ExecutionPrice: price, ExecutionPriceSource: priceSource,
+		Fee: input.Fee, FeeSource: feeSource,
+		GrossPurchaseAmount: round2(gross), TotalCashRequired: round2(totalRequired),
+		AvailableCash: round2(available), CashUsed: round2(cashUsed),
+		AutomaticFunding: round2(funding), RemainingCash: round2(remaining),
+		CreatesNewEpisode: true, ResultingQuantity: clean.Quantity,
+		ResultingAverageCost: round2(totalRequired / clean.Quantity),
+		Currency:             currency, BaseCurrency: fx.BaseCurrency,
+		CalculationStatus: "complete",
+	}
+	for _, position := range positions {
+		if positionStatus(position) != PositionStatusOpen {
+			continue
+		}
+		if position.Symbol == clean.Symbol && position.AssetType == clean.AssetType &&
+			position.Currency == currency {
+			total := position.Quantity + clean.Quantity
+			preview.CreatesNewEpisode = false
+			preview.PositionEpisodeID = position.ID
+			preview.ResultingQuantity = total
+			preview.ResultingAverageCost = round2(
+				(position.Quantity*position.AverageBuyPrice + totalRequired) / total)
+			break
+		}
+	}
+	effectiveAt := time.Now().UTC()
+	if input.EffectiveAt != nil {
+		effectiveAt = input.EffectiveAt.UTC()
+	}
+	preview.EffectiveAt = effectiveAt.Format(time.RFC3339)
+	if funding > 0 && !pf.AutoFundPurchases {
+		// Surfaced rather than silently previewed as feasible.
+		preview.CalculationStatus = "insufficient_cash_auto_funding_disabled"
+	}
+	return preview, nil
+}
+
 func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInput) (SellPreview, error) {
 	position, err := s.repo.GetPosition(ctx, strings.TrimSpace(input.PositionID))
 	if err != nil || position.UserID != userID {
@@ -344,12 +458,22 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 		return SellPreview{}, ErrInvalidSaleQuantity
 	}
 	price := input.ExecutionPrice
+	priceSource := PriceSourceUserRecorded
 	if price == 0 {
 		quote, quoteErr := s.provider.GetLatestPrice(ctx, position.Symbol)
 		if quoteErr != nil || quote == nil {
 			return SellPreview{}, ErrPriceProvider
 		}
 		price = quote.Price
+		priceSource = PriceSourceProviderEstimate
+	}
+	feeSource := FeeSourceUserRecorded
+	if input.Fee == 0 {
+		feeSource = FeeSourceDefaultZero
+	}
+	effectiveAt := time.Now().UTC()
+	if input.EffectiveAt != nil {
+		effectiveAt = input.EffectiveAt.UTC()
 	}
 	if !finitePositive(price) {
 		return SellPreview{}, ErrInvalidSalePrice
@@ -373,6 +497,8 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 		PositionID: position.ID, PositionEpisodeID: position.ID, Symbol: position.Symbol,
 		AvailableQuantity: round2(position.Quantity), SoldQuantity: round2(input.Quantity),
 		RemainingQuantity: round2(remaining), ExecutionPrice: round2(price),
+		ExecutionPriceSource: priceSource, FeeSource: feeSource,
+		EffectiveAt: effectiveAt.Format(time.RFC3339), CalculationStatus: "complete",
 		GrossProceeds: round2(gross), Fee: round2(input.Fee), NetProceeds: round2(net),
 		AllocatedBasis: round2(allocatedBasis), EstimatedRealizedPnL: round2(realizedBase),
 		WillClosePosition: remaining == 0, ProceedsCurrency: position.Currency,

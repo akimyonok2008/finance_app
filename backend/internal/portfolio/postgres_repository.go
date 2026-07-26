@@ -54,9 +54,11 @@ func (r *PostgresRepository) EnsureDefaultPortfolio(ctx context.Context, userID 
 func (r *PostgresRepository) GetPortfolioByUser(ctx context.Context, userID string) (*Portfolio, error) {
 	var p Portfolio
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, user_id, name, currency, COALESCE(version,1), created_at, updated_at
+		`SELECT id, user_id, name, currency, COALESCE(version,1),
+		        COALESCE(auto_fund_purchases, TRUE), created_at, updated_at
 		 FROM portfolios WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID,
-	).Scan(&p.ID, &p.UserID, &p.Name, &p.Currency, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	).Scan(&p.ID, &p.UserID, &p.Name, &p.Currency, &p.Version, &p.AutoFundPurchases,
+		&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPortfolioNotFound
@@ -64,6 +66,20 @@ func (r *PostgresRepository) GetPortfolioByUser(ctx context.Context, userID stri
 		return nil, fmt.Errorf("portfolio: get portfolio: %w", err)
 	}
 	return &p, nil
+}
+
+// SetAutoFundPurchases toggles the automatic-purchase-funding preference.
+func (r *PostgresRepository) SetAutoFundPurchases(ctx context.Context, userID string, enabled bool) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE portfolios SET auto_fund_purchases=$2, updated_at=NOW() WHERE user_id=$1`,
+		userID, enabled)
+	if err != nil {
+		return fmt.Errorf("portfolio: set auto_fund_purchases: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPortfolioNotFound
+	}
+	return nil
 }
 
 const positionColumns = `id, user_id, portfolio_id, symbol, asset_type, quantity, average_buy_price, currency,

@@ -122,6 +122,7 @@ func New(d Deps) http.Handler {
 		r.Get("/portfolio/archives", portfolioHandler.Archives)
 		r.Post("/portfolio/deposits", portfolioHandler.DepositCash)
 		r.Post("/portfolio/withdrawals", portfolioHandler.WithdrawCash)
+		r.Post("/portfolio/buys/preview", portfolioHandler.PreviewBuy)
 		r.Post("/portfolio/buys", portfolioHandler.BuyPosition)
 		r.Post("/portfolio/sells/preview", portfolioHandler.PreviewSell)
 		r.Post("/portfolio/sells", portfolioHandler.SellPosition)

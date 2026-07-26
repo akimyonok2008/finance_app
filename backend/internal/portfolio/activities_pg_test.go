@@ -85,10 +85,17 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 		 WHERE portfolio_id=$1 AND activity_type='cash_dividend'`, pf.ID).Scan(&dividendRows))
 	assert.Equal(t, 1, dividendRows, "the dividend must be recorded exactly once despite the retry")
 
+	// The reinvestment's own group must contain exactly its two legs (the income
+	// row and the buy row). Other groups exist — every purchase is a group — so
+	// the assertion is scoped to the reinvestment's group id.
 	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT count(DISTINCT metadata_json ->> 'activity_group_id') FROM portfolio_activities
-		 WHERE portfolio_id=$1 AND metadata_json ? 'activity_group_id'`, pf.ID).Scan(&reinvestGroups))
-	assert.Equal(t, 1, reinvestGroups, "reinvested dividend legs share one activity group")
+		`SELECT count(*) FROM portfolio_activities
+		 WHERE portfolio_id=$1
+		   AND metadata_json ->> 'activity_group_id' = (
+		       SELECT metadata_json ->> 'activity_group_id' FROM portfolio_activities
+		       WHERE portfolio_id=$1 AND activity_type='reinvested_dividend' LIMIT 1
+		   )`, pf.ID).Scan(&reinvestGroups))
+	assert.Equal(t, 2, reinvestGroups, "reinvested dividend legs share one activity group")
 
 	// The ranked state is valid and the position was closed by the write-off.
 	state, err := performance.NewPostgresStateReader(pool).GetByPortfolio(ctx, pf.ID)

@@ -5,6 +5,10 @@ export type PositionFormState = {
   symbol: string;
   asset_type: AssetType;
   quantity: string;
+  /** Optional real execution details. Blank means "let the backend estimate". */
+  execution_price: string;
+  fee: string;
+  effective_at: string;
 };
 
 export type PositionFormErrors = Partial<
@@ -15,6 +19,9 @@ export const EMPTY_POSITION_FORM: PositionFormState = {
   symbol: "",
   asset_type: "stock",
   quantity: "",
+  execution_price: "",
+  fee: "",
+  effective_at: "",
 };
 
 const SYMBOL_PATTERN = /^[A-Z0-9.-]+$/;
@@ -50,6 +57,40 @@ export function validatePositionForm(
     errors.quantity = "Quantity must be greater than 0.";
   }
 
+  // Optional execution details. Blank is always valid: the backend then uses the
+  // latest quote / zero fee / now and labels the price as an estimate.
+  let executionPrice: number | undefined;
+  if (state.execution_price.trim() !== "") {
+    const parsed = Number(state.execution_price);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      errors.execution_price = "Execution price must be greater than 0.";
+    } else {
+      executionPrice = parsed;
+    }
+  }
+
+  let fee: number | undefined;
+  if (state.fee.trim() !== "") {
+    const parsed = Number(state.fee);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      errors.fee = "Fee cannot be negative.";
+    } else if (parsed > 0) {
+      fee = parsed;
+    }
+  }
+
+  let effectiveAt: string | undefined;
+  if (state.effective_at.trim() !== "") {
+    const parsed = new Date(state.effective_at);
+    if (Number.isNaN(parsed.getTime())) {
+      errors.effective_at = "Enter a valid date.";
+    } else if (parsed.getTime() > Date.now() + 60_000) {
+      errors.effective_at = "The trade date cannot be in the future.";
+    } else {
+      effectiveAt = parsed.toISOString();
+    }
+  }
+
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
   }
@@ -60,6 +101,9 @@ export function validatePositionForm(
       symbol,
       asset_type: state.asset_type,
       quantity,
+      ...(executionPrice !== undefined ? { execution_price: executionPrice } : {}),
+      ...(fee !== undefined ? { fee } : {}),
+      ...(effectiveAt !== undefined ? { effective_at: effectiveAt } : {}),
     },
   };
 }

@@ -267,18 +267,26 @@ func TestPG_ConcurrentBuysCannotOverspendCash(t *testing.T) {
 		}(i, symbol)
 	}
 	wg.Wait()
-	successes := 0
+	// Automatic purchase funding is the default, so neither concurrent buy is
+	// rejected. What the aggregate lock still guarantees is that the shared cash
+	// balance is applied serially and can never go negative.
 	for _, err := range errs {
-		if err == nil {
-			successes++
-		} else {
-			assert.ErrorIs(t, err, ErrInsufficientCash)
-		}
+		require.NoError(t, err)
 	}
-	assert.Equal(t, 1, successes)
 	balances, err := repo.ListCashBalances(context.Background(), userID)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, balances[0].Amount, 0.0)
+	for _, balance := range balances {
+		assert.GreaterOrEqual(t, balance.Amount, 0.0)
+	}
+
+	pf, err := repo.GetPortfolioByUser(context.Background(), userID)
+	require.NoError(t, err)
+	var funding int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM portfolio_activities
+		 WHERE portfolio_id=$1 AND metadata_json ->> 'funding_reason' = 'purchase_shortfall'`,
+		pf.ID).Scan(&funding))
+	assert.GreaterOrEqual(t, funding, 1, "the overspending purchase was auto-funded, not rejected")
 }
 
 func TestPG_DailySnapshotUniquenessIsDatabaseEnforced(t *testing.T) {

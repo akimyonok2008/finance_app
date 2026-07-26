@@ -3,7 +3,9 @@ package portfolio
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -319,6 +321,12 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 	}
 	versionBefore := state.Version
 
+	// Conservative historical-transaction policy, evaluated against the trusted
+	// ranked boundary BEFORE any write happens (see validateHistorical).
+	if err := c.validateHistorical(ctx, tx, req, all, state, found); err != nil {
+		return MutationResult{}, nil, err
+	}
+
 	checkpoint := performance.CheckpointInput{
 		PortfolioID:     pf.ID,
 		UserID:          req.UserID,
@@ -340,30 +348,66 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 	}
 	var next performance.State
 	var indexAfter float64
-	switch effect {
-	case PerformanceEffectReturn:
-		next = performance.ApplyReturnCheckpoint(state, checkpoint)
-		if err := performance.ValidateState(next); err != nil {
+
+	if plan.returnValueBase != 0 {
+		// Mixed mutation: a neutral reallocation plus a return-bearing fee.
+		// Stage 1 re-baselines the segment at the neutral value (index
+		// unchanged); stage 2 preserves that baseline so only the fee moves the
+		// index. Two chained pure transitions, one transaction, one commit.
+		neutralAfter := valueAfter - plan.returnValueBase
+		mid := performance.ApplyCheckpoint(state, performance.CheckpointInput{
+			PortfolioID: pf.ID, UserID: req.UserID,
+			ValueBeforeBase: valueBefore, HasActiveBefore: hadActiveBefore,
+			ValueAfterBase: neutralAfter, HasActiveAfter: hasActiveAfter,
+			At: val.ObservedAt,
+		})
+		if err := performance.ValidateState(mid); err != nil {
 			return MutationResult{}, nil, err
 		}
-		indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
-		// Direction guard: income must not lower the index and a fee/write-off
-		// must not raise it. This catches a misclassified plan before it corrupts
-		// ranked history.
-		if err := assertReturnDirection(req.Kind, indexBefore, indexAfter); err != nil {
-			return MutationResult{}, nil, err
-		}
-	default:
-		next = performance.ApplyCheckpoint(state, checkpoint)
-		if err := performance.ValidateState(next); err != nil {
-			return MutationResult{}, nil, err
-		}
-		indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
-		// Neutrality guard: a neutral mutation must never generate ranked return.
-		// Violating it aborts the transaction rather than committing corrupted
-		// ranked history.
-		if !neutral(indexBefore, indexAfter) {
+		indexMid := performance.CalculateCurrentIndex(mid, neutralAfter)
+		if !neutral(indexBefore, indexMid) {
 			return MutationResult{}, nil, ErrRankedInvariant
+		}
+		next = performance.ApplyReturnCheckpoint(mid, performance.CheckpointInput{
+			PortfolioID: pf.ID, UserID: req.UserID,
+			ValueBeforeBase: neutralAfter, HasActiveBefore: hasActiveAfter,
+			ValueAfterBase: valueAfter, HasActiveAfter: hasActiveAfter,
+			At: val.ObservedAt,
+		})
+		if err := performance.ValidateState(next); err != nil {
+			return MutationResult{}, nil, err
+		}
+		indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
+		// A fee must never raise the ranked index.
+		if plan.returnValueBase < 0 && indexAfter > indexMid+1e-9*math.Max(1, math.Abs(indexMid)) {
+			return MutationResult{}, nil, ErrRankedInvariant
+		}
+	} else {
+		switch effect {
+		case PerformanceEffectReturn:
+			next = performance.ApplyReturnCheckpoint(state, checkpoint)
+			if err := performance.ValidateState(next); err != nil {
+				return MutationResult{}, nil, err
+			}
+			indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
+			// Direction guard: income must not lower the index and a fee/write-off
+			// must not raise it. This catches a misclassified plan before it corrupts
+			// ranked history.
+			if err := assertReturnDirection(req.Kind, indexBefore, indexAfter); err != nil {
+				return MutationResult{}, nil, err
+			}
+		default:
+			next = performance.ApplyCheckpoint(state, checkpoint)
+			if err := performance.ValidateState(next); err != nil {
+				return MutationResult{}, nil, err
+			}
+			indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
+			// Neutrality guard: a neutral mutation must never generate ranked return.
+			// Violating it aborts the transaction rather than committing corrupted
+			// ranked history.
+			if !neutral(indexBefore, indexAfter) {
+				return MutationResult{}, nil, ErrRankedInvariant
+			}
 		}
 	}
 
@@ -444,6 +488,142 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		RankingStatus:     next.Status,
 		Activity:          plan.activity,
 	}, nil, nil
+}
+
+// quantityTolerance is the shared epsilon for quantity comparisons. Quantities
+// are float64 in this codebase (a deliberate, documented limitation — decimal
+// migration is out of scope), so equality is never tested exactly.
+const quantityTolerance = 1e-9
+
+// validateHistorical implements the CONSERVATIVE historical-transaction policy.
+//
+// It is deliberately NOT a deterministic replay engine: Alarvest does not
+// recompute ranked history. The exact rules, in order:
+//
+//  1. A transaction with no effective_at (or one dated now/later) is current and
+//     always allowed.
+//  2. A BACKDATED SALE is validated against the quantity the position actually
+//     held at effective_at, computed by replaying only the ledger's QUANTITY
+//     effects chronologically up to that instant (buys/opening balances/stock
+//     dividends add, sales/write-offs subtract). This is bookkeeping replay, not
+//     ranked replay. Insufficient historical quantity is rejected.
+//  3. The TRUSTED RANKED HISTORY BOUNDARY is the START OF THE UTC DAY of the
+//     most recent committed ranked checkpoint (State.SegmentStartedAt). Ranked
+//     snapshots in this system are captured per UTC day, so the current day is
+//     not yet snapshotted and remains freely writable: a transaction dated at
+//     or after the boundary — backdated relative to recorded_at or not — is
+//     applied exactly like a current-dated one.
+//  4. A transaction dated BEFORE the boundary falls inside a day whose ranked
+//     snapshot is already trusted. It is rejected (ErrHistoricalRankedConflict)
+//     when it would change state that snapshot captured: EVERY backdated sale,
+//     and every backdated buy into an instrument that already has ANY ledger
+//     history (inserting a purchase before existing history retroactively
+//     rewrites that episode's quantity/basis timeline). The one allowed case is
+//     a backdated buy of an instrument with NO ledger history at all: it opens
+//     a genuinely new episode and cannot alter what the snapshot recorded.
+//     Ranked snapshots are NEVER rebuilt in either case.
+//
+// Nothing has been written when this runs, so a rejection leaves current state
+// completely untouched.
+func (c *MutationCoordinator) validateHistorical(
+	ctx context.Context, tx AggregateTx, req MutationRequest, all []*Position,
+	state performance.State, haveState bool,
+) error {
+	var effectiveAt *time.Time
+	symbol := ""
+	switch req.Kind {
+	case MutationBuy:
+		effectiveAt = req.Buy.EffectiveAt
+		symbol = req.Buy.Symbol
+	case MutationSell:
+		effectiveAt = req.Sell.EffectiveAt
+		if position, err := findSalePosition(all, req); err == nil {
+			symbol = position.Symbol
+		} else {
+			return err
+		}
+	default:
+		return nil
+	}
+	if effectiveAt == nil {
+		return nil
+	}
+	at := effectiveAt.UTC()
+	if !at.Before(c.now()) {
+		return nil // current-dated (or clock skew); nothing historical about it
+	}
+
+	ledger, err := tx.LedgerActivities(ctx)
+	if err != nil {
+		return err
+	}
+
+	// (2) Historical quantity validation for sales.
+	if req.Kind == MutationSell {
+		held := historicalQuantity(ledger, symbol, at)
+		if req.Sell.Quantity > held+quantityTolerance {
+			return fmt.Errorf("%w: the position held only %g units at %s",
+				ErrHistoricalQuantityInsufficient, held, at.Format(time.RFC3339))
+		}
+	}
+
+	// (3) Everything after the trusted ranked boundary behaves normally.
+	if !haveState || state.SegmentStartedAt == nil {
+		return nil
+	}
+	checkpoint := state.SegmentStartedAt.UTC()
+	boundary := time.Date(checkpoint.Year(), checkpoint.Month(), checkpoint.Day(), 0, 0, 0, 0, time.UTC)
+	if !at.Before(boundary) {
+		return nil
+	}
+
+	// (4) Before the boundary: inside an already-snapshotted day.
+	if req.Kind == MutationSell {
+		return ErrHistoricalRankedConflict
+	}
+	for _, activity := range ledger {
+		if activity.Symbol == symbol {
+			return ErrHistoricalRankedConflict
+		}
+	}
+	return nil
+}
+
+// historicalQuantity replays the activity ledger's QUANTITY effects for one
+// symbol chronologically up to (and including) `at`. It is intentionally narrow:
+// no valuation, no FX, no ranked state — just the units held at that instant.
+func historicalQuantity(ledger []Activity, symbol string, at time.Time) float64 {
+	ordered := make([]Activity, 0, len(ledger))
+	for _, activity := range ledger {
+		if activity.Symbol == symbol && !activity.OccurredAt.After(at) {
+			ordered = append(ordered, activity)
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].OccurredAt.Equal(ordered[j].OccurredAt) {
+			return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
+		}
+		return ordered[i].OccurredAt.Before(ordered[j].OccurredAt)
+	})
+	total := 0.0
+	for _, activity := range ordered {
+		if activity.Quantity == nil {
+			continue
+		}
+		switch activity.Type {
+		case ActivityBuy, ActivityOpeningBalance, ActivityStockDividend, ActivityReinvestedDividend:
+			total += *activity.Quantity
+		case ActivitySell, ActivityWriteOff:
+			total -= *activity.Quantity
+		case ActivityStockSplit, ActivityReverseSplit:
+			// Splits restate the running total rather than adding to it.
+			total = *activity.Quantity
+		}
+	}
+	if total < 0 {
+		total = 0
+	}
+	return total
 }
 
 // neutral reports whether two ranked indexes are equal within a relative
@@ -538,6 +718,17 @@ type mutationPlan struct {
 	// shared market quote keys the transformed symbol.
 	valueInvariant    bool
 	performanceEffect PerformanceEffect
+	// returnValueBase splits a mixed mutation's base-currency value change into
+	// a NEUTRAL part and a RETURN-BEARING part. It is the return-bearing portion
+	// (negative for a fee). When non-zero the coordinator applies two chained
+	// checkpoints: a neutral one from value_before to (value_after -
+	// returnValueBase), then a return-bearing one on to value_after. This makes
+	// an automatically-funded purchase ranked-neutral while its fee lowers the
+	// ranked index exactly once.
+	returnValueBase float64
+	// buyCashUsed / buyFunding are reported for previews and diagnostics.
+	buyCashUsed float64
+	buyFunding  float64
 }
 
 // plan validates the request against the LOCKED state and computes the
@@ -596,20 +787,66 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		if !ok {
 			return mutationPlan{}, ErrPriceProvider
 		}
-		required := req.Buy.Quantity * quote.Price
-		available, found := cashAmount(oldCash, quote.Currency)
-		if !found || available+1e-9 < required {
+		now := val.ObservedAt
+
+		// Execution details with provenance. Omitted price/fee/date default to
+		// the latest tracked quote / zero / now, and are labelled as estimates
+		// rather than presented as confirmed broker executions.
+		executionPrice := req.Buy.ExecutionPrice
+		priceSource := PriceSourceUserRecorded
+		if executionPrice == 0 {
+			executionPrice = quote.Price
+			priceSource = PriceSourceProviderEstimate
+		}
+		if !finitePositive(executionPrice) {
+			return mutationPlan{}, ErrInvalidBuyPrice
+		}
+		fee := req.Buy.Fee
+		feeSource := FeeSourceUserRecorded
+		if fee == 0 {
+			feeSource = FeeSourceDefaultZero
+		}
+		occurred := now
+		if req.Buy.EffectiveAt != nil {
+			occurred = req.Buy.EffectiveAt.UTC()
+		}
+
+		gross := req.Buy.Quantity * executionPrice
+		totalRequired := gross + fee
+		available, _ := cashAmount(oldCash, quote.Currency)
+
+		// Automatic purchase funding. The user records a real purchase; Alarvest
+		// infers the funding consequence rather than blocking on a cash balance
+		// the user never asked to manage. Funding is created in the INSTRUMENT'S
+		// QUOTE CURRENCY only — cash in other currencies is never auto-converted.
+		funding := totalRequired - available
+		if funding < 1e-9 {
+			funding = 0
+		}
+		if funding > 0 && !pf.AutoFundPurchases {
 			return mutationPlan{}, ErrInsufficientCash
 		}
-		now := val.ObservedAt
+		cashUsed := math.Min(available, totalRequired)
+		nextCash := available + funding - totalRequired
+		if math.Abs(nextCash) < 1e-9 {
+			nextCash = 0
+		}
+		if nextCash < 0 {
+			return mutationPlan{}, ErrInsufficientCash
+		}
+
 		balance, _ := cashBalance(oldCash, quote.Currency)
 		balance.PortfolioID = pf.ID
 		balance.Currency = quote.Currency
-		balance.Amount = available - required
+		balance.Amount = nextCash
 		balance.UpdatedAt = now
 		if balance.CreatedAt.IsZero() {
 			balance.CreatedAt = now
 		}
+
+		// Basis convention: cost basis includes the purchase price AND the buy
+		// fee, so a rebought position's basis is what the user actually paid.
+		// Weighted-average across buys within one episode.
 		var result *Position
 		var create bool
 		for _, position := range oldOpen {
@@ -617,7 +854,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				position.Currency == quote.Currency {
 				merged := *position
 				totalQuantity := position.Quantity + req.Buy.Quantity
-				merged.AverageBuyPrice = (position.Quantity*position.AverageBuyPrice + required) / totalQuantity
+				merged.AverageBuyPrice = (position.Quantity*position.AverageBuyPrice + gross + fee) / totalQuantity
 				merged.Quantity = totalQuantity
 				merged.UpdatedAt = now
 				result = &merged
@@ -625,23 +862,79 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			}
 		}
 		if result == nil {
+			// No open episode for this instrument: a rebuy after a full sale
+			// always starts a NEW episode (a new positions row, which is the
+			// durable episode identity).
 			create = true
 			result = &Position{
 				ID: uuid.NewString(), UserID: req.UserID, PortfolioID: pf.ID,
 				Symbol: req.Buy.Symbol, AssetType: req.Buy.AssetType,
-				Quantity: req.Buy.Quantity, AverageBuyPrice: quote.Price,
+				Quantity: req.Buy.Quantity, AverageBuyPrice: (gross + fee) / req.Buy.Quantity,
 				Currency: quote.Currency, Status: PositionStatusOpen,
 				CreatedAt: now, UpdatedAt: now,
 			}
+		}
+
+		// One purchase = one activity group: [automatic funding] + buy + [fee].
+		groupID := uuid.NewString()
+		buyMeta := activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceUserReported, map[string]any{
+			"activity_group_id":      groupID,
+			"execution_price_source": priceSource,
+			"fee_source":             feeSource,
+			"effective_at":           occurred.Format(time.RFC3339Nano),
+			"recorded_at":            now.Format(time.RFC3339Nano),
+		})
+		if funding > 0 {
+			buyMeta["automatic_funding_amount"] = funding
 		}
 		activity := &Activity{
 			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
 			UserID: req.UserID, Type: ActivityBuy, Symbol: result.Symbol,
 			AssetType: result.AssetType, Currency: quote.Currency,
-			Quantity: floatPointer(req.Buy.Quantity), UnitPrice: floatPointer(quote.Price),
-			GrossAmount: required, OccurredAt: now, CreatedAt: now,
-			Metadata: trackingMetadata(val), PositionEpisodeID: result.ID,
+			Quantity: floatPointer(req.Buy.Quantity), UnitPrice: floatPointer(executionPrice),
+			GrossAmount: gross, OccurredAt: occurred, CreatedAt: now,
+			Metadata: buyMeta, PositionEpisodeID: result.ID, GroupID: groupID,
+			FeeAmount: fee, NetAmount: totalRequired,
 		}
+
+		var extraActivities []Activity
+		if funding > 0 {
+			// Reuses the existing neutral deposit activity type (no new
+			// Postgres-constrained type). Metadata marks it as automatic and
+			// links it to the purchase group.
+			extraActivities = append(extraActivities, Activity{
+				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+				Type: ActivityDeposit, Currency: quote.Currency,
+				GrossAmount: funding, OccurredAt: occurred, CreatedAt: now,
+				GroupID: groupID, Origin: "system_generated",
+				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, map[string]any{
+					"activity_group_id":        groupID,
+					"funding_reason":           "purchase_shortfall",
+					"automatic":                true,
+					"linked_purchase_group_id": groupID,
+					"effective_at":             occurred.Format(time.RFC3339Nano),
+					"recorded_at":              now.Format(time.RFC3339Nano),
+				}),
+			})
+		}
+		if fee > 0 {
+			extraActivities = append(extraActivities, Activity{
+				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+				Type: ActivityBuyFee, Symbol: result.Symbol, Currency: quote.Currency,
+				GrossAmount: fee, OccurredAt: occurred, CreatedAt: now,
+				GroupID: groupID, PositionEpisodeID: result.ID,
+				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, ProvenanceUserReported, map[string]any{
+					"component":         "purchase_fee",
+					"activity_group_id": groupID,
+					"fee_source":        feeSource,
+				}),
+			})
+		}
+
+		// Ranked semantics: the automatic funding and the allocation of cash into
+		// the instrument are NEUTRAL (the user is no richer or poorer for moving
+		// their own money). Only the fee is a genuine, return-bearing loss, and
+		// it must be counted exactly once. returnValueBase carries that portion.
 		return mutationPlan{
 			newOpen: replaceOrAppendPosition(oldOpen, result), newCash: replaceCash(oldCash, balance),
 			write: func(ctx context.Context, tx AggregateTx) error {
@@ -654,6 +947,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				return tx.UpdatePosition(ctx, result)
 			},
 			resultPosition: result, resultPositionID: result.ID, activity: activity,
+			extraActivities: extraActivities,
+			returnValueBase: -fee * val.rates[quote.Currency],
+			buyCashUsed:     cashUsed, buyFunding: funding,
 		}, nil
 
 	case MutationSell, MutationClose:
@@ -674,8 +970,14 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		}
 		now := val.ObservedAt
 		executionPrice := req.Sell.ExecutionPrice
+		priceSource := PriceSourceUserRecorded
 		if executionPrice == 0 {
 			executionPrice = quote.Price
+			priceSource = PriceSourceProviderEstimate
+		}
+		feeSource := FeeSourceUserRecorded
+		if req.Sell.Fee == 0 {
+			feeSource = FeeSourceDefaultZero
 		}
 		proceeds := quantity * executionPrice
 		if req.Sell.Fee >= proceeds {
@@ -711,7 +1013,14 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			GrossAmount: proceeds, CostBasisAllocated: floatPointer(allocatedBasis),
 			RealizedGainLossBase:       floatPointer(realizedBase),
 			RealizedGainLossPercentage: floatPointer(realizedPct),
-			OccurredAt:                 occurred, CreatedAt: now, Metadata: trackingMetadata(val),
+			OccurredAt:                 occurred, CreatedAt: now,
+			Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceUserReported, map[string]any{
+				"activity_group_id":      groupID,
+				"execution_price_source": priceSource,
+				"fee_source":             feeSource,
+				"effective_at":           occurred.Format(time.RFC3339Nano),
+				"recorded_at":            now.Format(time.RFC3339Nano),
+			}),
 			GroupID: groupID, PositionEpisodeID: existing.ID,
 			FeeAmount: req.Sell.Fee, NetAmount: netProceeds,
 		}
@@ -1505,7 +1814,17 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		req.Buy = BuyInput{Symbol: clean.Symbol, AssetType: clean.AssetType, Quantity: clean.Quantity}
+		if req.Buy.ExecutionPrice != 0 && !finitePositive(req.Buy.ExecutionPrice) {
+			return nil, ErrInvalidBuyPrice
+		}
+		if !isFinite(req.Buy.Fee) || req.Buy.Fee < 0 {
+			return nil, ErrInvalidBuyFee
+		}
+		req.Buy = BuyInput{
+			Symbol: clean.Symbol, AssetType: clean.AssetType, Quantity: clean.Quantity,
+			ExecutionPrice: req.Buy.ExecutionPrice, Fee: req.Buy.Fee,
+			EffectiveAt: req.Buy.EffectiveAt,
+		}
 		return []string{clean.Symbol}, nil
 	case MutationSell:
 		if !finitePositive(req.Sell.Quantity) {

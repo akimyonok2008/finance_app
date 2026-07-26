@@ -31,9 +31,97 @@ it is never deducted a second time. `PortfolioSummary.fees` discloses this via
 economic attribution, so the sale fee is never double-counted.
 `SellPreview` and the committed sell share the identical formula.
 
+**Canonical purchase contract.** `gross cost = quantity × execution price`,
+`total cash required = gross cost + purchase fee`. A position's **cost basis
+includes the purchase price AND the buy fee** — the mirror of the sale contract
+above, so basis is what the user actually paid. Across multiple buys within one
+episode the basis is the fee-inclusive weighted average. The purchase posts a
+separate `buy_fee` ledger row grouped with the buy via `activity_group_id`.
+
+**Execution details and provenance.** A recorded buy or sell accepts an optional
+`execution_price`, `fee` and `effective_at`. Omitted values default to the latest
+tracked quote, zero, and now respectively, and the defaulting is recorded so an
+estimate is never presented as a confirmed broker execution:
+
+| column | values |
+| --- | --- |
+| `execution_price_source` | `user_recorded`, `provider_estimate`, `legacy_unknown` |
+| `fee_source` | `user_recorded`, `default_zero`, `legacy_unknown` |
+
+`occurred_at` is the **effective** instant (when the real-world trade happened);
+`recorded_at` is when it was entered into the system. Backdated transactions
+have `recorded_at > occurred_at`.
+
+**Automatic purchase funding.** The user records the real-world action; Alarvest
+infers the funding consequence. `automatic funding = max(quantity × execution
+price + fee − available cash in the instrument's quote currency, 0)`. When the
+shortfall is positive a neutral `deposit` activity is recorded for exactly that
+amount, in the **instrument's quote currency only** — cash in other currencies is
+never auto-converted. It carries metadata `funding_reason=purchase_shortfall`,
+`automatic=true`, `linked_purchase_group_id`, and shares one `activity_group_id`
+with the buy and the buy fee so the timeline presents them as a single purchase.
+This is the DEFAULT: there is no insufficient-cash rejection for the normal case.
+The portfolio-level `auto_fund_purchases` preference (default `true`) restores
+strict rejection with `ErrInsufficientCash` when set to `false`.
+
+**Ranked treatment of a purchase.** Automatic funding and the allocation of cash
+into the instrument are ranked-**neutral** (moving your own money makes you
+neither richer nor poorer). Only the fee is return-bearing, and exactly once. The
+coordinator implements this with two chained pure checkpoints inside the one
+transaction: a neutral checkpoint from `value_before` to `value_after + fee`,
+then a return-bearing checkpoint on to `value_after`.
+
+**Automatic closure detection.** There is exactly ONE sell operation; there is no
+separate "close position" action. `remaining = available − sold`; when the
+remainder falls within the quantity tolerance it is normalized to zero and the
+episode closes through the existing closure path. A rebuy after a full sale
+always opens a new episode.
+
+**Historical (backdated) transactions — conservative policy only.** Alarvest does
+**not** implement deterministic ranked-history replay and does not rebuild ranked
+snapshots. `MutationCoordinator.validateHistorical` implements exactly this, and
+nothing more:
+
+1. No `effective_at`, or one dated now/later → current, always allowed.
+2. A backdated **sale** is validated against the quantity the position actually
+   held at `effective_at`, computed by replaying only the ledger's **quantity**
+   effects chronologically (buys/opening balances/stock dividends add;
+   sales/write-offs subtract; splits restate). This is bookkeeping replay, not
+   ranked replay. Insufficient historical quantity is rejected with
+   `ErrHistoricalQuantityInsufficient`.
+3. The **trusted ranked history boundary** is the start of the UTC day of the
+   most recent committed ranked checkpoint (`State.SegmentStartedAt`). Ranked
+   snapshots are captured per UTC day, so the current day is not yet snapshotted
+   and stays freely writable: anything dated at or after the boundary is applied
+   exactly like a current-dated transaction.
+4. A transaction dated **before** the boundary falls inside an already-trusted
+   snapshot day. It is rejected with `ErrHistoricalRankedConflict` when it would
+   change what that snapshot captured: every backdated sale, and every backdated
+   buy into an instrument that already has any ledger history. The one allowed
+   case is a backdated buy of an instrument with no ledger history at all, which
+   opens a genuinely new episode.
+
+Rejections happen before any write, so a refused historical transaction leaves
+current state completely untouched.
+
 Legacy create/update/delete handlers remain available to internal correction
 tests but are no longer registered as public routes. Product clients use
 `/portfolio/buys` and `/portfolio/sells`.
+
+Trade routes:
+
+| route | mutating | idempotency |
+| --- | --- | --- |
+| `POST /portfolio/buys/preview` | no | n/a |
+| `POST /portfolio/buys` | yes | `Idempotency-Key` header (required) |
+| `POST /portfolio/sells/preview` | no | n/a |
+| `POST /portfolio/sells` | yes | `Idempotency-Key` header (required) |
+
+Both preview routes are strictly read-only: they write no activity, cash,
+position, episode, ranked or audit state, and never bump the aggregate version.
+Both mutation routes require an `Idempotency-Key`; the key is scoped per
+portfolio (`portfolio_mutation_audit (portfolio_id, request_id)`), and a retry
+replays the committed result instead of applying a second effect.
 
 **Position episodes.** A position's `id` is its durable episode identity: a
 buy merges into the existing open position for that symbol/asset/currency

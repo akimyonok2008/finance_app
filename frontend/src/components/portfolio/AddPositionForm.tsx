@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, Loader2, Plus } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronRight, Loader2, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -33,6 +33,7 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
   const [state, setState] = useState<PositionFormState>(EMPTY_POSITION_FORM);
   const [errors, setErrors] = useState<PositionFormErrors>({});
   const [backendError, setBackendError] = useState<string | null>(null);
+  const [showExecutionDetails, setShowExecutionDetails] = useState(false);
 
   const createPosition = useCreatePosition();
 
@@ -54,13 +55,29 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
   const quote = quotes.data?.quotes.find((q) => q.symbol === debouncedSymbol);
   const cash = useCashBalances();
 
-  const totalCost = quote ? quantityValue * quote.price : null;
+  // Execution price: what the user entered, else the latest quote (an estimate).
+  const enteredPrice = Number(state.execution_price);
+  const hasEnteredPrice =
+    state.execution_price.trim() !== "" && Number.isFinite(enteredPrice) && enteredPrice > 0;
+  const executionPrice = hasEnteredPrice ? enteredPrice : quote?.price ?? null;
+
+  const enteredFee = Number(state.fee);
+  const feeValue =
+    state.fee.trim() !== "" && Number.isFinite(enteredFee) && enteredFee >= 0 ? enteredFee : 0;
+
+  const grossCost = executionPrice !== null ? quantityValue * executionPrice : null;
+  const totalCost = grossCost !== null ? grossCost + feeValue : null;
   const availableCash = quote
     ? cash.data?.cash_balances.find((b) => b.currency === quote.currency)?.amount ?? 0
     : null;
+  // Automatic funding is the default: a shortfall is funded, not rejected, so it
+  // is surfaced as information and never blocks the submit button.
+  const automaticFunding =
+    totalCost !== null && availableCash !== null ? Math.max(totalCost - availableCash, 0) : null;
   const remainingCash =
-    totalCost !== null && availableCash !== null ? availableCash - totalCost : null;
-  const insufficientCash = remainingCash !== null && remainingCash < 0;
+    totalCost !== null && availableCash !== null && automaticFunding !== null
+      ? availableCash + automaticFunding - totalCost
+      : null;
 
   const onChange = (patch: Partial<PositionFormState>) => {
     setState((prev) => ({ ...prev, ...patch }));
@@ -120,6 +137,69 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
         onChange={onChange}
       />
 
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/40">
+        <button
+          type="button"
+          onClick={() => setShowExecutionDetails((open) => !open)}
+          aria-expanded={showExecutionDetails}
+          className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-medium text-zinc-300 transition hover:text-zinc-100"
+        >
+          {showExecutionDetails ? (
+            <ChevronDown className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
+          Execution details (optional)
+        </button>
+        {showExecutionDetails && (
+          <div className="grid gap-3 border-t border-zinc-800 px-3 py-3 text-xs">
+            <label className="grid gap-1 text-zinc-300">
+              Execution price — leave blank to estimate from the latest quote
+              <input
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
+                type="number"
+                min="0"
+                step="any"
+                disabled={pending}
+                value={state.execution_price}
+                placeholder={quote ? String(quote.price) : "Latest quote"}
+                onChange={(event) => onChange({ execution_price: event.target.value })}
+              />
+              {errors.execution_price && (
+                <span className="text-rose-300">{errors.execution_price}</span>
+              )}
+            </label>
+            <label className="grid gap-1 text-zinc-300">
+              Transaction fee — leave blank for none
+              <input
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
+                type="number"
+                min="0"
+                step="any"
+                disabled={pending}
+                value={state.fee}
+                placeholder="0"
+                onChange={(event) => onChange({ fee: event.target.value })}
+              />
+              {errors.fee && <span className="text-rose-300">{errors.fee}</span>}
+            </label>
+            <label className="grid gap-1 text-zinc-300">
+              Trade date — leave blank for now
+              <input
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
+                type="datetime-local"
+                disabled={pending}
+                value={state.effective_at}
+                onChange={(event) => onChange({ effective_at: event.target.value })}
+              />
+              {errors.effective_at && (
+                <span className="text-rose-300">{errors.effective_at}</span>
+              )}
+            </label>
+          </div>
+        )}
+      </div>
+
       {debouncedSymbol && hasValidQuantity && (
         <div
           aria-live="polite"
@@ -134,17 +214,37 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
             <p className="text-rose-300">Price unavailable for {debouncedSymbol}.</p>
           ) : (
             <dl className="grid grid-cols-2 gap-y-1.5">
-              <PreviewRow label="Price" value={formatMoney(quote.price, quote.currency)} />
+              <PreviewRow
+                label={hasEnteredPrice ? "Execution price (entered)" : "Execution price (estimated)"}
+                value={formatMoney(executionPrice, quote.currency)}
+              />
+              {feeValue > 0 && (
+                <PreviewRow label="Transaction fee" value={formatMoney(feeValue, quote.currency)} />
+              )}
               <PreviewRow label="Total cost" value={formatMoney(totalCost, quote.currency)} emphasize />
               <PreviewRow label="Available cash" value={formatMoney(availableCash, quote.currency)} />
+              {automaticFunding !== null && automaticFunding > 0 && (
+                <PreviewRow
+                  label="Automatic funding required"
+                  value={formatMoney(automaticFunding, quote.currency)}
+                />
+              )}
               <PreviewRow
                 label="Remaining after buy"
                 value={formatMoney(remainingCash, quote.currency)}
-                tone={insufficientCash ? "negative" : "positive"}
+                tone="positive"
               />
-              {insufficientCash && (
-                <p className="col-span-2 mt-1 text-rose-300">
-                  Insufficient cash for this purchase.
+              {!hasEnteredPrice && (
+                <p className="col-span-2 mt-1 text-zinc-500">
+                  Price estimated from the latest tracked quote — not a broker
+                  confirmation. Enter the real price below if you have it.
+                </p>
+              )}
+              {automaticFunding !== null && automaticFunding > 0 && (
+                <p className="col-span-2 mt-1 text-amber-300">
+                  {formatMoney(automaticFunding, quote.currency)} will be recorded
+                  as automatic funding in {quote.currency}. Other currencies are
+                  never converted.
                 </p>
               )}
             </dl>
@@ -156,7 +256,7 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
         type="submit"
         variant="accent"
         className="w-full"
-        disabled={pending || insufficientCash}
+        disabled={pending}
       >
         {pending ? (
           <>

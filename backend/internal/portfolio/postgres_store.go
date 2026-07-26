@@ -64,15 +64,19 @@ func (t *postgresTx) RecordActivity(ctx context.Context, activity Activity) erro
 			asset_type, currency, quantity, unit_price, gross_amount,
 			cost_basis_allocated, realized_gain_loss_base,
 			realized_gain_loss_percentage, occurred_at, portfolio_version,
-			metadata_json, created_at, position_episode_id
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+			metadata_json, created_at, position_episode_id,
+			execution_price_source, fee_source, recorded_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
 		activity.ID, nullIfEmpty(activity.RequestID), activity.PortfolioID,
 		activity.UserID, string(activity.Type), nullIfEmpty(activity.Symbol),
 		nullIfEmpty(activity.AssetType), activity.Currency, activity.Quantity,
 		activity.UnitPrice, activity.GrossAmount, activity.CostBasisAllocated,
 		activity.RealizedGainLossBase, activity.RealizedGainLossPercentage,
 		activity.OccurredAt, activity.PortfolioVersion, metadata, activity.CreatedAt,
-		nullIfEmpty(activity.PositionEpisodeID))
+		nullIfEmpty(activity.PositionEpisodeID),
+		nullIfEmpty(metaString(activity.Metadata, "execution_price_source")),
+		nullIfEmpty(metaString(activity.Metadata, "fee_source")),
+		activity.CreatedAt)
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
 			return ErrDuplicateActivity
@@ -80,6 +84,40 @@ func (t *postgresTx) RecordActivity(ctx context.Context, activity Activity) erro
 		return fmt.Errorf("portfolio: record activity: %w", err)
 	}
 	return nil
+}
+
+// LedgerActivities reads the locked portfolio's full activity ledger through
+// the transaction. Only the fields the historical quantity replay needs are
+// selected.
+func (t *postgresTx) LedgerActivities(ctx context.Context) ([]Activity, error) {
+	rows, err := t.tx.Query(ctx, `
+		SELECT id, activity_type, COALESCE(symbol,''), COALESCE(asset_type,''),
+		       currency, quantity, unit_price, gross_amount, occurred_at, created_at
+		FROM portfolio_activities
+		WHERE portfolio_id=$1
+		ORDER BY occurred_at, created_at`, t.portfolio.ID)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list ledger activities: %w", err)
+	}
+	defer rows.Close()
+	var out []Activity
+	for rows.Next() {
+		var activity Activity
+		var activityType string
+		if err := rows.Scan(&activity.ID, &activityType, &activity.Symbol,
+			&activity.AssetType, &activity.Currency, &activity.Quantity,
+			&activity.UnitPrice, &activity.GrossAmount, &activity.OccurredAt,
+			&activity.CreatedAt); err != nil {
+			return nil, fmt.Errorf("portfolio: scan ledger activity: %w", err)
+		}
+		activity.Type = ActivityType(activityType)
+		activity.PortfolioID = t.portfolio.ID
+		out = append(out, activity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("portfolio: list ledger activities: %w", err)
+	}
+	return out, nil
 }
 
 func (t *postgresTx) FindActivityByRequestID(ctx context.Context, requestID string) (Activity, bool, error) {
@@ -309,6 +347,17 @@ func (t *postgresTx) FindAuditByRequestID(ctx context.Context, requestID string)
 	return a, true, nil
 }
 
+// metaString reads a string field out of an activity's metadata, returning ""
+// when absent. Provenance is mirrored into dedicated columns so it is queryable
+// without JSONB extraction while the metadata stays the immutable record.
+func metaString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	v, _ := metadata[key].(string)
+	return v
+}
+
 func nullIfEmpty(v string) any {
 	if v == "" {
 		return nil
@@ -338,11 +387,13 @@ func (r *PostgresRepository) WithLockedPortfolio(ctx context.Context, userID str
 
 	var pf Portfolio
 	err = tx.QueryRow(ctx, `
-		SELECT id, user_id, name, currency, COALESCE(version,1), created_at, updated_at
+		SELECT id, user_id, name, currency, COALESCE(version,1),
+		       COALESCE(auto_fund_purchases, TRUE), created_at, updated_at
 		FROM portfolios WHERE user_id=$1
 		ORDER BY created_at
 		FOR UPDATE`, userID).Scan(
-		&pf.ID, &pf.UserID, &pf.Name, &pf.Currency, &pf.Version, &pf.CreatedAt, &pf.UpdatedAt)
+		&pf.ID, &pf.UserID, &pf.Name, &pf.Currency, &pf.Version, &pf.AutoFundPurchases,
+		&pf.CreatedAt, &pf.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrPortfolioNotFound

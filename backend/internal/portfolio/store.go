@@ -106,6 +106,10 @@ type AggregateTx interface {
 	PutCashBalance(ctx context.Context, balance CashBalance) error
 	RecordActivity(ctx context.Context, activity Activity) error
 	FindActivityByRequestID(ctx context.Context, requestID string) (Activity, bool, error)
+	// LedgerActivities returns every activity of the locked portfolio, read
+	// through this transaction. It backs the conservative historical-transaction
+	// policy's chronological quantity replay (coordinator.validateHistorical).
+	LedgerActivities(ctx context.Context) ([]Activity, error)
 
 	// RankedState reads the aggregate's ranked-performance state. found=false
 	// means the portfolio has no state yet and must be initialized in this

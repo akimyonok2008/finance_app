@@ -24,6 +24,10 @@ type Repository interface {
 	// user index in memory).
 	EnsureDefaultPortfolio(ctx context.Context, userID string) (*Portfolio, error)
 	GetPortfolioByUser(ctx context.Context, userID string) (*Portfolio, error)
+	// SetAutoFundPurchases toggles the portfolio-level automatic-purchase-funding
+	// preference. It is a preference flag, not financial state, so it does not
+	// need the aggregate mutation boundary.
+	SetAutoFundPurchases(ctx context.Context, userID string, enabled bool) error
 
 	GetPosition(ctx context.Context, id string) (*Position, error)
 	ListPositionsByUser(ctx context.Context, userID string) ([]*Position, error)
@@ -114,6 +118,21 @@ func (r *InMemoryRepository) GetPortfolioByUser(ctx context.Context, userID stri
 		return nil, ErrPortfolioNotFound
 	}
 	return clonePortfolio(r.aggregates[id].portfolio), nil
+}
+
+// SetAutoFundPurchases toggles the automatic-purchase-funding preference.
+func (r *InMemoryRepository) SetAutoFundPurchases(ctx context.Context, userID string, enabled bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.userPortfolio[userID]
+	if !ok {
+		return ErrPortfolioNotFound
+	}
+	r.aggregates[id].portfolio.AutoFundPurchases = enabled
+	return nil
 }
 
 // GetPosition returns a copy of the position by id, or ErrPositionNotFound.

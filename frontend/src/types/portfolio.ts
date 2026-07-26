@@ -190,6 +190,30 @@ export type ActivityMutationResponse = {
 };
 
 export type CashFlowInput = { currency: CurrencyCode; amount: number };
+export type BuyPreview = {
+  symbol: string;
+  asset_type: AssetType;
+  quantity: number;
+  execution_price: number;
+  execution_price_source: PriceSource;
+  fee: number;
+  fee_source: FeeSource;
+  gross_purchase_amount: number;
+  total_cash_required: number;
+  available_cash: number;
+  cash_used: number;
+  automatic_funding_amount: number;
+  remaining_cash: number;
+  creates_new_episode: boolean;
+  position_episode_id?: string;
+  resulting_quantity: number;
+  resulting_average_cost: number;
+  effective_at: string;
+  currency: string;
+  base_currency: string;
+  calculation_status: string;
+};
+
 export type SellPositionInput = {
   position_id: string;
   quantity: number;
@@ -206,6 +230,10 @@ export type SellPreview = {
   sold_quantity: number;
   remaining_quantity: number;
   execution_price: number;
+  execution_price_source: PriceSource;
+  fee_source: FeeSource;
+  effective_at: string;
+  calculation_status: string;
   gross_proceeds: number;
   fee: number;
   net_proceeds: number;
@@ -260,7 +288,17 @@ export type CreatePositionInput = {
   symbol: string;
   asset_type: AssetType;
   quantity: number;
+  /** Real per-unit price paid. Omitted → estimated from the latest quote. */
+  execution_price?: number;
+  /** Transaction fee actually charged. Omitted → zero. */
+  fee?: number;
+  /** When the trade really happened (RFC3339). Omitted → now. */
+  effective_at?: string;
 };
+
+/** Where a recorded price/fee came from, so estimates are never shown as facts. */
+export type PriceSource = "user_recorded" | "provider_estimate" | "legacy_unknown";
+export type FeeSource = "user_recorded" | "default_zero" | "legacy_unknown";
 
 /** Only the quantity is editable; the locked baseline price is immutable. */
 export type UpdatePositionInput = {

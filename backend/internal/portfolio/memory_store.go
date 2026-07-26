@@ -92,6 +92,14 @@ func (t *memoryTx) RecordActivity(_ context.Context, activity Activity) error {
 	return nil
 }
 
+func (t *memoryTx) LedgerActivities(_ context.Context) ([]Activity, error) {
+	out := make([]Activity, 0, len(t.activities))
+	for _, activity := range t.activities {
+		out = append(out, cloneActivity(activity))
+	}
+	return out, nil
+}
+
 func (t *memoryTx) FindActivityByRequestID(_ context.Context, requestID string) (Activity, bool, error) {
 	for _, activity := range t.activities {
 		if activity.RequestID == requestID {
@@ -339,7 +347,8 @@ func (r *InMemoryRepository) aggregateFor(userID string) (*aggregateState, *sync
 		now := time.Now().UTC()
 		pf := &Portfolio{
 			ID: newPortfolioID(), UserID: userID, Name: DefaultPortfolioName,
-			Currency: "USD", Version: 1, CreatedAt: now, UpdatedAt: now,
+			Currency: "USD", Version: 1, AutoFundPurchases: true,
+			CreatedAt: now, UpdatedAt: now,
 		}
 		r.aggregates[pf.ID] = &aggregateState{
 			portfolio: pf,

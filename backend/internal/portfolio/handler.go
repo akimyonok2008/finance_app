@@ -176,6 +176,11 @@ type buyRequest struct {
 	Symbol    string  `json:"symbol"`
 	AssetType string  `json:"asset_type"`
 	Quantity  float64 `json:"quantity"`
+	// Optional real execution details. Omitted price/fee/date default to the
+	// latest tracked quote / zero / now and are labelled as estimates.
+	ExecutionPrice float64 `json:"execution_price,omitempty"`
+	Fee            float64 `json:"fee,omitempty"`
+	EffectiveAt    string  `json:"effective_at,omitempty"`
 }
 
 type sellRequest struct {
@@ -401,8 +406,13 @@ func (h *Handler) BuyPosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	effectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
+	if !ok {
+		return
+	}
 	res, err := h.svc.BuyPosition(r.Context(), uid, requestID, BuyInput{
 		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -440,6 +450,34 @@ func (h *Handler) SellPosition(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, mutationView(res))
 }
 
+// PreviewBuy is NON-MUTATING: it never writes activities, cash, positions,
+// episodes, ranked state or audit records, and therefore takes no
+// Idempotency-Key.
+func (h *Handler) PreviewBuy(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userID(w, r)
+	if !ok {
+		return
+	}
+	var req buyRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	effectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
+	if !ok {
+		return
+	}
+	preview, err := h.svc.PreviewBuy(r.Context(), uid, BuyInput{
+		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+	})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, preview)
+}
+
 func (h *Handler) PreviewSell(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(w, r)
 	if !ok {
@@ -450,9 +488,13 @@ func (h *Handler) PreviewSell(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	sellEffectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
+	if !ok {
+		return
+	}
 	preview, err := h.svc.PreviewSell(r.Context(), uid, SellInput{
 		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: sellEffectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -652,6 +694,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrInvalidReinvestment),
 		errors.Is(err, ErrInvalidSalePrice),
 		errors.Is(err, ErrInvalidSaleFee),
+		errors.Is(err, ErrInvalidBuyPrice),
+		errors.Is(err, ErrInvalidBuyFee),
 		errors.Is(err, ErrCorrectionNotSupported),
 		errors.Is(err, ErrNothingToCorrect):
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -667,6 +711,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrInsufficientCash),
 		errors.Is(err, ErrInsufficientCashForFee),
+		errors.Is(err, ErrHistoricalRankedConflict),
+		errors.Is(err, ErrHistoricalQuantityInsufficient),
 		errors.Is(err, ErrInvalidSaleQuantity):
 		httpx.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrDuplicateActivity):

@@ -64,6 +64,23 @@ var (
 	// ranked return from the mutation itself. It aborts the transaction rather
 	// than committing corrupted ranked history, and always indicates a bug.
 	ErrRankedInvariant = errors.New("mutation would alter ranked performance")
+	// ErrInvalidBuyPrice is returned when a user-entered buy execution price is
+	// not a finite positive number.
+	ErrInvalidBuyPrice = errors.New("execution price must be greater than 0")
+	// ErrInvalidBuyFee is returned when a user-entered buy fee is negative or
+	// not finite.
+	ErrInvalidBuyFee = errors.New("purchase fee must be non-negative")
+
+	// ErrHistoricalRankedConflict is returned when a backdated transaction would
+	// change state that an already-computed, trusted ranked snapshot captured.
+	// Alarvest does NOT rebuild ranked history: the transaction is refused so
+	// ranked history stays internally consistent.
+	ErrHistoricalRankedConflict = errors.New("this historical transaction would change established ranked history and requires reconciliation")
+	// ErrHistoricalQuantityInsufficient is returned when a backdated sale
+	// exceeds the quantity the position actually held at effective_at, measured
+	// by chronological replay of the activity ledger's quantity effects.
+	ErrHistoricalQuantityInsufficient = errors.New("the position did not hold that quantity at this transaction date")
+
 	// ErrUnsupportedMutation guards the mutation-kind switch.
 	ErrUnsupportedMutation = errors.New("unsupported portfolio mutation")
 )

@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -28,6 +28,25 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
   const closePosition = useClosePosition();
   const pending = closePosition.isPending;
   const [quantity, setQuantity] = useState("");
+  const [executionPrice, setExecutionPrice] = useState("");
+  const [fee, setFee] = useState("");
+  const [effectiveAt, setEffectiveAt] = useState("");
+  const [showExecutionDetails, setShowExecutionDetails] = useState(false);
+
+  // Optional execution details. Blank values are simply omitted, so the backend
+  // estimates the price from the latest quote, assumes no fee, and uses now.
+  const parsedPrice = Number(executionPrice);
+  const hasEnteredPrice =
+    executionPrice.trim() !== "" && Number.isFinite(parsedPrice) && parsedPrice > 0;
+  const parsedFee = Number(fee);
+  const hasEnteredFee = fee.trim() !== "" && Number.isFinite(parsedFee) && parsedFee >= 0;
+  const parsedDate = effectiveAt.trim() === "" ? null : new Date(effectiveAt);
+  const hasValidDate = parsedDate !== null && !Number.isNaN(parsedDate.getTime());
+  const executionDetails = {
+    ...(hasEnteredPrice ? { execution_price: parsedPrice } : {}),
+    ...(hasEnteredFee && parsedFee > 0 ? { fee: parsedFee } : {}),
+    ...(hasValidDate ? { effective_at: parsedDate.toISOString() } : {}),
+  };
 
   const numericQuantity = quantity === "" ? 0 : Number(quantity);
   const validQuantity =
@@ -38,7 +57,7 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
 
   const preview = useSalePreview(
     position && validQuantity
-      ? { position_id: position.id, quantity: numericQuantity }
+      ? { position_id: position.id, quantity: numericQuantity, ...executionDetails }
       : null,
   );
 
@@ -46,13 +65,19 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
     e.preventDefault();
     if (!position || !validQuantity) return;
     closePosition.mutate(
-      { position_id: position.id, quantity: numericQuantity },
+      { position_id: position.id, quantity: numericQuantity, ...executionDetails },
       { onSuccess: () => handleOpenChange(false) },
     );
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen) setQuantity("");
+    if (!nextOpen) {
+      setQuantity("");
+      setExecutionPrice("");
+      setFee("");
+      setEffectiveAt("");
+      setShowExecutionDetails(false);
+    }
     onOpenChange(nextOpen);
   };
 
@@ -101,6 +126,58 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
             ))}
           </div>
 
+          <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/40">
+            <button
+              type="button"
+              onClick={() => setShowExecutionDetails((open) => !open)}
+              aria-expanded={showExecutionDetails}
+              className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-medium text-zinc-300 transition hover:text-zinc-100"
+            >
+              {showExecutionDetails ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+              Execution details (optional)
+            </button>
+            {showExecutionDetails && (
+              <div className="grid gap-3 border-t border-zinc-800 px-3 py-3 text-xs">
+                <label className="grid gap-1 text-zinc-300">
+                  Execution price — leave blank to estimate from the latest quote
+                  <input
+                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={executionPrice}
+                    onChange={(event) => setExecutionPrice(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1 text-zinc-300">
+                  Transaction fee — leave blank for none
+                  <input
+                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={fee}
+                    placeholder="0"
+                    onChange={(event) => setFee(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1 text-zinc-300">
+                  Trade date — leave blank for now
+                  <input
+                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
+                    type="datetime-local"
+                    value={effectiveAt}
+                    onChange={(event) => setEffectiveAt(event.target.value)}
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+
           {validQuantity && (
             <div
               aria-live="polite"
@@ -117,6 +194,14 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
                 </p>
               ) : previewData ? (
                 <dl className="grid grid-cols-2 gap-y-1.5">
+                  <PreviewRow
+                    label={
+                      previewData.execution_price_source === "user_recorded"
+                        ? "Execution price (entered)"
+                        : "Execution price (estimated)"
+                    }
+                    value={formatMoney(previewData.execution_price, currency)}
+                  />
                   <PreviewRow label="Gross proceeds" value={formatMoney(previewData.gross_proceeds, currency)} />
                   <PreviewRow label="Transaction fee" value={`-${formatMoney(previewData.fee, currency)}`} />
                   <PreviewRow
@@ -131,6 +216,12 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
                     tone={previewData.estimated_realized_pnl >= 0 ? "positive" : "negative"}
                   />
                   <PreviewRow label="Remaining after sale" value={`${previewData.remaining_quantity} shares`} />
+                  {previewData.execution_price_source !== "user_recorded" && (
+                    <p className="col-span-2 mt-1 text-zinc-500">
+                      Price estimated from the latest tracked quote — not a broker
+                      confirmation.
+                    </p>
+                  )}
                   {previewData.will_close_position && (
                     <p className="col-span-2 mt-1 text-amber-300">
                       The position will close automatically.
