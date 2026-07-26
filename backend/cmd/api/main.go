@@ -29,6 +29,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/profile"
+	"github.com/ardakimyonok/finance_app/internal/providerfactory"
 	"github.com/ardakimyonok/finance_app/internal/server"
 	"github.com/ardakimyonok/finance_app/internal/social"
 	"github.com/ardakimyonok/finance_app/internal/strategy"
@@ -622,9 +623,18 @@ func main() {
 	// (splits, ticker changes) automatically through the aggregate coordinator.
 	// The manual development provider needs no API keys, so the pipeline runs
 	// offline; swap in a real provider adapter via configuration.
+	// External provider integrations are intended for personal / local / internal
+	// use; free-tier provider terms do not cover public commercial
+	// redistribution. DATA_USAGE_MODE documents the intent only.
+	slog.Info("provider data usage mode", "mode", cfg.DataUsageMode)
+	providers := providerfactory.New(cfg, nil)
 	var corpActionView portfolio.CorporateActionViewReader
 	if cfg.CorporateActionsEnabled {
-		corpProvider := corpactions.NewManualDevelopmentProvider()
+		corpProvider, err := providers.CorporateActionProvider()
+		if err != nil {
+			slog.Error("corporate-action provider configuration invalid", "error", err)
+			os.Exit(1)
+		}
 		var corpStore corpactions.Store = corpActionStorer
 		if corpStore == nil {
 			corpStore = corpactions.NewInMemoryStore()
@@ -650,7 +660,11 @@ func main() {
 	// a real provider adapter via configuration.
 	var incomeView portfolio.IncomeEventViewReader
 	if cfg.IncomeTrackingEnabled {
-		incomeProvider := income.NewManualDevelopmentProvider()
+		incomeProvider, err := providers.IncomeProvider()
+		if err != nil {
+			slog.Error("income provider configuration invalid", "error", err)
+			os.Exit(1)
+		}
 		var incomeStore income.Store = incomeStorer
 		if incomeStore == nil {
 			incomeStore = income.NewInMemoryStore()

@@ -192,6 +192,42 @@ adapters are the extension points. Configure with `CORPORATE_ACTIONS_ENABLED`,
 `CORPORATE_ACTION_PRIMARY_PROVIDER`, `CORPORATE_ACTION_POLL_INTERVAL`,
 `CORPORATE_ACTION_LOOKBACK`, `CORPORATE_ACTION_RETRY_INTERVAL`.
 
+### Selecting a real event-data provider
+
+`INCOME_PRIMARY_PROVIDER` and `CORPORATE_ACTION_PRIMARY_PROVIDER` are no longer
+documentation-only: `internal/providerfactory` builds the named adapter at
+startup.
+
+| Value | Behaviour |
+| --- | --- |
+| `manual_dev` (default) | Offline, deterministic, no API keys. Used for local development and the whole test suite. |
+| `alpaca` | Real adapter over Alpaca `GET /v1/corporate-actions`. Requires `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`. Ingests forward/reverse splits and ticker changes as corporate actions, and cash/special/stock dividends as income. |
+| `fmp` | Real adapter over Financial Modeling Prep `/dividends` and `/splits`. Requires `FMP_API_KEY`. Honours `FMP_DAILY_REQUEST_BUDGET`. |
+
+Selecting `alpaca` or `fmp` without the matching credentials is a **startup
+error** — the server exits rather than silently falling back to `manual_dev`,
+which would make a credential-less deployment look healthy while ingesting
+nothing. An unrecognized value fails the same way
+(`unsupported income provider: <value>`).
+
+Both real adapters use context-aware requests with a configurable timeout
+(`ALPACA_REQUEST_TIMEOUT`, `FMP_REQUEST_TIMEOUT`, default `10s`) and bounded
+retry with exponential backoff and jitter for 429/5xx/transport failures,
+honouring `Retry-After`; other 4xx responses fail immediately. API secrets are
+never logged and never appear in error messages. The FMP adapter refuses to make
+a request once `FMP_DAILY_REQUEST_BUDGET` is spent and returns an explicit
+budget-exhausted error, which is deliberately distinguishable from an empty
+result.
+
+`DATA_USAGE_MODE` (default `personal`) documents intent only. These provider
+integrations are for **personal / local / internal use**; free-tier provider
+terms do not cover public commercial redistribution of their data.
+
+Fallback chaining (`INCOME_FALLBACK_PROVIDER`,
+`CORPORATE_ACTION_FALLBACK_PROVIDER`) is **constructed but not yet chained**:
+the factory validates and builds the named fallback adapter, but the services
+still consume a single provider. Wiring the degradation policy is deferred.
+
 **Applied automatically** (verified, effective, complete terms, stable match):
 stock splits and reverse splits (quantity ×num/den, per-share basis ÷ the same
 ratio — both are adjusted, not just the price; total basis, value, and ranked

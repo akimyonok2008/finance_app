@@ -30,6 +30,11 @@ const (
 	defaultRankedSnapshotInterval = 4 * time.Hour
 	defaultRankedRetentionDays    = 120
 	defaultBenchmarkAwardMode     = "verified_only"
+	defaultAlpacaDataBaseURL      = "https://data.alpaca.markets"
+	defaultFMPBaseURL             = "https://financialmodelingprep.com/stable"
+	defaultProviderTimeout        = 10 * time.Second
+	defaultFMPDailyBudget         = 250
+	defaultDataUsageMode          = "personal"
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -89,6 +94,27 @@ type Config struct {
 	IncomeReinvestByDefault   bool
 	IncomeUseEstimatedGross   bool
 	IncomeWithholdingDefault  float64
+
+	// Alpaca market data (corporate actions). Credentials are required only when
+	// a provider selection actually names "alpaca".
+	AlpacaMarketDataEnabled bool
+	AlpacaAPIKeyID          string
+	AlpacaAPISecretKey      string
+	AlpacaDataBaseURL       string
+	AlpacaRequestTimeout    time.Duration
+
+	// Financial Modeling Prep (dividends / splits).
+	FMPEnabled            bool
+	FMPAPIKey             string
+	FMPBaseURL            string
+	FMPRequestTimeout     time.Duration
+	FMPDailyRequestBudget int
+
+	// DataUsageMode documents the intended usage of the external provider
+	// integrations ("personal" by default). Free-tier provider terms do not
+	// cover public commercial redistribution; nothing gates on this value today
+	// beyond a startup log line.
+	DataUsageMode string
 
 	GoogleAuthEnabled bool
 	GoogleClientID    string
@@ -154,6 +180,20 @@ func Load() Config {
 		IncomeReinvestByDefault:   getEnvBool("INCOME_REINVEST_BY_DEFAULT", false),
 		IncomeUseEstimatedGross:   getEnvBool("INCOME_USE_ESTIMATED_GROSS", true),
 		IncomeWithholdingDefault:  getEnvFloat("INCOME_WITHHOLDING_DEFAULT_RATE", 0),
+
+		AlpacaMarketDataEnabled: getEnvBool("ALPACA_MARKET_DATA_ENABLED", false),
+		AlpacaAPIKeyID:          getEnv("ALPACA_API_KEY_ID", ""),
+		AlpacaAPISecretKey:      getEnv("ALPACA_API_SECRET_KEY", ""),
+		AlpacaDataBaseURL:       getEnv("ALPACA_DATA_BASE_URL", defaultAlpacaDataBaseURL),
+		AlpacaRequestTimeout:    getEnvDuration("ALPACA_REQUEST_TIMEOUT", defaultProviderTimeout),
+
+		FMPEnabled:            getEnvBool("FMP_ENABLED", false),
+		FMPAPIKey:             getEnv("FMP_API_KEY", ""),
+		FMPBaseURL:            getEnv("FMP_BASE_URL", defaultFMPBaseURL),
+		FMPRequestTimeout:     getEnvDuration("FMP_REQUEST_TIMEOUT", defaultProviderTimeout),
+		FMPDailyRequestBudget: getEnvInt("FMP_DAILY_REQUEST_BUDGET", defaultFMPDailyBudget),
+
+		DataUsageMode: getEnv("DATA_USAGE_MODE", defaultDataUsageMode),
 
 		GoogleAuthEnabled: getEnvBool("GOOGLE_AUTH_ENABLED", false),
 		GoogleClientID:    getEnv("GOOGLE_CLIENT_ID", ""),
