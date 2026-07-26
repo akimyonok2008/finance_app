@@ -839,6 +839,7 @@ func (s *Service) Archives(ctx context.Context, userID, rawTimeframe string) (*P
 			CapturedAt:         s.CapturedAt.Format(time.RFC3339),
 			PortfolioIndex:     round2(s.PortfolioIndex),
 			GainLossPercentage: round2(s.GainLossPercentage),
+			TotalValueBase:     round2(s.CurrentValue + s.TotalCashValueBase),
 		})
 	}
 	var earliest, latest *PortfolioArchiveSnapshotView

@@ -700,6 +700,7 @@ func main() {
 		Strategy:            strategySvc,
 		MarketData:          marketDataSvc,
 		Social:              socialSvc,
+		PerformanceHistory:  historySvc,
 		CorporateActionView: corpActionView,
 		IncomeEventView:     incomeView,
 		ReadinessChecks:     readinessChecks,

@@ -483,6 +483,10 @@ type PortfolioArchivePoint struct {
 	CapturedAt         string  `json:"captured_at"`
 	PortfolioIndex     float64 `json:"portfolio_index"`
 	GainLossPercentage float64 `json:"gain_loss_percentage"`
+	// TotalValueBase is the private snapshot value in base currency. It backs the
+	// Portfolio Value chart mode only; it is deposit/withdrawal sensitive and must
+	// never be used to derive return or drawdown.
+	TotalValueBase float64 `json:"total_value_base"`
 }
 
 type PortfolioArchiveSnapshotView struct {

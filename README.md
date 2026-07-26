@@ -78,15 +78,15 @@ tax-basis allocation are out of scope.
 
 ## Three-layer model
 
-The product is organized around three explicit, separately-owned layers.
-Activity and Portfolio state each have a dedicated tab on the single
-`/portfolio` screen; Performance attribution is folded into the Portfolio
-tab's summary cards rather than a separate screen:
+The product is organized around three explicit, separately-owned layers. They
+stay separate services and DTOs on the backend, but the user sees ONE Portfolio
+product area with three URL-driven tabs on the single `/portfolio` screen:
 
 ```text
-Activity   "What happened?"      — the immutable ledger (Transactions tab)
-Portfolio  "What do I own now?"  — materialized current state (Portfolio tab:
-                                    Open positions / Closed positions / Cash)
+Activity     "What happened?"      — the immutable ledger (Transactions tab)
+Portfolio    "What do I own now?"  — materialized current state (Portfolio tab:
+                                      Open positions / Closed positions / Cash)
+Performance  "How did it perform?" — canonical ranked history (Performance tab)
 ```
 
 Activity is the source of truth; Portfolio state is derived from it. Users
@@ -244,6 +244,16 @@ transitions. Older intraday points are retained for 120 days by default and are
 removed only when a complete daily point exists; transition and award-evidence
 points are preserved. Configure these policies with the `RANKED_*` variables in
 `backend/.env.example`.
+
+`GET /performance/history` reads these CANONICAL ranked snapshots — the same
+source the leaderboard and benchmark-achievement evidence read. It never reads
+the private portfolio valuation archive (`GET /portfolio/archives`), which is
+value/cost-basis history and is distorted by deposits and withdrawals. The
+backend computes the timeframe return as `ending_index / starting_index - 1`
+(not `ending_index - 100`) and the drawdown as `index_t / running_peak_t - 1`
+from the ranked index; the frontend only formats those values. When no trusted
+snapshot exists yet the response reports `available: false` with a reason and
+omits the analytics rather than returning zeros.
 
 The Dashboard graph renders `GET /performance/history` ranked-index points
 (1M window) with its own independent loading/error/empty states — a

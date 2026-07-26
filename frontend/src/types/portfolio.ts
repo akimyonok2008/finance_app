@@ -255,6 +255,8 @@ export type PortfolioArchivePoint = {
   captured_at: string;
   portfolio_index: number;
   gain_loss_percentage: number;
+  /** Private snapshot value in base currency. Value chart mode only. */
+  total_value_base: number;
 };
 
 export type PortfolioArchiveSnapshot = {

@@ -41,7 +41,7 @@ const FILTERS: Array<{ value: ActivityCategory; label: string }> = [
   { value: "corrections", label: "Corrections" },
 ];
 
-export function ActivityTabContent() {
+export function PortfolioTransactionsTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawCategory = searchParams.get("category") as ActivityCategory | null;
   const category = FILTERS.some((item) => item.value === rawCategory)

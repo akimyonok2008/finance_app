@@ -104,7 +104,7 @@ redirects to `/login`.
 | `/` | Public | Landing page; authenticated users go to Dashboard |
 | `/login`, `/register` | Public | Email/password and optional Google auth |
 | `/dashboard` | Protected | Compact portfolio summary and product navigation |
-| `/portfolio` | Protected | Transactions and Portfolio tabs (Open/Closed/Cash) — see below |
+| `/portfolio` | Protected | Transactions, Portfolio (Open/Closed/Cash), and Performance tabs — see below |
 | `/leaderboard` | Protected | Global/timeframe rankings and personal standing |
 | `/achievements` | Protected | Benchmark badge overview and catalogues |
 | `/profile` | Protected | Owner profile preview and settings |
@@ -118,8 +118,9 @@ Compatibility redirects:
 - `/friends` → `/explore?tab=friends`
 - `/messages` and `/messages/:conversationId` → the matching Explore Messages
   state
-- `/activity` → `/portfolio?tab=transactions`, `/performance` → `/portfolio`
-  (kept for old bookmarks; both are tabs on `/portfolio` now, not routes)
+- `/activity` → `/portfolio?tab=transactions`,
+  `/performance` → `/portfolio?tab=performance` (kept for old bookmarks; both
+  are tabs on `/portfolio` now, and no page implementation lives behind them)
 - unknown routes → `/dashboard`
 
 ## Screen behavior
@@ -138,8 +139,13 @@ Dashboard does not calculate financial metrics itself.
 
 ### Portfolio
 
-`/portfolio` has two top-level tabs: **Transactions** and **Portfolio**
-(described above under "Portfolio activity UI"). Within the Portfolio tab:
+`/portfolio` is the single Portfolio product area with three URL-driven tabs:
+**Transactions** (`?tab=transactions`), **Portfolio** (default, `?tab=state`),
+and **Performance** (`?tab=performance`). Tab state lives in the search params,
+so links, bookmarks, and browser back/forward all work. `PortfolioPage` is only
+the shell (header + tab nav + tab content); each tab is its own component under
+`src/components/portfolio/` and owns its own data fetching, so switching tabs
+never wipes a sibling's loaded data. Within the Portfolio tab:
 
 - Open positions: Add accepts symbol, asset type, and quantity — the backend
   captures the current quote as a baseline, there is no buy-price input. Sell
@@ -149,8 +155,26 @@ Dashboard does not calculate financial metrics itself.
   for episodes that have gone to zero quantity.
 - Cash: per-currency balances and base-value weights.
 
+A compact **Ranked Return** card sits above the subview switcher and links to
+`/portfolio?tab=performance`.
+
 Portfolio mutations invalidate summaries, rankings, profiles, Explore, and
 achievement queries.
+
+### Performance tab
+
+Three overview cards — **Ranked Return** (selected timeframe), **Economic P&L**
+(ledger reconciliation), and **Maximum Drawdown** — plus one chart with a
+Return / Portfolio Value / Drawdown mode switch and `1W/1M/3M/6M/1Y/ALL`
+timeframes.
+
+Return and Drawdown come from `GET /performance/history`, the canonical ranked
+snapshot history. Portfolio Value comes from `GET /portfolio/archives`, the
+private valuation history — it includes deposits and withdrawals and is
+therefore never used for return or drawdown. Every number is computed by the
+backend; nothing is recalculated in the browser. Missing analytics render as
+"—" with a reason ("Performance history will appear after the first trusted
+snapshot."), never as zero.
 
 ### Leaderboard
 
@@ -265,4 +289,10 @@ provider secret.
 npm install
 npm run lint
 npm run build
+npm test
 ```
+
+`npm test` runs Vitest (jsdom + Testing Library). `src/pages/PortfolioPage.test.tsx`
+covers the `/portfolio` tab routing contract, the `/activity` and `/performance`
+compatibility redirects, browser back/forward, and per-tab data-fetching
+independence.

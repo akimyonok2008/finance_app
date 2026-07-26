@@ -96,6 +96,16 @@ func (a achievementPerformanceProvider) GetPortfolioIndexSeries(ctx context.Cont
 // newFullServer builds the complete application with in-memory storage,
 // exactly as main.go wires it (minus Postgres/Redis).
 func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler {
+	h, _, _ := newFullServerWithHistory(t, readiness)
+	return h
+}
+
+// newFullServerWithHistory additionally exposes the canonical ranked-history
+// service and the portfolio service so tests can assert that HTTP responses
+// agree with the canonical source rather than with a private archive.
+func newFullServerWithHistory(
+	t *testing.T, readiness []server.ReadinessCheck,
+) (http.Handler, *performancehistory.Service, *portfolio.Service) {
 	t.Helper()
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
 	authSvc := auth.NewService(auth.NewInMemoryUserRepository(), tokens)
@@ -126,15 +136,16 @@ func newFullServer(t *testing.T, readiness []server.ReadinessCheck) http.Handler
 	)
 
 	return server.New(server.Deps{
-		Auth:            authSvc,
-		Tokens:          tokens,
-		Portfolio:       portfolioSvc,
-		Leaderboard:     leaderboardSvc,
-		Competitions:    competitionsSvc,
-		Achievements:    achievementsSvc,
-		ReadinessChecks: readiness,
-		Info:            map[string]string{"storage_provider": "memory", "price_provider": "mock"},
-	})
+		Auth:               authSvc,
+		Tokens:             tokens,
+		Portfolio:          portfolioSvc,
+		Leaderboard:        leaderboardSvc,
+		Competitions:       competitionsSvc,
+		Achievements:       achievementsSvc,
+		PerformanceHistory: historySvc,
+		ReadinessChecks:    readiness,
+		Info:               map[string]string{"storage_provider": "memory", "price_provider": "mock"},
+	}), historySvc, portfolioSvc
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {

@@ -6,6 +6,7 @@ import { Toaster } from "sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
 import { ProtectedRoute } from "@/auth/ProtectedRoute";
 import { useAuth } from "@/auth/useAuth";
+import { LEGACY_PORTFOLIO_REDIRECTS } from "@/routes/legacyRedirects";
 
 const DashboardPage = lazy(() =>
   import("@/pages/Dashboard/DashboardPage").then(({ DashboardPage }) => ({
@@ -127,11 +128,13 @@ export default function App() {
                 }
               />
 
-              {/* Activity is a tab within Portfolio, not a separate page —
-                  this redirect keeps old links/bookmarks working. Performance
-                  was folded into the Portfolio tab's summary cards. */}
-              <Route path="/activity" element={<Navigate to="/portfolio?tab=transactions" replace />} />
-              <Route path="/performance" element={<Navigate to="/portfolio" replace />} />
+              {/* Transactions and Performance are TABS within the single
+                  Portfolio product area, not separate pages. These are
+                  redirect-only compatibility routes for old links/bookmarks —
+                  there is no second page implementation behind them. */}
+              {Object.entries(LEGACY_PORTFOLIO_REDIRECTS).map(([from, to]) => (
+                <Route key={from} path={from} element={<Navigate to={to} replace />} />
+              ))}
 
               <Route
                 path="/leaderboard"

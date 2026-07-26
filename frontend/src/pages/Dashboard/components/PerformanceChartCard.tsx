@@ -96,7 +96,7 @@ export function PerformanceChartCard({
       month: "short",
       day: "numeric",
     }),
-    index: point.portfolio_index,
+    index: point.ranked_index,
   }));
   const currency = summary?.base_currency ?? "USD";
   const isEmpty = !summary || summary.valuation.current_portfolio_value_base === 0;
@@ -122,10 +122,10 @@ export function PerformanceChartCard({
           Ranked performance
         </p>
         <Link
-          to="/portfolio"
+          to="/portfolio?tab=performance"
           className="group inline-flex items-center gap-1 text-xs font-medium text-zinc-500 transition hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300/35"
         >
-          View portfolio
+          View performance
           <ArrowRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
         </Link>
       </div>

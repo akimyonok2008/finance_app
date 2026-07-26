@@ -11,6 +11,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
+	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/profile"
 	"github.com/ardakimyonok/finance_app/internal/social"
@@ -30,6 +31,10 @@ type Deps struct {
 	Strategy     *strategy.Service
 	MarketData   *marketdata.Service
 	Social       *social.Service
+	// PerformanceHistory is the CANONICAL ranked-performance snapshot service —
+	// the same source the leaderboard and benchmark achievements read. It backs
+	// GET /performance/history.
+	PerformanceHistory *performancehistory.Service
 	// CorporateActionView is the optional read-only automatic-adjustments reader.
 	CorporateActionView portfolio.CorporateActionViewReader
 	// IncomeEventView is the optional read-only automatic-income reader + the
@@ -73,6 +78,10 @@ func New(d Deps) http.Handler {
 	var socialHandler *social.Handler
 	if d.Social != nil {
 		socialHandler = social.NewHandler(d.Social)
+	}
+	var performanceHistoryHandler *performancehistory.Handler
+	if d.PerformanceHistory != nil {
+		performanceHistoryHandler = performancehistory.NewHandler(d.PerformanceHistory)
 	}
 	var profileHandler *profile.Handler
 	if d.Profile != nil {
@@ -146,7 +155,13 @@ func New(d Deps) http.Handler {
 		r.Get("/activity", portfolioHandler.ActivityList)
 		r.Get("/activity/{activityId}", portfolioHandler.ActivityDetail)
 		r.Get("/performance/summary", portfolioHandler.PerformanceSummary)
-		r.Get("/performance/history", portfolioHandler.Archives)
+		// Ranked history comes from the canonical ranked snapshot service, NOT
+		// from the private portfolio valuation archive (which is value/cost-basis
+		// history and is distorted by deposits and withdrawals). The archive is
+		// still served separately at /portfolio/archives for the value chart.
+		if performanceHistoryHandler != nil {
+			r.Get("/performance/history", performanceHistoryHandler.History)
+		}
 
 		r.Get("/leaderboard", leaderboardHandler.GetLeaderboard)
 		r.Get("/leaderboard/me", leaderboardHandler.GetMyStanding)
