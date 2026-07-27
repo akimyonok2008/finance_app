@@ -48,10 +48,11 @@ func validateSeries(s BenchmarkPriceSeries, req SeriesRequirement) (DataQuality,
 				return DataQualityInvalid, fmt.Errorf("%w: %s duplicate date %s", ErrInvalidBenchmarkSeries, s.Symbol, p.Date)
 			}
 		}
-		if math.IsNaN(p.AdjustedClose) || math.IsInf(p.AdjustedClose, 0) {
+		value := pointValue(p, s.Metadata.PriceType)
+		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return DataQualityInvalid, fmt.Errorf("%w: %s non-finite price", ErrInvalidBenchmarkSeries, s.Symbol)
 		}
-		if p.AdjustedClose <= 0 {
+		if value <= 0 {
 			return DataQualityInvalid, fmt.Errorf("%w: %s non-positive price", ErrInvalidBenchmarkSeries, s.Symbol)
 		}
 		prevDate = p.Date
@@ -95,6 +96,18 @@ func validateSeries(s BenchmarkPriceSeries, req SeriesRequirement) (DataQuality,
 		return DataQualityVerified, nil
 	}
 	return DataQualityAcceptable, nil
+}
+
+func pointValue(p PricePoint, priceType PriceType) float64 {
+	if priceType == PriceTypeRawClose {
+		// Compatibility for legacy test/providers. New raw adapters populate
+		// RawClose and leave AdjustedClose empty.
+		if p.RawClose == 0 {
+			return p.AdjustedClose
+		}
+		return p.RawClose
+	}
+	return p.AdjustedClose
 }
 
 // BuildTotalReturnSeries constructs an adjusted (total-return-equivalent) series

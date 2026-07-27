@@ -37,14 +37,14 @@ func (s *PostgresStore) UpsertEvent(ctx context.Context, ev IncomeEvent) (bool, 
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, err = s.pool.Exec(ctx, `
 			INSERT INTO income_events (
-				id, provider, provider_event_id, event_type, instrument_symbol,
+				id, provider, provider_event_id, event_type, instrument_symbol, instrument_id,
 				amount_per_unit, currency, declaration_at, ex_date, record_date, payment_date,
 				status, quality, tax_classification, normalized_payload, source_url,
 				raw_fingerprint, retrieved_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now(),now())
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now(),now())
 			ON CONFLICT (id) DO NOTHING`,
 			ev.ID, ev.Provider, ev.ProviderEventID, string(ev.Type), ev.Instrument.Symbol,
-			ev.AmountPerUnit, ev.Currency, ev.DeclarationAt, ev.ExDate, ev.RecordDate, ev.PaymentDate,
+			nullString(ev.Instrument.InstrumentID), ev.AmountPerUnit, ev.Currency, ev.DeclarationAt, ev.ExDate, ev.RecordDate, ev.PaymentDate,
 			string(ev.Status), string(ev.Quality), nullString(ev.TaxClassification), payload,
 			nullString(ev.SourceURL), ev.RawFingerprint, ev.RetrievedAt)
 		if err != nil {
@@ -64,12 +64,12 @@ func (s *PostgresStore) UpsertEvent(ctx context.Context, ev IncomeEvent) (bool, 
 	}
 	_, err = s.pool.Exec(ctx, `
 		UPDATE income_events
-		SET event_type=$2, instrument_symbol=$3, amount_per_unit=$4, currency=$5,
-		    declaration_at=$6, ex_date=$7, record_date=$8, payment_date=$9, status=$10,
-		    quality=$11, tax_classification=$12, normalized_payload=$13, source_url=$14,
-		    raw_fingerprint=$15, retrieved_at=$16, updated_at=now()
+		SET event_type=$2, instrument_symbol=$3, instrument_id=$4, amount_per_unit=$5, currency=$6,
+		    declaration_at=$7, ex_date=$8, record_date=$9, payment_date=$10, status=$11,
+		    quality=$12, tax_classification=$13, normalized_payload=$14, source_url=$15,
+		    raw_fingerprint=$16, retrieved_at=$17, updated_at=now()
 		WHERE id=$1`,
-		ev.ID, string(ev.Type), ev.Instrument.Symbol, ev.AmountPerUnit, ev.Currency,
+		ev.ID, string(ev.Type), ev.Instrument.Symbol, nullString(ev.Instrument.InstrumentID), ev.AmountPerUnit, ev.Currency,
 		ev.DeclarationAt, ev.ExDate, ev.RecordDate, ev.PaymentDate, string(status),
 		string(ev.Quality), nullString(ev.TaxClassification), payload, nullString(ev.SourceURL),
 		ev.RawFingerprint, ev.RetrievedAt)

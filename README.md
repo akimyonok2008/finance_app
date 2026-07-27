@@ -6,6 +6,14 @@ strategies, earn benchmark badges, and connect with other users. It is a
 tracking and education product: it does not connect to a broker or place
 trades.
 
+## CI status
+
+[![CI](https://github.com/akimyonok2008/finance_app/actions/workflows/ci.yml/badge.svg)](https://github.com/akimyonok2008/finance_app/actions/workflows/ci.yml)
+
+Pushes and pull requests run formatting, backend tests (including PostgreSQL
+integration and race checks), vet, frontend lint, production build, and frontend
+tests. CI uses mock providers and never contacts live financial-data services.
+
 ## Cash-funded portfolio tracking
 
 Portfolio activity is user-reported and tracking-only. The app does not place

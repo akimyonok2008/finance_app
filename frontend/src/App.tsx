@@ -70,6 +70,13 @@ const AchievementsPage = lazy(() =>
     }),
   ),
 );
+const AccountSettingsPage = lazy(() =>
+  import("@/pages/Settings/AccountSettingsPage").then(
+    ({ AccountSettingsPage }) => ({
+      default: AccountSettingsPage,
+    }),
+  ),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -208,6 +215,15 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <AchievementsPage />
+                  </ProtectedRoute>
+                }
+              />
+
+              <Route
+                path="/settings/account"
+                element={
+                  <ProtectedRoute>
+                    <AccountSettingsPage />
                   </ProtectedRoute>
                 }
               />

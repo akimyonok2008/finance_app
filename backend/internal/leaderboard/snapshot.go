@@ -11,12 +11,17 @@ import (
 // trailing-window leaderboards.
 type SnapshotStore interface {
 	// IndexAtOrBefore returns the most recent recorded index at or before cutoff
-	// and at or after notBefore. notBefore is the user's ranking-epoch timestamp:
-	// legacy snapshots recorded before the epoch are ignored so timeframe returns
-	// are never computed against a manipulable pre-epoch index. A zero notBefore
-	// disables the lower bound. found=false means there is no eligible history that
-	// old (the user is excluded from that timeframe rather than mis-ranked).
-	IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (index float64, found bool, err error)
+	// and at or after notBefore, plus that snapshot's own timestamp. notBefore is
+	// the user's ranking-epoch timestamp: legacy snapshots recorded before the
+	// epoch are ignored so timeframe returns are never computed against a
+	// manipulable pre-epoch index. A zero notBefore disables the lower bound.
+	// found=false means there is no eligible history that old (the user is
+	// excluded from that timeframe rather than mis-ranked). capturedAt lets the
+	// caller additionally bound how far the found snapshot may sit before
+	// cutoff — without it, a big gap in recorded history (a missed snapshot
+	// window, a paused-then-resumed account) would silently stretch what's
+	// labeled e.g. "1W" into a much longer real span.
+	IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (index float64, capturedAt time.Time, found bool, err error)
 }
 
 type indexPoint struct {
@@ -45,7 +50,7 @@ func (s *InMemorySnapshotStore) Record(_ context.Context, userID string, index f
 	return nil
 }
 
-func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string, cutoff, notBefore time.Time) (float64, bool, error) {
+func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string, cutoff, notBefore time.Time) (float64, time.Time, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	pts := s.byUserID[userID]
@@ -58,9 +63,9 @@ func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string
 			continue
 		}
 		if hasFloor && pts[i].at.Before(notBefore) {
-			return 0, false, nil // only pre-epoch history remains: ignore it
+			return 0, time.Time{}, false, nil // only pre-epoch history remains: ignore it
 		}
-		return pts[i].index, true, nil
+		return pts[i].index, pts[i].at, true, nil
 	}
-	return 0, false, nil
+	return 0, time.Time{}, false, nil
 }

@@ -182,7 +182,11 @@ func commonDates(pricesBySymbol map[string][]PricePoint) []string {
 func toPriceMap(series []PricePoint) map[string]float64 {
 	m := make(map[string]float64, len(series))
 	for _, p := range series {
-		m[p.Date] = p.AdjustedClose
+		if p.AdjustedClose != 0 {
+			m[p.Date] = p.AdjustedClose
+		} else {
+			m[p.Date] = p.RawClose
+		}
 	}
 	return m
 }

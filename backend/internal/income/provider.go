@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -115,6 +116,7 @@ func fingerprint(e ProviderIncomeEvent) string {
 		}
 	}
 	add(string(e.Type))
+	add(e.Instrument.InstrumentID)
 	add(e.Instrument.Symbol)
 	addF(e.AmountPerUnit)
 	add(e.Currency)
@@ -224,4 +226,33 @@ func requestInstruments(symbols []string) []InstrumentReference {
 		out = append(out, InstrumentReference{Symbol: s})
 	}
 	return out
+}
+
+func discoveryRequestInstruments(items []DiscoveryInstrument) []InstrumentReference {
+	sort.Slice(items, func(i, j int) bool {
+		return discoveryKey(items[i].InstrumentID, items[i].Symbol) <
+			discoveryKey(items[j].InstrumentID, items[j].Symbol)
+	})
+	out := make([]InstrumentReference, 0, len(items))
+	seen := map[string]bool{}
+	for _, item := range items {
+		key := discoveryKey(item.InstrumentID, item.Symbol)
+		if item.Symbol == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, InstrumentReference{InstrumentID: item.InstrumentID, Symbol: item.Symbol})
+	}
+	return out
+}
+
+func discoveryKey(instrumentID, symbol string) string {
+	if instrumentID != "" {
+		return "instrument:" + instrumentID + "|alias:" + normalizeDiscoverySymbol(symbol)
+	}
+	return "symbol:" + normalizeDiscoverySymbol(symbol)
+}
+
+func normalizeDiscoverySymbol(symbol string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol))
 }

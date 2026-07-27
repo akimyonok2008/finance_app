@@ -72,6 +72,18 @@ func (v *Valuation) Quote(symbol string) (quoteObservation, bool) {
 	return q, ok
 }
 
+// pinCostBasisFallback records a NON-market observation for a symbol that has
+// no live or cached price available. It exists only so a write-off's "value
+// before" checkpoint has a number to subtract when the position disappears
+// from "value after" — the position's own known cost basis, never an
+// invented market price. Callers must never use this to VALUE a position for
+// ordinary holdings/summary purposes; it is scoped to the one write-off
+// mutation that is about to realize this exact basis as a loss anyway.
+func (v *Valuation) pinCostBasisFallback(symbol string, costBasisPrice float64, currency string) {
+	v.quotes[symbol] = quoteObservation{Price: costBasisPrice, Currency: currency}
+	v.DataQualityStatus = "stale"
+}
+
 // ValueOpen returns the base-currency market value of the OPEN positions in the
 // set and whether any exist. It is pure with respect to the pinned observation:
 // no network calls, fully deterministic.
@@ -199,3 +211,34 @@ func openSymbols(positions []*Position) []string {
 func finitePositive(v float64) bool { return isFinite(v) && v > 0 }
 
 func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// executionPriceMinFactor/executionPriceMaxFactor bound how far a LIVE
+// (non-backdated) user-reported execution price may sit from the tracked
+// market quote pinned for the same mutation. They are deliberately generous —
+// ordinary volatility, wide spreads, and thinly-traded symbols must never trip
+// this — the goal is only to catch obvious fabrication (e.g. claiming a fill
+// at a small fraction, or a large multiple, of the real price).
+const (
+	executionPriceMinFactor = 0.2 // must be >= 20% of the live quote
+	executionPriceMaxFactor = 5.0 // must be <= 500% of the live quote
+)
+
+// validateLiveExecutionPrice enforces that bound for a live trade with a
+// user-supplied price. It is a no-op for a backdated trade (effectiveAt != nil
+// — there is no live comparator for a claimed past price, and backdating a
+// real historical trade is a deliberate, supported feature) and for a
+// provider-estimated price (the user left the field blank, so the "execution
+// price" IS the quote by construction).
+func validateLiveExecutionPrice(effectiveAt *time.Time, source string, executionPrice, quotePrice float64) error {
+	if effectiveAt != nil || source != PriceSourceUserRecorded {
+		return nil
+	}
+	if !finitePositive(quotePrice) {
+		return nil // nothing to compare against; other validation already covers this case
+	}
+	ratio := executionPrice / quotePrice
+	if ratio < executionPriceMinFactor || ratio > executionPriceMaxFactor {
+		return ErrImplausibleExecutionPrice
+	}
+	return nil
+}

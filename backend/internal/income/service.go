@@ -18,6 +18,12 @@ type Holder struct {
 	AcquiredAt  time.Time
 }
 
+type DiscoveryInstrument struct {
+	InstrumentID string
+	Symbol       string
+	AssetType    string
+}
+
 // AppliedIncome is the neutral, provider-free instruction the pipeline hands to
 // the portfolio gateway for ONE economic component of an event. Gross,
 // withholding and fee are separated; the gateway credits net cash (or reinvests
@@ -46,11 +52,11 @@ type AppliedIncome struct {
 // implemented by an adapter over the portfolio service, keeping this package
 // free of portfolio-domain types.
 type PortfolioGateway interface {
-	ActiveSymbols(ctx context.Context) ([]string, error)
-	HoldersOfSymbol(ctx context.Context, symbol string) ([]Holder, error)
+	DiscoveryInstruments(ctx context.Context, since time.Time) ([]DiscoveryInstrument, error)
+	HistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]Holder, error)
 	// EligibleQuantity reconstructs the user's holding of symbol as of asOf from
 	// the immutable ledger (historical entitlement, not current quantity).
-	EligibleQuantity(ctx context.Context, userID, symbol string, asOf time.Time) (float64, error)
+	EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error)
 	// ApplyIncome credits (or reinvests) one income component idempotently by
 	// requestID, through the aggregate coordinator.
 	ApplyIncome(ctx context.Context, userID, requestID string, in AppliedIncome) error
@@ -114,7 +120,7 @@ func NewService(provider IncomeEventProvider, store Store, gateway PortfolioGate
 		provider: provider, store: store, gateway: gateway, metrics: nopMetrics{},
 		prefs:    Preferences{UseEstimatedGross: true},
 		now:      func() time.Time { return time.Now().UTC() },
-		lookback: 14 * 24 * time.Hour,
+		lookback: 120 * 24 * time.Hour,
 		retryIn:  time.Hour,
 	}
 }
@@ -149,16 +155,37 @@ func (s *Service) RunOnce(ctx context.Context) error {
 // Ingest fetches provider events for currently-held symbols, normalizes them,
 // and upserts them idempotently (detecting corrections).
 func (s *Service) Ingest(ctx context.Context) error {
-	symbols, err := s.gateway.ActiveSymbols(ctx)
+	since := s.now().Add(-s.lookback)
+	instruments, err := s.gateway.DiscoveryInstruments(ctx, since)
 	if err != nil {
 		return err
 	}
-	if len(symbols) == 0 {
+	// Keep provider aliases for events already in a non-terminal lifecycle even
+	// when the portfolio episode has since disappeared from the current view.
+	pending, err := s.store.ListEventsByStatus(ctx,
+		StatusDetected, StatusScheduled, StatusEligibilityCalcuated, StatusAwaitingPayment,
+		StatusReadyToApply, StatusUnresolved, StatusFailedRetryable, StatusProcessedNoEntitlement)
+	if err != nil {
+		return err
+	}
+	byKey := map[string]DiscoveryInstrument{}
+	for _, item := range instruments {
+		byKey[discoveryKey(item.InstrumentID, item.Symbol)] = item
+	}
+	for _, ev := range pending {
+		item := DiscoveryInstrument{InstrumentID: ev.Instrument.InstrumentID, Symbol: ev.Instrument.Symbol}
+		byKey[discoveryKey(item.InstrumentID, item.Symbol)] = item
+	}
+	instruments = instruments[:0]
+	for _, item := range byKey {
+		instruments = append(instruments, item)
+	}
+	if len(instruments) == 0 {
 		return nil
 	}
 	req := IncomeEventRequest{
-		Instruments: requestInstruments(symbols),
-		Since:       s.now().Add(-s.lookback),
+		Instruments: discoveryRequestInstruments(instruments),
+		Since:       since,
 		Until:       s.now().Add(90 * 24 * time.Hour), // include near-future announced events
 	}
 	raw, err := s.provider.FetchIncomeEvents(ctx, req)
@@ -166,6 +193,18 @@ func (s *Service) Ingest(ctx context.Context) error {
 		return err
 	}
 	for _, e := range raw {
+		if e.Instrument.InstrumentID == "" {
+			if item, ok := byKey[discoveryKey("", e.Instrument.Symbol)]; ok {
+				e.Instrument.InstrumentID = item.InstrumentID
+			} else {
+				for _, item := range instruments {
+					if normalizeDiscoverySymbol(item.Symbol) == normalizeDiscoverySymbol(e.Instrument.Symbol) {
+						e.Instrument.InstrumentID = item.InstrumentID
+						break
+					}
+				}
+			}
+		}
 		s.metrics.Inc("income_events_fetched_total")
 		ev := normalize(s.provider.Name(), e, s.now())
 		changed, err := s.store.UpsertEvent(ctx, ev)
@@ -190,7 +229,7 @@ func (s *Service) Ingest(ctx context.Context) error {
 func (s *Service) Process(ctx context.Context) error {
 	events, err := s.store.ListEventsByStatus(ctx,
 		StatusDetected, StatusScheduled, StatusEligibilityCalcuated, StatusAwaitingPayment,
-		StatusReadyToApply, StatusUnresolved, StatusFailedRetryable)
+		StatusReadyToApply, StatusUnresolved, StatusFailedRetryable, StatusProcessedNoEntitlement)
 	if err != nil {
 		return err
 	}
@@ -227,7 +266,7 @@ func (s *Service) processEvent(ctx context.Context, ev IncomeEvent) {
 		return
 	}
 
-	holders, err := s.gateway.HoldersOfSymbol(ctx, ev.Instrument.Symbol)
+	holders, err := s.gateway.HistoricalHolders(ctx, ev.Instrument.InstrumentID, ev.Instrument.Symbol)
 	if err != nil {
 		return
 	}
@@ -237,8 +276,10 @@ func (s *Service) processEvent(ctx context.Context, ev IncomeEvent) {
 			applied++
 		}
 	}
-	if applied > 0 || len(holders) == 0 {
+	if applied > 0 {
 		_ = s.store.SetEventStatus(ctx, ev.ID, StatusApplied)
+	} else {
+		_ = s.store.SetEventStatus(ctx, ev.ID, StatusProcessedNoEntitlement)
 	}
 }
 
@@ -253,19 +294,15 @@ func (s *Service) trustedForAccountData(ev IncomeEvent) bool {
 // every component atomically. It returns true when the holder was credited.
 func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) bool {
 	entitlementDate := ev.entitlementDate()
-	// A holder who acquired the position AFTER the entitlement date is not
-	// entitled to this distribution.
-	if h.AcquiredAt.After(entitlementDate) {
-		_ = s.store.SkipApplication(ctx, ev.ID, h.PortfolioID, "acquired_after_entitlement")
-		return false
-	}
-	eligible, err := s.gateway.EligibleQuantity(ctx, h.UserID, ev.Instrument.Symbol, entitlementDate)
+	// Do not use the position row's CreatedAt as an entitlement shortcut:
+	// backdated trades are recorded later than their economic OccurredAt. The
+	// immutable activity ledger below is the authoritative cutoff calculation.
+	eligible, err := s.gateway.EligibleQuantity(ctx, h.UserID, ev.Instrument.InstrumentID, ev.Instrument.Symbol, entitlementDate)
 	if err != nil {
 		s.metrics.Inc("income_event_eligibility_failures_total")
 		return false
 	}
 	if !(eligible > 0) || math.IsInf(eligible, 0) || math.IsNaN(eligible) {
-		_ = s.store.SkipApplication(ctx, ev.ID, h.PortfolioID, "not_eligible")
 		return false
 	}
 

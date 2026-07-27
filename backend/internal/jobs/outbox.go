@@ -2,7 +2,10 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
@@ -15,6 +18,24 @@ type EventSource interface {
 	ClaimOutboxEvents(ctx context.Context, limit int) ([]portfolio.OutboxEvent, error)
 	MarkOutboxProcessed(ctx context.Context, id string) error
 	MarkOutboxFailed(ctx context.Context, id string, cause string) error
+}
+
+type BacklogSource interface {
+	OutboxBacklog(ctx context.Context) (pending int64, oldestAge time.Duration, err error)
+}
+
+func CheckProjectorReadiness(ctx context.Context, running bool, backlog BacklogSource, maxPending int64, maxAge time.Duration) error {
+	if !running {
+		return fmt.Errorf("projector is not running")
+	}
+	pending, age, err := backlog.OutboxBacklog(ctx)
+	if err != nil {
+		return err
+	}
+	if pending > maxPending || age > maxAge {
+		return fmt.Errorf("outbox backlog degraded: pending=%d oldest_age=%s", pending, age)
+	}
+	return nil
 }
 
 // RankedCache is the leaderboard cache surface the processor keeps in sync.
@@ -68,6 +89,8 @@ type OutboxProcessor struct {
 	achievements    AchievementEvaluator   // optional
 	batchSize       int
 	interval        time.Duration
+	startOnce       sync.Once
+	running         atomic.Bool
 }
 
 func NewOutboxProcessor(source EventSource, interval time.Duration) *OutboxProcessor {
@@ -88,21 +111,27 @@ func (p *OutboxProcessor) SetAchievements(a AchievementEvaluator) { p.achievemen
 
 // Start runs the processor until ctx is cancelled.
 func (p *OutboxProcessor) Start(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(p.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := p.ProcessOnce(ctx); err != nil {
+	p.startOnce.Do(func() {
+		go func() {
+			p.running.Store(true)
+			defer p.running.Store(false)
+			ticker := time.NewTicker(p.interval)
+			defer ticker.Stop()
+			for {
+				if _, err := p.ProcessOnce(ctx); err != nil && ctx.Err() == nil {
 					slog.Warn("outbox processing failed", "error", err)
 				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
+
+func (p *OutboxProcessor) Running() bool { return p.running.Load() }
 
 // ProcessOnce claims a batch and processes it, returning how many events were
 // settled successfully. A failing event is marked for retry and does not block

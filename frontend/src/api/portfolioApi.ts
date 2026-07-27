@@ -2,6 +2,7 @@ import { apiRequest } from "@/api/client";
 import type {
   CreatePositionInput,
   ClosedPosition,
+  PortfolioSettings,
   PortfolioSummary,
   Position,
   UpdatePositionInput,
@@ -15,6 +16,21 @@ import type {
 
 export function getPositions(signal?: AbortSignal): Promise<Position[]> {
   return apiRequest<Position[]>("/portfolio/positions", { signal });
+}
+
+export function getPortfolioSettings(
+  signal?: AbortSignal,
+): Promise<PortfolioSettings> {
+  return apiRequest<PortfolioSettings>("/portfolio", { signal });
+}
+
+export function updatePortfolioSettings(
+  input: Partial<Pick<PortfolioSettings, "auto_fund_purchases">>,
+): Promise<PortfolioSettings> {
+  return apiRequest<PortfolioSettings>("/portfolio/settings", {
+    method: "PATCH",
+    body: input,
+  });
 }
 
 export function getClosedPositions(signal?: AbortSignal): Promise<ClosedPosition[]> {

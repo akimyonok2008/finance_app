@@ -7,5 +7,5 @@
  */
 export const LEGACY_PORTFOLIO_REDIRECTS: Record<string, string> = {
   "/activity": "/portfolio?tab=transactions",
-  "/performance": "/portfolio?tab=performance",
+  "/performance": "/portfolio?tab=performance&timeframe=1M",
 };

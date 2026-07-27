@@ -82,6 +82,11 @@ func (s *BenchmarkConstructionService) CalculateReturn(ctx context.Context, reci
 		agg.AllSeriesAdjusted = agg.AllSeriesAdjusted && m.IsAdjusted
 		agg.AllSeriesTotalReturn = agg.AllSeriesTotalReturn && m.IsTotalReturn
 		agg.CorpActionsKnown = agg.CorpActionsKnown && m.CorpActionsKnown
+		if agg.CurrencyTreatment == "" {
+			agg.CurrencyTreatment = m.CurrencyTreatment
+		} else if agg.CurrencyTreatment != m.CurrencyTreatment {
+			agg.CurrencyTreatment = "mixed"
+		}
 	}
 	agg.Quality = aggQuality
 	for p := range providerSet {
@@ -190,7 +195,11 @@ func computeFingerprint(r BenchmarkReturnResult, flattened []AssetAllocation, se
 func seriesPointsHash(points []PricePoint) string {
 	var b strings.Builder
 	for _, p := range points {
-		b.WriteString(p.Date + ":" + strconv.FormatFloat(round(p.AdjustedClose, 8), 'f', 8, 64) + ";")
+		value := p.AdjustedClose
+		if value == 0 {
+			value = p.RawClose
+		}
+		b.WriteString(p.Date + ":" + strconv.FormatFloat(round(value, 8), 'f', 8, 64) + ";")
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])

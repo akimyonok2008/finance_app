@@ -133,17 +133,18 @@ func (r *PostgresRepository) List(ctx context.Context, userID string, from, to t
 	return out, rows.Err()
 }
 
-func (r *PostgresRepository) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, bool, error) {
+func (r *PostgresRepository) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error) {
 	var index float64
-	err := r.pool.QueryRow(ctx, `SELECT ranked_index
+	var capturedAt time.Time
+	err := r.pool.QueryRow(ctx, `SELECT ranked_index, captured_at
 		FROM ranked_performance_snapshots
 		WHERE user_id=$1 AND tracking_started_at=$2 AND captured_at <= $3
 		  AND data_quality_status='complete'
-		ORDER BY captured_at DESC LIMIT 1`, userID, epoch.UTC(), cutoff.UTC()).Scan(&index)
+		ORDER BY captured_at DESC LIMIT 1`, userID, epoch.UTC(), cutoff.UTC()).Scan(&index, &capturedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		return 0, time.Time{}, false, nil
 	}
-	return index, err == nil, err
+	return index, capturedAt, err == nil, err
 }
 
 func (r *PostgresRepository) Latest(ctx context.Context, userID, portfolioID string, epoch time.Time) (Snapshot, bool, error) {
@@ -155,6 +156,20 @@ func (r *PostgresRepository) Latest(ctx context.Context, userID, portfolioID str
 		return Snapshot{}, false, nil
 	}
 	return s, err == nil, err
+}
+
+func (r *PostgresRepository) LatestTrustedCapturedAt(ctx context.Context, userID, portfolioID string, epoch time.Time) (time.Time, bool, error) {
+	var capturedAt time.Time
+	err := r.pool.QueryRow(ctx, `SELECT captured_at
+		FROM ranked_performance_snapshots
+		WHERE user_id=$1 AND portfolio_id=$2 AND tracking_started_at=$3
+		  AND data_quality_status='complete'
+		ORDER BY captured_at DESC LIMIT 1`,
+		userID, portfolioID, epoch.UTC()).Scan(&capturedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	return capturedAt, err == nil, err
 }
 
 func (r *PostgresRepository) StatusAtOrBefore(ctx context.Context, portfolioID string, epoch, at time.Time) (performance.Status, bool, error) {

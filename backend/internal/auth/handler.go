@@ -40,6 +40,15 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+type deleteAccountRequest struct {
+	Password string `json:"password"`
+}
+
 type googleRequest struct {
 	Credential string `json:"credential"`
 	GCSRFToken string `json:"g_csrf_token,omitempty"`
@@ -150,12 +159,56 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user.Public())
 }
 
+// ChangePassword handles POST /auth/change-password. It requires the current
+// password even though the caller already holds a valid JWT: a destructive
+// or sensitive account action re-confirms the credential rather than trusting
+// session possession alone (a stolen token doesn't necessarily mean the
+// attacker knows the password).
+func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, ErrInvalidToken.Error())
+		return
+	}
+	var req changePasswordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.svc.ChangePassword(userID, req.CurrentPassword, req.NewPassword); err != nil {
+		writeError(w, statusForError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// DeleteAccount handles POST /auth/delete-account. It re-confirms the
+// password before soft-deleting the account; the caller's own token stops
+// working on its very next request once the account row is gone.
+func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, ErrInvalidToken.Error())
+		return
+	}
+	var req deleteAccountRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.svc.DeleteAccount(r.Context(), userID, req.Password); err != nil {
+		writeError(w, statusForError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // statusForError maps domain errors to HTTP status codes.
 func statusForError(err error) int {
 	switch {
 	case errors.Is(err, ErrEmailExists):
 		return http.StatusConflict
-	case errors.Is(err, ErrInvalidCredentials):
+	case errors.Is(err, ErrInvalidCredentials), errors.Is(err, ErrUserNotFound):
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrEmailRequired),
 		errors.Is(err, ErrPasswordRequired),

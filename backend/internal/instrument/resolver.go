@@ -72,7 +72,13 @@ func (r *Resolver) ResolveOrCreate(ctx context.Context, query IdentityQuery) (*I
 // ResolveDetailed is ResolveOrCreate plus the candidate list behind an
 // ambiguous outcome.
 func (r *Resolver) ResolveDetailed(ctx context.Context, query IdentityQuery) (Resolution, error) {
-	if existing, err := r.lookupLocal(ctx, query); err != nil {
+	return r.ResolveDetailedAt(ctx, query, nil)
+}
+
+// ResolveDetailedAt resolves time-scoped aliases for historical portfolio
+// transactions, so a former ticker such as FB can retain META's stable ID.
+func (r *Resolver) ResolveDetailedAt(ctx context.Context, query IdentityQuery, asOf *time.Time) (Resolution, error) {
+	if existing, err := r.lookupLocalAt(ctx, query, asOf); err != nil {
 		return Resolution{Quality: QualityUnresolved}, err
 	} else if existing != nil {
 		quality := existing.IdentityQuality
@@ -110,6 +116,10 @@ func (r *Resolver) ResolveDetailed(ctx context.Context, query IdentityQuery) (Re
 // A FIGI/ISIN/CUSIP hit is authoritative; ticker+exchange beats a bare ticker,
 // which can legitimately be ambiguous across exchanges.
 func (r *Resolver) lookupLocal(ctx context.Context, query IdentityQuery) (*Instrument, error) {
+	return r.lookupLocalAt(ctx, query, nil)
+}
+
+func (r *Resolver) lookupLocalAt(ctx context.Context, query IdentityQuery, asOf *time.Time) (*Instrument, error) {
 	attempts := []struct {
 		typ           AliasType
 		value         string
@@ -121,22 +131,17 @@ func (r *Resolver) lookupLocal(ctx context.Context, query IdentityQuery) (*Instr
 		{AliasCUSIP, query.CUSIP, "", "", false},
 		{AliasTicker, query.Ticker, query.ExchangeCode, query.MIC, false},
 	}
-	// A ticker-only fallback is attempted last and tolerates ambiguity by
-	// declining to answer (falls through to the provider) rather than erroring.
-	if query.ExchangeCode != "" || query.MIC != "" {
-		attempts = append(attempts, struct {
-			typ           AliasType
-			value         string
-			exchange, mic string
-			tolerateAmbig bool
-		}{AliasTicker, query.Ticker, "", "", true})
-	}
-
 	for _, a := range attempts {
 		if normalizeAliasValue(a.value) == "" {
 			continue
 		}
-		found, err := r.repo.FindInstrumentByAlias(ctx, a.typ, a.value, a.exchange, a.mic)
+		var found *Instrument
+		var err error
+		if asOf != nil {
+			found, err = r.repo.FindInstrumentByAliasAsOf(ctx, a.typ, a.value, a.exchange, a.mic, asOf.UTC())
+		} else {
+			found, err = r.repo.FindInstrumentByAlias(ctx, a.typ, a.value, a.exchange, a.mic)
+		}
 		if err != nil {
 			if errors.Is(err, ErrAliasConflict) && a.tolerateAmbig {
 				continue

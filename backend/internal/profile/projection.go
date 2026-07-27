@@ -142,12 +142,13 @@ func (s *Service) buildProfileInsights(ctx context.Context, summary *portfolio.P
 	openReturn := percentage(summary.UnrealizedGainLossBase, summary.ActiveCostBasisBase)
 	closedReturn := percentage(summary.RealizedGainLossBase, summary.ClosedCostBasisBase)
 	insights.OpenClosedPerformance = ProfileOpenClosedPerformance{
-		OpenReturnPercentage:     round2(openReturn),
-		ClosedReturnPercentage:   round2(closedReturn),
-		OpenContributionPoints:   round2(openPoints),
-		ClosedContributionPoints: round2(closedPoints),
-		HasClosedPositions:       len(summary.ClosedPositions) > 0,
-		CompositionVisible:       showComposition,
+		OpenReturnPercentage:       round2(openReturn),
+		ClosedReturnPercentage:     round2(closedReturn),
+		OpenContributionPoints:     round2(openPoints),
+		ClosedContributionPoints:   round2(closedPoints),
+		HasClosedPositions:         len(summary.ClosedPositions) > 0,
+		CompositionVisible:         showComposition,
+		IncludesSelfReportedPrices: summary.HasSelfReportedExecutionPrice,
 	}
 	insights.PerformanceDrivers = buildPerformanceDrivers(summary, insights.FocusAreas, showComposition)
 	if showComposition {

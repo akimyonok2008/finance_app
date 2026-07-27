@@ -61,9 +61,15 @@ const EMPTY_HISTORY =
  * snapshot history. Nothing on this screen is recalculated in the browser, and
  * missing analytics render as "—" rather than as zero.
  */
-export function PortfolioPerformanceTab() {
-  const [timeframe, setTimeframe] = useState<PerformanceTimeframe>("1M");
+export function PortfolioPerformanceTab({
+  timeframe = "1M",
+  onTimeframeChange,
+}: {
+  timeframe?: PerformanceTimeframe;
+  onTimeframeChange?: (timeframe: PerformanceTimeframe) => void;
+}) {
   const [mode, setMode] = useState<ChartMode>("return");
+  const setTimeframe = onTimeframeChange ?? (() => undefined);
 
   const history = usePerformanceHistory(timeframe);
   const valueHistory = usePortfolioValueHistory(timeframe);
@@ -83,7 +89,16 @@ export function PortfolioPerformanceTab() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-200/60">
+          Selected period
+        </p>
+        <p className="mt-1 text-xs text-zinc-500">
+          Ranked performance and competition metrics for {timeframe}.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <OverviewCard
           label="Ranked Return"
           icon={Percent}
@@ -98,18 +113,6 @@ export function PortfolioPerformanceTab() {
           )}
           unavailableReason={
             ranked?.available ? undefined : (ranked?.reason ?? EMPTY_HISTORY)
-          }
-        />
-        <OverviewCard
-          label="Economic P&L"
-          icon={Wallet}
-          hint="Ledger reconciliation, since inception"
-          value={economicPnl === null ? "—" : signedMoney(economicPnl, currency)}
-          valueClassName={gainLossColor(economicPnl ?? 0)}
-          unavailableReason={
-            economicPnl === null
-              ? "Total portfolio P&L is unavailable: the ledger does not cover the full holding history."
-              : undefined
           }
         />
         <OverviewCard
@@ -172,7 +175,7 @@ export function PortfolioPerformanceTab() {
                     : "text-zinc-500 hover:bg-zinc-800/70 hover:text-zinc-100",
                 )}
               >
-                {item}
+                {item === "ALL" ? "All" : item}
               </button>
             ))}
           </div>
@@ -215,13 +218,6 @@ export function PortfolioPerformanceTab() {
         </p>
       </Card>
 
-      <EconomicBreakdownSection
-        breakdown={performance.data?.economic_breakdown}
-        currency={currency}
-        isLoading={performance.isLoading}
-        isError={performance.isError}
-      />
-
       <RiskConsistencySection risk={ranked?.risk} isLoading={history.isLoading} />
 
       <BenchmarkAndCompetitionSection
@@ -232,6 +228,35 @@ export function PortfolioPerformanceTab() {
         participants={standing.data?.participant_count}
         standingReason={standing.data?.reason}
         isLoading={history.isLoading || standing.isLoading}
+      />
+
+      <div className="border-t border-indigo-300/10 pt-2">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-200/60">
+          Since inception
+        </p>
+        <p className="mt-1 text-xs text-zinc-500">
+          Ledger economics and attribution across the portfolio's full history.
+        </p>
+      </div>
+
+      <OverviewCard
+        label="Economic P&L"
+        icon={Wallet}
+        hint="Since inception"
+        value={economicPnl === null ? "—" : signedMoney(economicPnl, currency)}
+        valueClassName={gainLossColor(economicPnl ?? 0)}
+        unavailableReason={
+          economicPnl === null
+            ? "Total portfolio P&L is unavailable: the ledger does not cover the full holding history."
+            : undefined
+        }
+      />
+
+      <EconomicBreakdownSection
+        breakdown={performance.data?.economic_breakdown}
+        currency={currency}
+        isLoading={performance.isLoading}
+        isError={performance.isError}
       />
 
       <ContributionSection

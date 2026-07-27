@@ -12,13 +12,16 @@ import (
 // requested bounds (weekends, holidays, provider coverage), and reporting a
 // benchmark difference without them would be a silent timeframe mismatch.
 type BenchmarkReturn struct {
-	RecipeID         string
-	Name             string
-	ReturnPercentage float64
-	EffectiveStart   time.Time
-	EffectiveEnd     time.Time
-	Quality          string
-	Synthetic        bool
+	RecipeID              string
+	Name                  string
+	ReturnPercentage      float64
+	EffectiveStart        time.Time
+	EffectiveEnd          time.Time
+	Quality               string
+	Synthetic             bool
+	DataType              string
+	TotalReturnComparable bool
+	CurrencyTreatment     string
 }
 
 // BenchmarkReturner is the optional port to the benchmark construction engine.
@@ -60,20 +63,25 @@ type BenchmarkComparison struct {
 	PortfolioReturnPercentage  *float64 `json:"portfolio_return_percentage,omitempty"`
 	DifferencePercentagePoints *float64 `json:"difference_percentage_points,omitempty"`
 
-	DataQuality string `json:"data_quality,omitempty"`
-	IsSynthetic bool   `json:"is_synthetic,omitempty"`
+	DataQuality       string `json:"data_quality,omitempty"`
+	DataType          string `json:"data_type"`
+	DataQualityStatus string `json:"data_quality_status"`
+	CurrencyTreatment string `json:"currency_treatment,omitempty"`
+	IsSynthetic       bool   `json:"is_synthetic,omitempty"`
 }
 
 const (
 	reasonBenchmarkUnavailable = "Benchmark comparison is unavailable: no benchmark price source is configured."
 	reasonBenchmarkNoData      = "Benchmark comparison is unavailable: the benchmark has no usable price series for this window."
 	reasonBenchmarkNoOverlap   = "Benchmark comparison is unavailable: no ranked snapshots fall inside the benchmark's trading window, so the two returns could not be measured over the same dates."
+	reasonBenchmarkPriceOnly   = "Price-only benchmark data is not comparable with dividend-inclusive portfolio return."
+	reasonBenchmarkCurrency    = "Benchmark comparison is unavailable: currency treatment is undefined."
 )
 
 // benchmarkComparison aligns the benchmark's own return with the portfolio's
 // ranked return over identical boundary dates.
 func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) BenchmarkComparison {
-	out := BenchmarkComparison{RecipeID: DefaultBenchmarkRecipeID}
+	out := BenchmarkComparison{RecipeID: DefaultBenchmarkRecipeID, DataType: "unavailable", DataQualityStatus: "unavailable"}
 	if s.benchmark == nil {
 		out.RecipeID = ""
 		out.Reason = reasonBenchmarkUnavailable
@@ -95,6 +103,27 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 	out.Name = result.Name
 	out.DataQuality = result.Quality
 	out.IsSynthetic = result.Synthetic
+	out.DataType = result.DataType
+	out.CurrencyTreatment = result.CurrencyTreatment
+	// Older in-process implementations predate explicit provenance. Preserve
+	// their contract while every production adapter now supplies these fields.
+	if out.DataType == "" {
+		out.DataType = "adjusted_close"
+		result.TotalReturnComparable = true
+	}
+	if out.CurrencyTreatment == "" && result.DataType == "" {
+		out.CurrencyTreatment = "legacy_same_currency"
+	}
+	if !result.TotalReturnComparable {
+		out.DataQualityStatus = "insufficient_for_total_return_comparison"
+		out.Reason = reasonBenchmarkPriceOnly
+		return out
+	}
+	if out.CurrencyTreatment == "" {
+		out.DataQualityStatus = "currency_treatment_undefined"
+		out.Reason = reasonBenchmarkCurrency
+		return out
+	}
 
 	// The benchmark's effective window is a pair of trading DAYS. Take the last
 	// ranked snapshot at or before the end of each boundary day so both legs
@@ -117,6 +146,7 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 	portfolio := round4(portfolioReturn)
 	difference := round4(portfolio - benchmarkReturn)
 	out.Available = true
+	out.DataQualityStatus = "sufficient_for_comparison"
 	out.AlignedFrom = from.Format("2006-01-02")
 	out.AlignedTo = to.Format("2006-01-02")
 	out.BenchmarkReturnPercentage = &benchmarkReturn

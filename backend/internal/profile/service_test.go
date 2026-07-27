@@ -34,6 +34,35 @@ func (s testSummaries) GetSummary(_ context.Context, id string) (*portfolio.Port
 	return &portfolio.PortfolioSummary{PortfolioIndex: 100, Positions: []portfolio.PositionSummary{}}, nil
 }
 
+// countingSummaries counts SummaryProvider calls so tests can prove the
+// expensive full summary is (or is not) invoked.
+type countingSummaries struct {
+	calls *int
+	data  map[string]*portfolio.PortfolioSummary
+}
+
+func (s countingSummaries) GetSummary(_ context.Context, id string) (*portfolio.PortfolioSummary, error) {
+	*s.calls++
+	if summary, ok := s.data[id]; ok {
+		return summary, nil
+	}
+	return &portfolio.PortfolioSummary{PortfolioIndex: 100, Positions: []portfolio.PositionSummary{}}, nil
+}
+
+// countingWeights is a PublicWeightsProvider stub with its own call counter.
+type countingWeights struct {
+	calls *int
+	data  map[string]*portfolio.PortfolioSummary
+}
+
+func (w countingWeights) GetPublicWeights(_ context.Context, id string) (*portfolio.PortfolioSummary, error) {
+	*w.calls++
+	if summary, ok := w.data[id]; ok {
+		return summary, nil
+	}
+	return &portfolio.PortfolioSummary{PortfolioIndex: 100, Positions: []portfolio.PositionSummary{}}, nil
+}
+
 type testHistory map[string][]PublicPerformancePoint
 
 func (h testHistory) RankedHistory(_ context.Context, userID string, _, _ time.Time) ([]PublicPerformancePoint, error) {
@@ -126,6 +155,34 @@ func TestProfilesDefaultPrivateUpdateAndHandleConflict(t *testing.T) {
 	assert.Len(t, updated.PublicPreview.PublicWeights, 2)
 }
 
+// TestOnAccountDeleted_UnpublishesProfile: deleting an account must stop its
+// profile from resolving via a direct handle lookup (GetPublic reads the
+// profile repository directly and has no idea whether the account still
+// exists), even though the profile row itself is left in place.
+func TestOnAccountDeleted_UnpublishesProfile(t *testing.T) {
+	ctx := context.Background()
+	svc := testService()
+	owner, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	public, weights := true, true
+	owner, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &weights})
+	require.NoError(t, err)
+	_, err = svc.GetPublic(ctx, owner.Handle)
+	require.NoError(t, err, "sanity check: the profile is public before deletion")
+
+	require.NoError(t, svc.OnAccountDeleted(ctx, "u1"))
+
+	_, err = svc.GetPublic(ctx, owner.Handle)
+	assert.ErrorIs(t, err, ErrNotFound, "a deleted account's profile must no longer be publicly resolvable")
+}
+
+// TestOnAccountDeleted_NoProfileIsNoOp covers a user who never created a
+// profile: deletion must not error just because there's nothing to unpublish.
+func TestOnAccountDeleted_NoProfileIsNoOp(t *testing.T) {
+	svc := testService()
+	assert.NoError(t, svc.OnAccountDeleted(context.Background(), "never-had-a-profile"))
+}
+
 func TestPublicProfilePrivacyVisibilityAndHiddenWeights(t *testing.T) {
 	ctx := context.Background()
 	svc := testService()
@@ -163,6 +220,168 @@ func TestPublicProfilePrivacyVisibilityAndHiddenWeights(t *testing.T) {
 	}
 	assert.NotContains(t, string(body), "private@example.com")
 	assert.NotContains(t, string(body), "secret-portfolio")
+}
+
+// TestPublicInfoForUser_PrefersCheapWeightsProvider is the leaderboard
+// enrichment path (PublicInfoForUser). When a PublicWeightsProvider is wired,
+// it must be used instead of the full ledger-scanning SummaryProvider: that
+// full scan is what makes enriching every public-weights leaderboard row
+// expensive, and it computes nothing PublicInfoForUser actually needs.
+func TestPublicInfoForUser_PrefersCheapWeightsProvider(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
+
+	var fullCalls int
+	full := countingSummaries{calls: &fullCalls, data: map[string]*portfolio.PortfolioSummary{
+		"u1": {CurrentValue: 1000, Positions: []portfolio.PositionSummary{
+			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+		}},
+	}}
+	var cheapCalls int
+	cheap := countingWeights{calls: &cheapCalls, data: map[string]*portfolio.PortfolioSummary{
+		"u1": {CurrentValue: 500, Positions: []portfolio.PositionSummary{
+			{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: 500, CurrentPriceCurrency: "USD"},
+		}},
+	}}
+
+	svc := NewService(repo, users, full)
+	svc.SetPublicWeightsProvider(cheap)
+
+	_, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	public, weights := true, true
+	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &weights})
+	require.NoError(t, err)
+
+	fullCalls, cheapCalls = 0, 0 // isolate PublicInfoForUser's own calls from UpdateMe's preview
+	info, ok, err := svc.PublicInfoForUser(ctx, "u1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, info.Weights, 1)
+	assert.Equal(t, "MSFT", info.Weights[0].Symbol, "the cheap weights provider's data must win when it is wired")
+	assert.Equal(t, 1, cheapCalls)
+	assert.Equal(t, 0, fullCalls, "the full ledger-scanning SummaryProvider must not run when the cheap provider is available")
+}
+
+// TestPublicInfoForUser_FallsBackToSummaryProviderWhenUnwired covers a
+// PublicWeightsProvider never being set (e.g. an older wiring): the leaderboard
+// enrichment must still work correctly via the original SummaryProvider path.
+func TestPublicInfoForUser_FallsBackToSummaryProviderWhenUnwired(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
+	full := testSummaries{"u1": {CurrentValue: 1000, Positions: []portfolio.PositionSummary{
+		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+	}}}
+	svc := NewService(repo, users, full)
+	// SetPublicWeightsProvider intentionally left unset.
+
+	_, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	public, weights := true, true
+	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &weights})
+	require.NoError(t, err)
+
+	info, ok, err := svc.PublicInfoForUser(ctx, "u1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, info.Weights, 1)
+	assert.Equal(t, "AAPL", info.Weights[0].Symbol)
+}
+
+// TestExploreSummaryProvider_IsIsolatedFromOwnerAndPublicViews: a caching
+// decorator in front of exploreSummaryProvider must only affect Explore's own
+// caller-comparison lookup — GetMe (the owner's own preview) and GetPublic (a
+// public profile page) must keep reading the UNCACHED shared SummaryProvider,
+// since both are reasonably expected to reflect a caller's own just-made
+// changes immediately.
+func TestExploreSummaryProvider_IsIsolatedFromOwnerAndPublicViews(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
+
+	shared := testSummaries{"u1": {CurrentValue: 1000, PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
+		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+	}}}
+	exploreOnly := testSummaries{"u1": {CurrentValue: 2000, PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
+		{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: 2000, CurrentPriceCurrency: "USD"},
+	}}}
+
+	svc := NewService(repo, users, shared)
+	svc.SetExploreSummaryProvider(exploreOnly)
+
+	_, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	public, weights := true, true
+	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &weights})
+	require.NoError(t, err)
+
+	// exploreSummaryProvider() must resolve to the dedicated provider...
+	resolved, err := svc.exploreSummaryProvider().GetSummary(ctx, "u1")
+	require.NoError(t, err)
+	require.Len(t, resolved.Positions, 1)
+	assert.Equal(t, "MSFT", resolved.Positions[0].Symbol)
+
+	// ...while GetMe (owner's own preview) still reads the SHARED provider.
+	me, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	require.Len(t, me.PublicPreview.PublicWeights, 1)
+	assert.Equal(t, "AAPL", me.PublicPreview.PublicWeights[0].Symbol)
+}
+
+// TestExploreSummaryProvider_DefaultsToSharedProviderWhenUnset covers the
+// backward-compatible default: no dedicated Explore provider means Explore
+// uses the same SummaryProvider as everything else.
+func TestExploreSummaryProvider_DefaultsToSharedProviderWhenUnset(t *testing.T) {
+	svc := testService()
+	// SetExploreSummaryProvider intentionally left unset.
+	resolved, err := svc.exploreSummaryProvider().GetSummary(context.Background(), "u1")
+	require.NoError(t, err)
+	assert.Equal(t, 1000.0, resolved.CurrentValue)
+}
+
+// TestPublicProfile_DisclosesSelfReportedExecutionPrices: the ranked index
+// (PortfolioIndex/ReturnPercentage) is always priced from tracked market
+// quotes, but open/closed holdings P&L is built directly from whatever
+// execution price the user entered — a public viewer must be able to tell
+// when those two figures include an unverifiable, self-reported price.
+func TestPublicProfile_DisclosesSelfReportedExecutionPrices(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
+	flagged := testSummaries{"u1": {
+		CurrentValue: 1000, PortfolioIndex: 110, ActiveCostBasisBase: 800, ActiveCurrentValueBase: 1000,
+		UnrealizedGainLossBase: 200, HasSelfReportedExecutionPrice: true,
+		Positions: []portfolio.PositionSummary{
+			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+		},
+	}}
+	svc := NewService(repo, users, flagged)
+
+	_, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	public := true
+	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public})
+	require.NoError(t, err)
+
+	out, err := svc.GetPublic(ctx, "alpha_user")
+	require.NoError(t, err)
+	assert.True(t, out.Insights.OpenClosedPerformance.IncludesSelfReportedPrices)
+}
+
+func TestPublicProfile_DoesNotFlagWhenNoSelfReportedPrices(t *testing.T) {
+	ctx := context.Background()
+	svc := testService() // default stub summaries never set HasSelfReportedExecutionPrice
+	owner, err := svc.GetMe(ctx, "u1")
+	require.NoError(t, err)
+	public := true
+	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public})
+	require.NoError(t, err)
+
+	out, err := svc.GetPublic(ctx, owner.Handle)
+	require.NoError(t, err)
+	assert.False(t, out.Insights.OpenClosedPerformance.IncludesSelfReportedPrices)
 }
 
 func TestPublicProfileClosedPositionsAreSafeWhenWeightsVisible(t *testing.T) {

@@ -924,3 +924,9 @@ PostgreSQL integration tests require:
 ```bash
 DATABASE_URL_TEST="postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" go test ./...
 ```
+
+The embedded migration runner holds an application-specific PostgreSQL advisory
+lock and applies each migration in its own transaction. Migration files must
+therefore contain only operations PostgreSQL permits inside a transaction;
+unsupported operations fail with the migration filename and require an explicit
+future non-transactional mechanism rather than silently weakening atomicity.

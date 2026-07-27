@@ -48,6 +48,11 @@ var (
 	// ErrPositionClosed is returned when an action requires an open position but
 	// the position has already been closed.
 	ErrPositionClosed = errors.New("position is already closed")
+	// ErrPositionIsPriceable guards the write-off escape hatch: it is only for
+	// a position genuinely stuck with no available market price. A priceable
+	// position must be sold normally — write-off is not a general-purpose way
+	// to erase a losing position from realized results.
+	ErrPositionIsPriceable = errors.New("this position still has an available market price; sell it instead of writing it off")
 	// ErrPortfolioNotFound is an internal repository signal that a user has no
 	// portfolio yet; the service responds by creating the default portfolio.
 	ErrPortfolioNotFound = errors.New("portfolio not found")
@@ -71,6 +76,18 @@ var (
 	// not finite.
 	ErrInvalidBuyFee = errors.New("purchase fee must be non-negative")
 
+	// ErrImplausibleExecutionPrice is returned when a user-entered execution
+	// price for a LIVE (non-backdated) trade is wildly inconsistent with the
+	// tracked market quote pinned for the same mutation — e.g. claiming a fill
+	// far below or above the current price. It exists because current holdings
+	// P&L and public open/closed return percentages are built directly from
+	// this price, unlike the ranked leaderboard index, which values every
+	// position at the tracked quote and is unaffected by it. Backdated trades
+	// are exempt: no live quote exists for the claimed date to compare against,
+	// and backdating a real historical trade is a deliberate, supported
+	// feature.
+	ErrImplausibleExecutionPrice = errors.New("execution price is too far from the current market price for a live trade; backdate the trade with effective_at if this was a past transaction")
+
 	// ErrHistoricalRankedConflict is returned when a backdated transaction would
 	// change state that an already-computed, trusted ranked snapshot captured.
 	// Alarvest does NOT rebuild ranked history: the transaction is refused so
@@ -79,7 +96,11 @@ var (
 	// ErrHistoricalQuantityInsufficient is returned when a backdated sale
 	// exceeds the quantity the position actually held at effective_at, measured
 	// by chronological replay of the activity ledger's quantity effects.
-	ErrHistoricalQuantityInsufficient = errors.New("the position did not hold that quantity at this transaction date")
+	ErrHistoricalQuantityInsufficient       = errors.New("the position did not hold that quantity at this transaction date")
+	ErrHistoricalExecutionPriceRequired     = errors.New("backdated trades require an explicit execution price")
+	ErrHistoricalEpisodeNotOpen             = errors.New("selected position episode was not open at effective_at")
+	ErrInstrumentIdentityAmbiguous          = errors.New("instrument identity is ambiguous; provide exchange or MIC")
+	ErrInstrumentIdentityUnresolvedConflict = errors.New("an unresolved open position already uses this symbol; resolve the instrument before adding another listing")
 
 	// ErrUnsupportedMutation guards the mutation-kind switch.
 	ErrUnsupportedMutation = errors.New("unsupported portfolio mutation")

@@ -119,6 +119,29 @@ func TestBenchmarkComparisonWithheldOnProviderError(t *testing.T) {
 	assert.NotEmpty(t, got.Reason)
 }
 
+func TestBenchmarkComparisonWithheldForRawCloseButPortfolioHistoryRemainsUsable(t *testing.T) {
+	svc := &Service{benchmark: &stubBenchmark{result: BenchmarkReturn{
+		RecipeID: "SPY", Name: "S&P 500", ReturnPercentage: 3,
+		EffectiveStart: day(2026, time.January, 2),
+		EffectiveEnd:   day(2026, time.January, 5),
+		Quality:        "acceptable", DataType: "raw_close",
+		CurrencyTreatment: "native_quote_currency_unhedged",
+	}}}
+	points := []Snapshot{
+		{CapturedAt: day(2026, time.January, 2), RankedIndex: 100},
+		{CapturedAt: day(2026, time.January, 5), RankedIndex: 105},
+	}
+
+	got := svc.benchmarkComparison(context.Background(), points)
+	assert.False(t, got.Available)
+	assert.Equal(t, "raw_close", got.DataType)
+	assert.Equal(t, "insufficient_for_total_return_comparison", got.DataQualityStatus)
+	assert.Contains(t, got.Reason, "not comparable")
+	portfolioReturn, err := TimeframeReturnPercent(points[0].RankedIndex, points[1].RankedIndex)
+	require.NoError(t, err)
+	assert.InDelta(t, 5.0, portfolioReturn, 1e-9)
+}
+
 // Provenance travels with the number so a synthetic/mock comparison is labelled.
 func TestBenchmarkComparisonCarriesDataProvenance(t *testing.T) {
 	svc := &Service{benchmark: &stubBenchmark{result: BenchmarkReturn{

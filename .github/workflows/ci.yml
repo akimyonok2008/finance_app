@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: finance_app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d finance_app_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL_TEST: postgres://postgres:postgres@localhost:5432/finance_app_test?sslmode=disable
+      APP_ENV: test
+      STORAGE_PROVIDER: memory
+      PRICE_PROVIDER: mock
+      ENABLE_REAL_MARKET_DATA: "false"
+      ENABLE_BACKGROUND_WORKERS: "false"
+      ENABLE_QUOTE_REFRESH_WORKER: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Wait for PostgreSQL
+        run: |
+          for attempt in {1..30}; do
+            pg_isready -h localhost -p 5432 -U postgres -d finance_app_test && exit 0
+            sleep 1
+          done
+          exit 1
+
+      - name: Check Go formatting
+        working-directory: backend
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Test backend and PostgreSQL integrations
+        working-directory: backend
+        run: go test ./... 2>&1 | tee go-test.log
+
+      - name: Run race detector
+        working-directory: backend
+        run: go test -race ./... 2>&1 | tee go-race.log
+
+      - name: Vet backend
+        working-directory: backend
+        run: go vet ./... 2>&1 | tee go-vet.log
+
+      - name: Upload backend failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-failure-logs
+          path: backend/*.log
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test

@@ -104,6 +104,11 @@ export type ProfileOpenClosedPerformance = {
   closed_contribution_points: number;
   has_closed_positions: boolean;
   composition_visible: boolean;
+  // True when open_return_percentage or closed_return_percentage above is
+  // built from at least one user-entered execution price rather than a
+  // provider estimate. Unlike the ranked index (always priced from tracked
+  // market quotes), these two figures are unverifiable whenever this is true.
+  includes_self_reported_prices: boolean;
 };
 
 export type ProfileInsights = {

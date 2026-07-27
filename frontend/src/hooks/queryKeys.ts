@@ -17,6 +17,7 @@ export const queryKeys = {
     closedPosition: (id: string) => ["portfolio", "closedPosition", id] as const,
     cash: ["portfolio", "cash"] as const,
     allocation: ["portfolio", "allocation"] as const,
+    settings: ["portfolio", "settings"] as const,
     sellPreview: (positionId: string, quantity: number, price: number, fee: number) =>
       ["portfolio", "sellPreview", positionId, quantity, price, fee] as const,
   },
@@ -24,6 +25,17 @@ export const queryKeys = {
     all: ["performance"] as const,
     summary: ["performance", "summary"] as const,
     history: (timeframe: string) => ["performance", "history", timeframe] as const,
+    risk: (timeframe: string) => ["performance", "risk", timeframe] as const,
+    benchmark: (timeframe: string, benchmark: string) =>
+      ["performance", "benchmark", timeframe, benchmark] as const,
+    competition: (timeframe: string) =>
+      ["performance", "competition", timeframe] as const,
+    economicSinceInception: ["performance", "economic", "sinceInception"] as const,
+    contributorsSinceInception: [
+      "performance",
+      "contributors",
+      "sinceInception",
+    ] as const,
     valueHistory: (timeframe: string) =>
       ["performance", "valueHistory", timeframe] as const,
     attribution: ["performance", "attribution"] as const,

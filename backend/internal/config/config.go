@@ -50,7 +50,15 @@ type Config struct {
 	RedisURL        string // empty disables Redis
 	BaseCurrency    string
 
+	// CORSAllowedOrigins is the explicit cross-origin allow-list
+	// (CORS_ALLOWED_ORIGINS, comma-separated). Empty means "no explicit
+	// allow-list configured" — the server then falls back to "*" outside
+	// production, or to no CORS headers at all in production.
+	CORSAllowedOrigins []string
+
 	EnableBackgroundWorkers        bool
+	OutboxReadinessMaxPending      int
+	OutboxReadinessMaxAge          time.Duration
 	LeaderboardRefreshInterval     time.Duration
 	PriceCacheTTL                  time.Duration
 	EnableRealMarketData           bool
@@ -140,17 +148,20 @@ func Load() Config {
 	loadDotEnvFiles(envFileCandidates()...)
 
 	return Config{
-		AppEnv:          getEnv("APP_ENV", defaultAppEnv),
-		Port:            getEnv("PORT", defaultPort),
-		JWTSecret:       getEnv("JWT_SECRET", defaultJWTSecret),
-		JWTExpiry:       time.Duration(getEnvInt("JWT_EXPIRY_HOURS", defaultJWTExpiryHr)) * time.Hour,
-		PriceProvider:   getEnv("PRICE_PROVIDER", defaultPriceProvider),
-		StorageProvider: getEnv("STORAGE_PROVIDER", defaultStorageProvider),
-		DatabaseURL:     getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable"),
-		RedisURL:        getEnv("REDIS_URL", ""),
-		BaseCurrency:    getEnv("BASE_CURRENCY", defaultBaseCurrency),
+		AppEnv:             getEnv("APP_ENV", defaultAppEnv),
+		CORSAllowedOrigins: getEnvList("CORS_ALLOWED_ORIGINS"),
+		Port:               getEnv("PORT", defaultPort),
+		JWTSecret:          getEnv("JWT_SECRET", defaultJWTSecret),
+		JWTExpiry:          time.Duration(getEnvInt("JWT_EXPIRY_HOURS", defaultJWTExpiryHr)) * time.Hour,
+		PriceProvider:      getEnv("PRICE_PROVIDER", defaultPriceProvider),
+		StorageProvider:    getEnv("STORAGE_PROVIDER", defaultStorageProvider),
+		DatabaseURL:        getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable"),
+		RedisURL:           getEnv("REDIS_URL", ""),
+		BaseCurrency:       getEnv("BASE_CURRENCY", defaultBaseCurrency),
 
 		EnableBackgroundWorkers:        getEnvBool("ENABLE_BACKGROUND_WORKERS", defaultEnableBackground),
+		OutboxReadinessMaxPending:      getEnvInt("OUTBOX_READINESS_MAX_PENDING", 1000),
+		OutboxReadinessMaxAge:          getEnvDuration("OUTBOX_READINESS_MAX_AGE", 15*time.Minute),
 		LeaderboardRefreshInterval:     time.Duration(getEnvInt("LEADERBOARD_REFRESH_INTERVAL_SECONDS", defaultLeaderboardSecs)) * time.Second,
 		PriceCacheTTL:                  time.Duration(getEnvInt("PRICE_CACHE_TTL_SECONDS", defaultPriceCacheSecs)) * time.Second,
 		EnableRealMarketData:           getEnvBool("ENABLE_REAL_MARKET_DATA", false),
@@ -182,7 +193,7 @@ func Load() Config {
 		IncomePrimaryProvider:     getEnv("INCOME_PRIMARY_PROVIDER", "manual_dev"),
 		IncomeFallbackProvider:    getEnv("INCOME_FALLBACK_PROVIDER", ""),
 		IncomePollInterval:        getEnvDuration("INCOME_EVENT_POLL_INTERVAL", 24*time.Hour),
-		IncomeLookback:            getEnvDuration("INCOME_EVENT_LOOKBACK", 14*24*time.Hour),
+		IncomeLookback:            getEnvDuration("INCOME_EVENT_LOOKBACK", 120*24*time.Hour),
 		IncomeApplicationInterval: getEnvDuration("INCOME_APPLICATION_INTERVAL", time.Hour),
 		IncomeRetryInterval:       getEnvDuration("INCOME_RETRY_INTERVAL", time.Hour),
 		IncomeReinvestByDefault:   getEnvBool("INCOME_REINVEST_BY_DEFAULT", false),
@@ -244,6 +255,15 @@ func (c Config) Validate() error {
 	if c.AppleAuthEnabled && strings.TrimSpace(c.AppleClientID) == "" {
 		return fmt.Errorf("APPLE_AUTH_ENABLED=true requires APPLE_CLIENT_ID")
 	}
+	// A missing JWT_SECRET only warns in development (see UsingDefaultSecret's
+	// caller), which makes a credential-less production deployment look
+	// healthy while every token is forgeable from the public source. Refuse to
+	// start instead, matching how the benchmark award policy already treats
+	// APP_ENV=production as the one environment that must not silently
+	// degrade to an insecure default.
+	if strings.EqualFold(c.AppEnv, "production") && c.UsingDefaultSecret() {
+		return fmt.Errorf("APP_ENV=production requires JWT_SECRET to be set (refusing to start with the default development secret)")
+	}
 	return nil
 }
 
@@ -252,6 +272,23 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvList splits a comma-separated env var into trimmed, non-empty
+// entries. An unset or blank var yields nil (not an empty non-nil slice), so
+// callers can treat "nil" as "no allow-list configured".
+func getEnvList(key string) []string {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) int {

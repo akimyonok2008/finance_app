@@ -15,6 +15,10 @@ import {
 } from "@/components/portfolio/portfolioTabs";
 import { PortfolioTransactionsTab } from "@/components/portfolio/PortfolioTransactionsTab";
 import { cn } from "@/utils/cn";
+import {
+  PERFORMANCE_TIMEFRAMES,
+  type PerformanceTimeframe,
+} from "@/types/performance";
 
 /**
  * The three separately-owned financial logics presented as one product area:
@@ -55,12 +59,28 @@ export function PortfolioPage() {
   const activeView =
     viewParam && STATE_VIEWS.includes(viewParam) ? viewParam : "open";
 
+  const timeframeParam = searchParams.get("timeframe") as PerformanceTimeframe | null;
+  const performanceTimeframe =
+    timeframeParam && PERFORMANCE_TIMEFRAMES.includes(timeframeParam)
+      ? timeframeParam
+      : "1M";
+
   const setActiveTab = (tab: PortfolioTab) => {
     const next = new URLSearchParams(searchParams);
     if (tab === "state") {
       next.delete("tab");
     } else {
       next.set("tab", tab);
+    }
+    if (
+      tab === "performance" &&
+      !PERFORMANCE_TIMEFRAMES.includes(
+        next.get("timeframe") as PerformanceTimeframe,
+      )
+    ) {
+      next.set("timeframe", "1M");
+    } else if (tab !== "performance") {
+      next.delete("timeframe");
     }
     setSearchParams(next);
   };
@@ -71,6 +91,12 @@ export function PortfolioPage() {
     } else {
       next.set("view", view);
     }
+    setSearchParams(next);
+  };
+  const setPerformanceTimeframe = (timeframe: PerformanceTimeframe) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "performance");
+    next.set("timeframe", timeframe);
     setSearchParams(next);
   };
   /**
@@ -199,7 +225,10 @@ export function PortfolioPage() {
           ) : activeTab === "transactions" ? (
             <PortfolioTransactionsTab />
           ) : (
-            <PortfolioPerformanceTab />
+            <PortfolioPerformanceTab
+              timeframe={performanceTimeframe}
+              onTimeframeChange={setPerformanceTimeframe}
+            />
           )}
         </div>
       </main>

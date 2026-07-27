@@ -74,6 +74,19 @@ export type QuoteStatus = {
   total_quotes: number;
 };
 
+/** GET /portfolio and PATCH /portfolio/settings. */
+export type PortfolioSettings = {
+  id: string;
+  user_id: string;
+  name: string;
+  currency: string;
+  // When true (the default), a buy that would need more cash than is
+  // available automatically draws an implicit deposit for the shortfall.
+  // When false, such a buy is rejected instead — "buys require sufficient
+  // cash" for users who want that stricter behavior.
+  auto_fund_purchases: boolean;
+};
+
 /** Aggregated portfolio performance from GET /portfolio/summary. */
 export type PortfolioSummary = {
   user_id?: string;
@@ -159,7 +172,8 @@ export type PortfolioActivity = {
   activity_type:
     | "deposit" | "withdrawal" | "buy" | "sell" | "opening_balance"
     | "cash_dividend" | "etf_distribution" | "interest_income"
-    | "reinvested_dividend" | "buy_fee" | "sell_fee"
+    | "reinvested_dividend" | "return_of_capital" | "stock_dividend"
+    | "buy_fee" | "sell_fee"
     | "management_fee" | "custody_fee" | "other_fee"
     | "stock_split" | "reverse_split" | "symbol_change" | "write_off";
   symbol?: string;

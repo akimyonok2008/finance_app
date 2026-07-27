@@ -19,8 +19,9 @@ import (
 )
 
 type testEnv struct {
-	router http.Handler
-	tm     *auth.TokenManager
+	router   http.Handler
+	tm       *auth.TokenManager
+	provider *prices.MockPriceProvider
 }
 
 func newTestEnv() *testEnv {
@@ -38,8 +39,14 @@ func newTestEnv() *testEnv {
 		r.Get("/portfolio/positions", ph.ListPositions)
 		r.Put("/portfolio/positions/{positionId}", ph.UpdatePosition)
 		r.Delete("/portfolio/positions/{positionId}", ph.DeletePosition)
+		r.Post("/portfolio/deposits", ph.DepositCash)
+		r.Post("/portfolio/buys", ph.BuyPosition)
+		r.Post("/portfolio/sells", ph.SellPosition)
+		r.Post("/portfolio/fees", ph.RecordFee)
+		r.Post("/portfolio/positions/{positionId}/write-off", ph.WriteOffPosition)
+		r.Patch("/portfolio/settings", ph.UpdatePortfolioSettings)
 	})
-	return &testEnv{router: r, tm: tm}
+	return &testEnv{router: r, tm: tm, provider: provider}
 }
 
 func (e *testEnv) token(t *testing.T, userID string) string {
@@ -51,10 +58,18 @@ func (e *testEnv) token(t *testing.T, userID string) string {
 
 func (e *testEnv) do(t *testing.T, method, path, body, token string) *httptest.ResponseRecorder {
 	t.Helper()
+	return e.doWithKey(t, method, path, body, token, "")
+}
+
+func (e *testEnv) doWithKey(t *testing.T, method, path, body, token, idempotencyKey string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	rec := httptest.NewRecorder()
 	e.router.ServeHTTP(rec, req)
@@ -211,6 +226,98 @@ func TestSummary_ReturnsCalculatedSummary(t *testing.T) {
 	assert.InDelta(t, 100.0, body["portfolio_index"], 0.01)
 }
 
+// TestBuyPosition_RejectsFutureEffectiveAt: a trade can't be "effective"
+// tomorrow. Allowing a future date would let a public profile show
+// performance for a period that hasn't happened yet.
+func TestBuyPosition_RejectsFutureEffectiveAt(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	future := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
+
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
+		`{"symbol":"AAPL","asset_type":"stock","quantity":1,"effective_at":"`+future+`"}`,
+		token, "buy-future")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertError(t, rec.Body.Bytes())
+}
+
+// TestBuyPosition_AllowsBackdatedEffectiveAt: backdating is a deliberate,
+// supported feature (a real trade recorded after the fact) and must keep
+// working — only a future date is rejected. A backdated trade also requires
+// an explicit execution_price (there is no live quote for a past date to
+// estimate from), so this supplies one.
+func TestBuyPosition_AllowsBackdatedEffectiveAt(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	past := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
+		`{"symbol":"AAPL","asset_type":"stock","quantity":1,"execution_price":190,"effective_at":"`+past+`"}`,
+		token, "buy-past")
+
+	assert.Equal(t, http.StatusCreated, rec.Code)
+}
+
+// TestRecordFee_RejectsFutureEffectiveAt covers the same guard on the fee
+// endpoint, which shares parseEffectiveAt with buy/sell.
+func TestRecordFee_RejectsFutureEffectiveAt(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	depositRec := e.doWithKey(t, http.MethodPost, "/portfolio/deposits",
+		`{"currency":"USD","amount":1000}`, token, "seed-cash")
+	require.Equal(t, http.StatusCreated, depositRec.Code)
+	future := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
+
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/fees",
+		`{"type":"other_fee","currency":"USD","amount":5,"effective_at":"`+future+`"}`,
+		token, "fee-future")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertError(t, rec.Body.Bytes())
+}
+
+func TestGetPortfolio_DefaultsToAutoFundPurchasesTrue(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+
+	rec := e.do(t, http.MethodGet, "/portfolio", "", token)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, true, body["auto_fund_purchases"])
+}
+
+func TestUpdatePortfolioSettings_DisablesAutoFundPurchases(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+
+	rec := e.do(t, http.MethodPatch, "/portfolio/settings", `{"auto_fund_purchases":false}`, token)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, false, body["auto_fund_purchases"])
+
+	// GET /portfolio must reflect the same persisted preference afterward.
+	getRec := e.do(t, http.MethodGet, "/portfolio", "", token)
+	var getBody map[string]any
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getBody))
+	assert.Equal(t, false, getBody["auto_fund_purchases"])
+}
+
+func TestUpdatePortfolioSettings_DisabledRejectsFundingBuy(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	settingsRec := e.do(t, http.MethodPatch, "/portfolio/settings", `{"auto_fund_purchases":false}`, token)
+	require.Equal(t, http.StatusOK, settingsRec.Code)
+
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
+		`{"symbol":"AAPL","asset_type":"stock","quantity":1}`, token, "buy-1")
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+}
+
 func decodeID(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	var body map[string]any
@@ -218,6 +325,64 @@ func decodeID(t *testing.T, rec *httptest.ResponseRecorder) string {
 	id, _ := body["id"].(string)
 	require.NotEmpty(t, id)
 	return id
+}
+
+// decodeBuyPositionID extracts position.id from a buy mutation response.
+func decodeBuyPositionID(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Position struct {
+			ID string `json:"id"`
+		} `json:"position"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Position.ID)
+	return body.Position.ID
+}
+
+func TestWriteOffPosition_RejectsPriceableSymbol(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	buyRec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
+		`{"symbol":"AAPL","asset_type":"stock","quantity":10}`, token, "buy-1")
+	require.Equal(t, http.StatusCreated, buyRec.Code)
+	positionID := decodeBuyPositionID(t, buyRec)
+
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/positions/"+positionID+"/write-off", "", token, "wo-1")
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assertError(t, rec.Body.Bytes())
+}
+
+func TestWriteOffPosition_SucceedsWhenSymbolUnpriceable(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	buyRec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
+		`{"symbol":"AAPL","asset_type":"stock","quantity":10}`, token, "buy-2")
+	require.Equal(t, http.StatusCreated, buyRec.Code)
+	positionID := decodeBuyPositionID(t, buyRec)
+
+	e.provider.Unset("AAPL")
+
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/positions/"+positionID+"/write-off", "", token, "wo-2")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var closed map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &closed))
+	assert.Equal(t, -100.0, closed["realized_gain_loss_percentage"])
+}
+
+func TestWriteOffPosition_RequiresIdempotencyKey(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+	buyRec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
+		`{"symbol":"AAPL","asset_type":"stock","quantity":10}`, token, "buy-3")
+	positionID := decodeBuyPositionID(t, buyRec)
+	e.provider.Unset("AAPL")
+
+	rec := e.do(t, http.MethodPost, "/portfolio/positions/"+positionID+"/write-off", "", token)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func assertError(t *testing.T, body []byte) {

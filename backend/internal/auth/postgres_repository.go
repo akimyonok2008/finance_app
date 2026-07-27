@@ -90,6 +90,44 @@ func (r *PostgresUserRepository) ListUsers(ctx context.Context) ([]User, error) 
 	return out, rows.Err()
 }
 
+// UpdatePassword overwrites the stored password hash for a non-deleted user.
+func (r *PostgresUserRepository) UpdatePassword(userID, passwordHash string) error {
+	tag, err := r.pool.Exec(context.Background(),
+		`UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2 AND deleted_at IS NULL`,
+		passwordHash, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("auth repository: update password: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// SoftDelete stamps deleted_at, after which FindByEmail/FindByID/ListUsers all
+// exclude the row (they already filter on deleted_at IS NULL). It also
+// mangles the email to a synthetic, still-unique value: the email column has
+// a plain UNIQUE constraint (not scoped to non-deleted rows), so leaving the
+// original address in place would permanently block that email from ever
+// registering again, even though the account is gone from every read path.
+func (r *PostgresUserRepository) SoftDelete(userID string) error {
+	tag, err := r.pool.Exec(context.Background(),
+		`UPDATE users
+		 SET deleted_at = now(), updated_at = now(),
+		     email = 'deleted-' || id::text || '@deleted.invalid'
+		 WHERE id = $1 AND deleted_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		return fmt.Errorf("auth repository: soft delete user: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 func (r *PostgresUserRepository) FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error) {
 	var identity AuthIdentity
 	err := r.pool.QueryRow(context.Background(), `

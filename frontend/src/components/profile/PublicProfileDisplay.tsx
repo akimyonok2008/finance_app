@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleUserRound,
   Gauge,
+  Info,
   LineChart,
   LockKeyhole,
   Medal,
@@ -477,6 +478,17 @@ function OpenClosedPerformanceCard({ insights }: { insights: ProfileInsights }) 
           </div>
         ))}
       </div>
+      {data.includes_self_reported_prices ? (
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2.5">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+          <p className="text-xs leading-5 text-amber-200/90">
+            These two figures include at least one self-reported execution
+            price and cannot be independently verified. The ranked
+            performance index above is always priced from tracked market
+            quotes and is not affected.
+          </p>
+        </div>
+      ) : null}
     </Panel>
   );
 }

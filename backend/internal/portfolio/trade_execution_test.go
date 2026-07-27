@@ -1,6 +1,7 @@
 package portfolio
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -8,6 +9,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type fixedTrustedBoundary struct{ at time.Time }
+
+func (b fixedTrustedBoundary) LatestTrustedSnapshotAt(context.Context, string, string, time.Time) (time.Time, bool, error) {
+	return b.at, true, nil
+}
 
 // This file covers Step 3: accurate user-recorded buys and sells — real
 // execution details with provenance, automatic purchase funding, non-mutating
@@ -523,6 +530,51 @@ func TestSellPreview_ReportsProvenanceAndClosure(t *testing.T) {
 	require.Len(t, open, 1, "the position is untouched by the preview")
 }
 
+// TestSellPreview_ResolvesBySymbolLikeTheCommittedSell: the sell/preview API
+// accepts either an explicit position_id or a bare symbol (SellInput/
+// findSalePosition both support it), and the committed SellPosition path has
+// always honored a symbol-only request. PreviewSell must resolve the same
+// position the same way — a preview is presented to the user as an exact
+// forecast of the commit, so a symbol-only preview must not fail merely
+// because no position_id was supplied.
+func TestSellPreview_ResolvesBySymbolLikeTheCommittedSell(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	buy, err := svc.BuyPosition(ctx(), "u1", "sp-buy", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+	})
+	require.NoError(t, err)
+
+	bySymbol, err := svc.PreviewSell(ctx(), "u1", SellInput{
+		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 450, Fee: 10,
+	})
+	require.NoError(t, err, "a symbol-only preview must resolve the open position, not report it missing")
+	byID, err := svc.PreviewSell(ctx(), "u1", SellInput{
+		PositionID: buy.Position.ID, Quantity: 1, ExecutionPrice: 450, Fee: 10,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, byID.PositionID, bySymbol.PositionID, "symbol and position_id must resolve to the identical position")
+	assert.Equal(t, byID.EstimatedRealizedPnL, bySymbol.EstimatedRealizedPnL)
+
+	// The committed sell accepts the identical symbol-only request and must
+	// resolve to the same position the preview just forecast.
+	committed, err := svc.SellPosition(ctx(), "u1", "sp-sell-by-symbol", SellInput{
+		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 450, Fee: 10,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, committed.Position)
+	assert.Equal(t, byID.PositionID, committed.Position.ID)
+}
+
+// TestSellPreview_SymbolNotHeldReturnsPositionNotFound guards the boundary:
+// a symbol with no open position must still report ErrPositionNotFound rather
+// than some other error once the fallback lookup is in place.
+func TestSellPreview_SymbolNotHeldReturnsPositionNotFound(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	_, err := svc.PreviewSell(ctx(), "u1", SellInput{Symbol: "MSFT", Quantity: 1})
+	assert.ErrorIs(t, err, ErrPositionNotFound)
+}
+
 // 12. A backdated sale is validated against the HISTORICAL quantity.
 func TestHistorical_SellRejectedWhenHistoricalQuantityInsufficient(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
@@ -531,7 +583,7 @@ func TestHistorical_SellRejectedWhenHistoricalQuantityInsufficient(t *testing.T)
 	// 5 units bought 10 days ago...
 	early := base
 	_, err := svc.BuyPosition(ctx(), "u1", "hist-buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 5, EffectiveAt: &early,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 5, ExecutionPrice: 400, EffectiveAt: &early,
 	})
 	require.NoError(t, err)
 	// ...and 20 more bought today.
@@ -549,7 +601,7 @@ func TestHistorical_SellRejectedWhenHistoricalQuantityInsufficient(t *testing.T)
 	// though 25 are held right now.
 	backdated := base.Add(24 * time.Hour)
 	_, err = svc.SellPosition(ctx(), "u1", "hist-sell-bad", SellInput{
-		PositionID: positions[0].ID, Quantity: 10, EffectiveAt: &backdated,
+		PositionID: positions[0].ID, Quantity: 10, ExecutionPrice: 400, EffectiveAt: &backdated,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
@@ -570,8 +622,9 @@ func TestHistorical_SellRejectedWhenHistoricalQuantityInsufficient(t *testing.T)
 
 // 13. A historical buy that cannot change any captured ranked snapshot state is
 // allowed and applied normally.
-func TestHistorical_BuyBeforeTrustedBoundaryIsAllowed(t *testing.T) {
+func TestHistorical_BuyBeforeTrustedBoundaryIsRejected(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
+	svc.Coordinator().SetTrustedSnapshotBoundary(fixedTrustedBoundary{at: time.Now().UTC()})
 
 	// Establish a trusted ranked checkpoint by mutating now.
 	_, err := svc.BuyPosition(ctx(), "u1", "boundary-setup", BuyInput{
@@ -579,30 +632,24 @@ func TestHistorical_BuyBeforeTrustedBoundaryIsAllowed(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// A backdated purchase of a DIFFERENT instrument with no captured ledger
-	// history at that point: allowed, applied normally, snapshots not rebuilt.
+	// No "new symbol" exception is permitted before trusted history.
 	when := time.Now().UTC().Add(-30 * 24 * time.Hour)
-	res, err := svc.BuyPosition(ctx(), "u1", "hist-allowed", BuyInput{
-		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 2, EffectiveAt: &when,
+	_, err = svc.BuyPosition(ctx(), "u1", "hist-rejected", BuyInput{
+		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 100, EffectiveAt: &when,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, res.Position)
-
-	found := false
+	require.ErrorIs(t, err, ErrHistoricalRankedConflict)
 	for _, a := range activitiesOf(t, repo, "u1") {
 		if a.Type == ActivityBuy && a.Symbol == "NVDA" {
-			found = true
-			assert.True(t, a.OccurredAt.Equal(when))
-			assert.True(t, a.CreatedAt.After(a.OccurredAt))
+			t.Fatal("rejected historical buy wrote an activity")
 		}
 	}
-	assert.True(t, found)
 }
 
 // 14. A historical transaction that would invalidate trusted ranked history is
 // rejected with a clear error and mutates nothing.
 func TestHistorical_TransactionCorruptingRankedHistoryIsRejected(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
+	svc.Coordinator().SetTrustedSnapshotBoundary(fixedTrustedBoundary{at: time.Now().UTC()})
 
 	_, err := svc.BuyPosition(ctx(), "u1", "corrupt-setup", BuyInput{
 		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4,
@@ -611,14 +658,22 @@ func TestHistorical_TransactionCorruptingRankedHistoryIsRejected(t *testing.T) {
 
 	pfBefore, err := repo.GetPortfolioByUser(ctx(), "u1")
 	require.NoError(t, err)
-	activitiesBefore := len(activitiesOf(t, repo, "u1"))
+	positionsBefore, err := svc.ListPositions(ctx(), "u1")
+	require.NoError(t, err)
+	cashBefore, err := repo.ListCashBalances(ctx(), "u1")
+	require.NoError(t, err)
+	activitiesBefore := activitiesOf(t, repo, "u1")
+	rankedBefore, err := repo.GetByPortfolio(ctx(), pfBefore.ID)
+	require.NoError(t, err)
+	auditBefore := repo.AuditLog()
+	outboxBefore := repo.OutboxEvents()
 
 	// A backdated BUY inserted before an instrument's existing ledger history
 	// would retroactively rewrite the episode timeline a trusted snapshot
 	// already captured.
 	when := time.Now().UTC().Add(-7 * 24 * time.Hour)
 	_, err = svc.BuyPosition(ctx(), "u1", "corrupt-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, EffectiveAt: &when,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 400, EffectiveAt: &when,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalRankedConflict)
 	assert.Contains(t, err.Error(), "requires reconciliation")
@@ -627,11 +682,18 @@ func TestHistorical_TransactionCorruptingRankedHistoryIsRejected(t *testing.T) {
 	pfAfter, err := repo.GetPortfolioByUser(ctx(), "u1")
 	require.NoError(t, err)
 	assert.Equal(t, pfBefore.Version, pfAfter.Version)
-	assert.Equal(t, activitiesBefore, len(activitiesOf(t, repo, "u1")))
+	assert.Equal(t, activitiesBefore, activitiesOf(t, repo, "u1"))
 	after, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
-	require.Len(t, after, 1)
-	assert.InDelta(t, 4.0, after[0].Quantity, 1e-9)
+	assert.Equal(t, positionsBefore, after)
+	cashAfter, err := repo.ListCashBalances(ctx(), "u1")
+	require.NoError(t, err)
+	assert.Equal(t, cashBefore, cashAfter)
+	rankedAfter, err := repo.GetByPortfolio(ctx(), pfAfter.ID)
+	require.NoError(t, err)
+	assert.Equal(t, rankedBefore, rankedAfter)
+	assert.Equal(t, auditBefore, repo.AuditLog())
+	assert.Equal(t, outboxBefore, repo.OutboxEvents())
 }
 
 // 14b. A backdated SALE before the trusted boundary is always refused, even when
@@ -641,9 +703,10 @@ func TestHistorical_BackdatedSaleBeforeBoundaryIsRejected(t *testing.T) {
 
 	bought := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	buy, err := svc.BuyPosition(ctx(), "u1", "hist-sale-buy", BuyInput{
-		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 10, EffectiveAt: &bought,
+		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 10, ExecutionPrice: 100, EffectiveAt: &bought,
 	})
-	require.NoError(t, err, "a backdated buy of an untracked instrument is allowed")
+	require.NoError(t, err)
+	svc.Coordinator().SetTrustedSnapshotBoundary(fixedTrustedBoundary{at: time.Now().UTC()})
 
 	pfBefore, err := repo.GetPortfolioByUser(ctx(), "u1")
 	require.NoError(t, err)
@@ -652,7 +715,7 @@ func TestHistorical_BackdatedSaleBeforeBoundaryIsRejected(t *testing.T) {
 	// problem — it is refused purely because it predates trusted ranked history.
 	when := time.Now().UTC().Add(-5 * 24 * time.Hour)
 	_, err = svc.SellPosition(ctx(), "u1", "hist-sale", SellInput{
-		PositionID: buy.Position.ID, Quantity: 1, EffectiveAt: &when,
+		PositionID: buy.Position.ID, Quantity: 1, ExecutionPrice: 100, EffectiveAt: &when,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalRankedConflict)
 
@@ -662,6 +725,75 @@ func TestHistorical_BackdatedSaleBeforeBoundaryIsRejected(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	assert.InDelta(t, 10.0, positions[0].Quantity, 1e-9)
+}
+
+func TestHistorical_BackdatedTradeRequiresExplicitExecutionPrice(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	when := time.Now().UTC().Add(-24 * time.Hour)
+	_, err := svc.BuyPosition(ctx(), "u1", "historical-price-required", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, EffectiveAt: &when,
+	})
+	assert.ErrorIs(t, err, ErrHistoricalExecutionPriceRequired)
+}
+
+func TestHistorical_SaleQuantityIsScopedToSelectedEpisode(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	firstAt := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	secondAt := firstAt.Add(24 * time.Hour)
+	first, err := svc.BuyPosition(ctx(), "u1", "episode-a", BuyInput{
+		Symbol: "MSFT", InstrumentID: "instrument-a", AssetType: AssetTypeStock,
+		Quantity: 2, ExecutionPrice: 400, EffectiveAt: &firstAt,
+	})
+	require.NoError(t, err)
+	_, err = svc.BuyPosition(ctx(), "u1", "episode-b", BuyInput{
+		Symbol: "MSFT", InstrumentID: "instrument-b", AssetType: AssetTypeStock,
+		Quantity: 100, ExecutionPrice: 400, EffectiveAt: &secondAt,
+	})
+	require.NoError(t, err)
+	_, err = svc.BuyPosition(ctx(), "u1", "episode-a-later", BuyInput{
+		Symbol: "MSFT", InstrumentID: "instrument-a", AssetType: AssetTypeStock,
+		Quantity: 5, ExecutionPrice: 400,
+	})
+	require.NoError(t, err)
+	saleAt := secondAt.Add(time.Hour)
+	_, err = svc.SellPosition(ctx(), "u1", "episode-a-sale", SellInput{
+		PositionID: first.Position.ID, Quantity: 3, ExecutionPrice: 400, EffectiveAt: &saleAt,
+	})
+	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
+}
+
+func TestHistorical_SaleBeforeSelectedEpisodeOpenedIsRejected(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	openedAt := time.Now().UTC().Add(-5 * 24 * time.Hour)
+	buy, err := svc.BuyPosition(ctx(), "u1", "episode-open", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		ExecutionPrice: 400, EffectiveAt: &openedAt,
+	})
+	require.NoError(t, err)
+	saleAt := openedAt.Add(-time.Hour)
+	_, err = svc.SellPosition(ctx(), "u1", "before-open", SellInput{
+		PositionID: buy.Position.ID, Quantity: 1, ExecutionPrice: 400, EffectiveAt: &saleAt,
+	})
+	assert.ErrorIs(t, err, ErrHistoricalEpisodeNotOpen)
+}
+
+func TestHistorical_EpisodeDatesUseEffectiveAt(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	openedAt := time.Now().UTC().Add(-5 * 24 * time.Hour).Truncate(time.Second)
+	buy, err := svc.BuyPosition(ctx(), "u1", "dated-buy", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		ExecutionPrice: 400, EffectiveAt: &openedAt,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, openedAt, buy.Position.CreatedAt)
+
+	closedAt := openedAt.Add(24 * time.Hour)
+	sale, err := svc.SellPosition(ctx(), "u1", "dated-sale", SellInput{
+		PositionID: buy.Position.ID, Quantity: 2, ExecutionPrice: 410, EffectiveAt: &closedAt,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, sale.Closed)
+	assert.Equal(t, closedAt.Format(time.RFC3339), sale.Closed.ClosedAt)
 }
 
 // 15. Multi-currency: a USD purchase never touches a GBP balance.
@@ -695,4 +827,197 @@ func TestBuy_ValidatesExecutionDetails(t *testing.T) {
 		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, Fee: -5,
 	})
 	assert.ErrorIs(t, err, ErrInvalidBuyFee)
+}
+
+// TestBuy_RejectsImplausibleLiveExecutionPrice: a LIVE (no effective_at) buy
+// claiming a fill wildly off the tracked quote (mock MSFT = 430 USD) must be
+// rejected — otherwise a user could fabricate an instant, unbounded "gain" on
+// the public open-position return that sits right next to the market-verified
+// ranked index.
+func TestBuy_RejectsImplausibleLiveExecutionPrice(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	_, err := svc.BuyPosition(ctx(), "u1", "too-cheap", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 1,
+	})
+	assert.ErrorIs(t, err, ErrImplausibleExecutionPrice)
+
+	_, err = svc.BuyPosition(ctx(), "u1", "too-expensive", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 100000,
+	})
+	assert.ErrorIs(t, err, ErrImplausibleExecutionPrice)
+}
+
+// TestBuy_AllowsOrdinaryLiveDeviationAndBackdatedFabrication: normal
+// volatility around the live quote must never trip the plausibility guard,
+// and — since there is no live comparator for a backdated claim — an
+// explicitly backdated buy is exempt even at a price nowhere near today's
+// quote. Backdating a real historical trade is a deliberate, supported
+// feature and must keep working.
+func TestBuy_AllowsOrdinaryLiveDeviationAndBackdatedFabrication(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	_, err := svc.BuyPosition(ctx(), "u1", "ordinary-deviation", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 450,
+	})
+	require.NoError(t, err, "a modest deviation from the live quote is ordinary volatility, not fabrication")
+
+	past := time.Now().UTC().Add(-72 * time.Hour)
+	_, err = svc.BuyPosition(ctx(), "u2", "backdated-far-off-price", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 100,
+		EffectiveAt: &past,
+	})
+	require.NoError(t, err, "a backdated trade has no live comparator and must not be rejected on price alone")
+}
+
+// TestSell_RejectsImplausibleLiveExecutionPriceButAllowsBackdated mirrors the
+// buy-side guard for sells.
+func TestSell_RejectsImplausibleLiveExecutionPriceButAllowsBackdated(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	bought := sameDayBackdate(2 * time.Hour)
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4, ExecutionPrice: 400,
+		EffectiveAt: &bought,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.SellPosition(ctx(), "u1", "sell-too-expensive", SellInput{
+		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 100000,
+	})
+	assert.ErrorIs(t, err, ErrImplausibleExecutionPrice)
+
+	sold := sameDayBackdate(30 * time.Minute)
+	_, err = svc.SellPosition(ctx(), "u1", "sell-backdated", SellInput{
+		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 100000, EffectiveAt: &sold,
+	})
+	require.NoError(t, err, "a backdated sell has no live comparator and must not be rejected on price alone")
+}
+
+// TestSetAutoFundPurchases_DisabledRejectsFundingBuy: disabling the
+// portfolio-level auto-fund preference means a buy that would otherwise draw
+// an implicit deposit is rejected instead — the "buys require sufficient
+// cash" behavior for a user who wants it, rather than a silent deposit they
+// never explicitly made.
+func TestSetAutoFundPurchases_DisabledRejectsFundingBuy(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	require.NoError(t, svc.SetAutoFundPurchases(ctx(), "u1", false))
+
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, // no cash deposited
+	})
+
+	assert.ErrorIs(t, err, ErrInsufficientCash)
+}
+
+func TestSetAutoFundPurchases_EnabledIsUnaffected(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	require.NoError(t, svc.SetAutoFundPurchases(ctx(), "u1", true)) // explicit, matches the default
+
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+	})
+
+	require.NoError(t, err, "auto-funding must still work when explicitly left enabled")
+}
+
+// TestSetAutoFundPurchases_CreatesPortfolioForFirstTimeUser: a brand-new user
+// with no portfolio yet must still be able to toggle this preference before
+// ever making a deposit or buy.
+func TestSetAutoFundPurchases_CreatesPortfolioForFirstTimeUser(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	require.NoError(t, svc.SetAutoFundPurchases(ctx(), "brand-new-user", false))
+
+	pf, err := svc.GetOrCreateDefaultPortfolio(ctx(), "brand-new-user")
+	require.NoError(t, err)
+	assert.False(t, pf.AutoFundPurchases)
+}
+
+// TestSummary_FlagsSelfReportedExecutionPrice_WhenUserSuppliesPrice: the
+// ranked index is always priced from tracked market quotes and immune to a
+// fabricated execution price, but open/closed holdings P&L is built directly
+// from it — so a public consumer of this data must be able to tell when it
+// includes an unverifiable, user-entered price rather than a provider
+// estimate.
+func TestSummary_FlagsSelfReportedExecutionPrice_WhenUserSuppliesPrice(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+	})
+	require.NoError(t, err)
+
+	sum, err := svc.Summary(ctx(), "u1")
+	require.NoError(t, err)
+	assert.True(t, sum.HasSelfReportedExecutionPrice)
+}
+
+func TestSummary_DoesNotFlagSelfReportedExecutionPrice_WhenProviderEstimated(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, // no ExecutionPrice
+	})
+	require.NoError(t, err)
+
+	sum, err := svc.Summary(ctx(), "u1")
+	require.NoError(t, err)
+	assert.False(t, sum.HasSelfReportedExecutionPrice)
+}
+
+// TestPublicWeightsSummary_MatchesSummaryOnPositionsAndCash: the leaderboard's
+// cheap weights path (PublicWeightsSummary) must agree with the full Summary
+// on exactly the fields a public allocation breakdown reads — open positions'
+// current value/currency and cash — even though it skips the ledger scan that
+// produces Summary's economic fields.
+func TestPublicWeightsSummary_MatchesSummaryOnPositionsAndCash(t *testing.T) {
+	svc, _, _, pp := newTxTestService()
+	seedCash(t, svc, "u1", "USD", 100000)
+	seedCash(t, svc, "u1", "TRY", 100000)
+
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	require.NoError(t, err)
+	_, err = svc.BuyPosition(ctx(), "u1", "buy-thyao", BuyInput{Symbol: "THYAO.IS", AssetType: AssetTypeStock, Quantity: 50})
+	require.NoError(t, err)
+	pp.Set("AAPL", 214.5, "USD")     // +10% since baseline
+	pp.Set("THYAO.IS", 324.5, "TRY") // +10% since baseline
+
+	full, err := svc.Summary(ctx(), "u1")
+	require.NoError(t, err)
+	cheap, err := svc.PublicWeightsSummary(ctx(), "u1")
+	require.NoError(t, err)
+
+	assert.InDelta(t, full.CurrentValue, cheap.CurrentValue, 0.01)
+	assert.InDelta(t, full.TotalCashValueBase, cheap.TotalCashValueBase, 0.01)
+	assert.Equal(t, len(full.CashBalances), len(cheap.CashBalances))
+	require.Len(t, cheap.Positions, len(full.Positions))
+	bySymbol := map[string]PositionSummary{}
+	for _, p := range full.Positions {
+		bySymbol[p.Symbol] = p
+	}
+	for _, p := range cheap.Positions {
+		want, ok := bySymbol[p.Symbol]
+		require.True(t, ok, "cheap summary listed a symbol the full summary did not: %s", p.Symbol)
+		assert.InDelta(t, want.CurrentValueBase, p.CurrentValueBase, 0.01)
+		assert.Equal(t, want.CurrentPriceCurrency, p.CurrentPriceCurrency)
+	}
+
+	// The cheap summary never touches the ledger, so its economic fields stay
+	// at their zero value regardless of what Summary would report for them —
+	// callers that need weights must not mistake this for "no income/fees".
+	assert.Equal(t, 0.0, cheap.RealizedGainLossBase)
+	assert.Empty(t, cheap.Income)
+	assert.Empty(t, cheap.Fees)
+}
+
+// TestPublicWeightsSummary_ExcludesClosedPositions: weights are an allocation
+// of OPEN holdings; a fully closed episode must not appear in Positions or
+// contribute to CurrentValue, matching Summary's own contract.
+func TestPublicWeightsSummary_ExcludesClosedPositions(t *testing.T) {
+	svc, _, _, _ := newTxTestService()
+	seedCash(t, svc, "u1", "USD", 100000)
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400})
+	require.NoError(t, err)
+	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: 2, ExecutionPrice: 450})
+	require.NoError(t, err)
+
+	cheap, err := svc.PublicWeightsSummary(ctx(), "u1")
+	require.NoError(t, err)
+	assert.Empty(t, cheap.Positions)
+	assert.Equal(t, cheap.TotalCashValueBase, cheap.CurrentValue, "with no open positions, current value is cash only")
 }

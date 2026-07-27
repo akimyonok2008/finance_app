@@ -46,6 +46,10 @@ type Service struct {
 	benchmark BenchmarkReturner
 }
 
+func (s *Service) LatestTrustedSnapshotAt(ctx context.Context, userID, portfolioID string, epoch time.Time) (time.Time, bool, error) {
+	return s.repo.LatestTrustedCapturedAt(ctx, userID, portfolioID, epoch)
+}
+
 func NewService(repo Repository, ranked RankedProvider, cfg Config) *Service {
 	defaults := DefaultConfig()
 	if cfg.IntradayInterval <= 0 {
@@ -185,7 +189,7 @@ func (s *Service) RecordCurrentTransition(ctx context.Context, userID string) (b
 	})
 }
 
-func (s *Service) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, bool, error) {
+func (s *Service) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error) {
 	return s.repo.IndexAtOrBefore(ctx, userID, cutoff, epoch)
 }
 

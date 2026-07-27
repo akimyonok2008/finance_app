@@ -2,13 +2,16 @@ package portfolio
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/instrument"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
 
@@ -144,7 +147,7 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 
 	early := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	_, err := svc.BuyPosition(ctx, userID, "pg-hist-1", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 5, EffectiveAt: &early,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 5, ExecutionPrice: 195, EffectiveAt: &early,
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx, userID, "pg-hist-2", BuyInput{
@@ -160,7 +163,7 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 	// Only 5 units were held 9 days ago, even though 25 are held now.
 	backdated := early.Add(24 * time.Hour)
 	_, err = svc.SellPosition(ctx, userID, "pg-hist-sell", SellInput{
-		PositionID: positions[0].ID, Quantity: 10, EffectiveAt: &backdated,
+		PositionID: positions[0].ID, Quantity: 10, ExecutionPrice: 195, EffectiveAt: &backdated,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
@@ -176,4 +179,112 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 	after, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	assert.InDelta(t, 25.0, after[0].Quantity, 1e-6)
+}
+
+func TestPG_InstrumentIdentityMatchesMemoryPortfolioFlow(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresRepository(pool)
+	identities := instrument.NewPostgresRepository(pool)
+	userID := seedUser(t, pool)
+	priceProvider := prices.NewMockPriceProvider()
+	ticker := "M" + strings.ToUpper(uuid.NewString()[:8])
+	priceProvider.Set(ticker, 430, "USD")
+	svc := NewService(repo, priceProvider, fx.NewMockFXProvider())
+	svc.SetInstrumentResolver(instrument.NewResolver(identities, nil))
+	ctx := context.Background()
+
+	createListing := func(exchange, figi string) instrument.Instrument {
+		in, err := identities.CreateInstrument(ctx, instrument.Instrument{
+			FIGI: figi, CurrentSymbol: ticker, ExchangeCode: exchange,
+			Status: instrument.StatusActive, IdentityQuality: instrument.QualityResolved,
+		})
+		require.NoError(t, err)
+		_, err = identities.CreateAlias(ctx, instrument.InstrumentAlias{
+			InstrumentID: in.ID, AliasType: instrument.AliasTicker,
+			AliasValue: ticker, ExchangeCode: exchange,
+		})
+		require.NoError(t, err)
+		return in
+	}
+	nyse := createListing("UN", "BBG"+uuid.NewString())
+	xetra := createListing("GY", "BBG"+uuid.NewString())
+
+	first, err := svc.BuyPosition(ctx, userID, "pg-identity-un", BuyInput{
+		Symbol: ticker, ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: 1,
+	})
+	require.NoError(t, err)
+	second, err := svc.BuyPosition(ctx, userID, "pg-identity-gy", BuyInput{
+		Symbol: ticker, ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, nyse.ID, first.Position.InstrumentID)
+	assert.Equal(t, xetra.ID, second.Position.InstrumentID)
+	assert.NotEqual(t, first.Position.ID, second.Position.ID)
+
+	activities, err := repo.ListActivities(ctx, userID, 20)
+	require.NoError(t, err)
+	buyIDs := map[string]bool{}
+	for _, activity := range activities {
+		if activity.Type == ActivityBuy {
+			buyIDs[activity.InstrumentID] = true
+			assert.Equal(t, ticker, activity.Symbol, "symbol remains the historical display snapshot")
+		}
+	}
+	assert.True(t, buyIDs[nyse.ID])
+	assert.True(t, buyIDs[xetra.ID])
+}
+
+func TestPG_IncomeDiscoveryAndEntitlementMatchHistoricalLedger(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresRepository(pool)
+	identities := instrument.NewPostgresRepository(pool)
+	userID := seedUser(t, pool)
+	ticker := "I" + strings.ToUpper(uuid.NewString()[:8])
+	priceProvider := prices.NewMockPriceProvider()
+	priceProvider.Set(ticker, 100, "USD")
+	svc := NewService(repo, priceProvider, fx.NewMockFXProvider())
+	svc.SetInstrumentResolver(instrument.NewResolver(identities, nil))
+	ctx := context.Background()
+
+	in, err := identities.CreateInstrument(ctx, instrument.Instrument{
+		FIGI: "BBG" + uuid.NewString(), CurrentSymbol: ticker, ExchangeCode: "UN",
+		Status: instrument.StatusActive, IdentityQuality: instrument.QualityResolved,
+	})
+	require.NoError(t, err)
+	_, err = identities.CreateAlias(ctx, instrument.InstrumentAlias{
+		InstrumentID: in.ID, AliasType: instrument.AliasTicker,
+		AliasValue: ticker, ExchangeCode: "UN", ValidFrom: time.Now().UTC().AddDate(0, 0, -30),
+	})
+	require.NoError(t, err)
+
+	_, err = svc.DepositCash(ctx, userID, "income-pg-deposit", CashFlowInput{Currency: "USD", Amount: 10000})
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	buyAt := now.AddDate(0, 0, -10)
+	buy, err := svc.BuyPosition(ctx, userID, "income-pg-buy", BuyInput{
+		Symbol: ticker, ExchangeCode: "UN", AssetType: AssetTypeStock,
+		Quantity: 10, ExecutionPrice: 100, EffectiveAt: &buyAt,
+	})
+	require.NoError(t, err)
+	require.Equal(t, in.ID, buy.Position.InstrumentID)
+	sellAt := now.AddDate(0, 0, -2)
+	_, err = svc.SellPosition(ctx, userID, "income-pg-sell", SellInput{
+		Symbol: ticker, Quantity: 10, ExecutionPrice: 105, EffectiveAt: &sellAt,
+	})
+	require.NoError(t, err)
+
+	discovered, err := svc.IncomeDiscoveryInstruments(ctx, now.AddDate(0, 0, -30))
+	require.NoError(t, err)
+	found := false
+	for _, item := range discovered {
+		if item.InstrumentID == in.ID {
+			found = true
+			assert.Equal(t, ticker, item.Symbol)
+		}
+	}
+	assert.True(t, found, "recently closed stable instrument must be in provider discovery")
+
+	eligible, err := svc.EligibleQuantity(ctx, userID, in.ID, ticker, now.AddDate(0, 0, -5))
+	require.NoError(t, err)
+	assert.Equal(t, 10.0, eligible)
 }

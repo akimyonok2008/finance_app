@@ -25,6 +25,11 @@ services:
   frontend:
     build:
       context: ./frontend
+      # The Dockerfile's last stage is now `production` (a static nginx
+      # build); local development must keep using the Vite dev server with
+      # hot reload, so this pins the target explicitly rather than relying on
+      # the default.
+      target: dev
     env_file:
       - ./frontend/.env
     environment:

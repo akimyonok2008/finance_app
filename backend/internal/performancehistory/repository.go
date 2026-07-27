@@ -12,8 +12,9 @@ import (
 type Repository interface {
 	Insert(ctx context.Context, snapshot Snapshot) (bool, error)
 	List(ctx context.Context, userID string, from, to time.Time) ([]Snapshot, error)
-	IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, bool, error)
+	IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error)
 	Latest(ctx context.Context, userID, portfolioID string, epoch time.Time) (Snapshot, bool, error)
+	LatestTrustedCapturedAt(ctx context.Context, userID, portfolioID string, epoch time.Time) (time.Time, bool, error)
 	StatusAtOrBefore(ctx context.Context, portfolioID string, epoch, at time.Time) (performance.Status, bool, error)
 	Protect(ctx context.Context, ids ...string) error
 	Compact(ctx context.Context, intradayBefore time.Time) (int64, error)
@@ -91,14 +92,14 @@ func (r *InMemoryRepository) List(_ context.Context, userID string, from, to tim
 	return out, nil
 }
 
-func (r *InMemoryRepository) IndexAtOrBefore(_ context.Context, userID string, cutoff, epoch time.Time) (float64, bool, error) {
+func (r *InMemoryRepository) IndexAtOrBefore(_ context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error) {
 	points, _ := r.List(context.Background(), userID, epoch, cutoff)
 	for i := len(points) - 1; i >= 0; i-- {
 		if points[i].DataQualityStatus == QualityComplete && points[i].TrackingStartedAt.Equal(epoch) {
-			return points[i].RankedIndex, true, nil
+			return points[i].RankedIndex, points[i].CapturedAt, true, nil
 		}
 	}
-	return 0, false, nil
+	return 0, time.Time{}, false, nil
 }
 
 func (r *InMemoryRepository) Latest(_ context.Context, userID, portfolioID string, epoch time.Time) (Snapshot, bool, error) {
@@ -114,6 +115,21 @@ func (r *InMemoryRepository) Latest(_ context.Context, userID, portfolioID strin
 		}
 	}
 	return latest, found, nil
+}
+
+func (r *InMemoryRepository) LatestTrustedCapturedAt(_ context.Context, userID, portfolioID string, epoch time.Time) (time.Time, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var latest time.Time
+	for _, record := range r.records {
+		s := record.Snapshot
+		if s.UserID == userID && s.PortfolioID == portfolioID &&
+			s.TrackingStartedAt.Equal(epoch) && s.DataQualityStatus == QualityComplete &&
+			s.CapturedAt.After(latest) {
+			latest = s.CapturedAt
+		}
+	}
+	return latest, !latest.IsZero(), nil
 }
 
 func (r *InMemoryRepository) StatusAtOrBefore(_ context.Context, portfolioID string, epoch, at time.Time) (performance.Status, bool, error) {

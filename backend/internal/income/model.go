@@ -76,6 +76,9 @@ const (
 	StatusUnresolved           Status = "unresolved"
 	StatusFailedRetryable      Status = "failed_retryable"
 	StatusFailedPermanent      Status = "failed_permanent"
+	// StatusProcessedNoEntitlement is non-terminal: a later backdated trade,
+	// identity resolution, or provider correction can make the event eligible.
+	StatusProcessedNoEntitlement Status = "processed_no_entitlement"
 )
 
 // Quality is the confidence level of the event data.

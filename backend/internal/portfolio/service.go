@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/instrument"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -28,6 +29,7 @@ type Service struct {
 	fx          fx.FXProvider
 	coordinator *MutationCoordinator
 	ranked      RankedPerformanceProvider
+	identity    *instrument.Resolver
 }
 
 type RankedPerformanceProvider interface {
@@ -56,6 +58,28 @@ func (s *Service) SetRankedPerformanceProvider(provider RankedPerformanceProvide
 	s.ranked = provider
 }
 
+func (s *Service) SetInstrumentResolver(resolver *instrument.Resolver) {
+	s.identity = resolver
+}
+
+func (s *Service) resolveBuyIdentity(ctx context.Context, input *BuyInput) (instrument.IdentityQuality, error) {
+	if s.identity == nil {
+		return "", nil
+	}
+	resolution, err := s.identity.ResolveDetailedAt(ctx, instrument.IdentityQuery{
+		Ticker: input.Symbol, ExchangeCode: input.ExchangeCode, MIC: input.MIC,
+		SecurityType: input.AssetType,
+	}, input.EffectiveAt)
+	if err != nil {
+		return instrument.QualityUnresolved, err
+	}
+	if resolution.Instrument != nil {
+		input.InstrumentID = resolution.Instrument.ID
+	}
+	input.IdentityQuality = string(resolution.Quality)
+	return resolution.Quality, nil
+}
+
 // Coordinator exposes the mutation boundary (used by the outbox processor and
 // tests). It is nil only for a repository that is not an AggregateStore.
 func (s *Service) Coordinator() *MutationCoordinator { return s.coordinator }
@@ -65,6 +89,18 @@ func (s *Service) Coordinator() *MutationCoordinator { return s.coordinator }
 // on one portfolio (UNIQUE (user_id) in Postgres, user index in memory).
 func (s *Service) GetOrCreateDefaultPortfolio(ctx context.Context, userID string) (*Portfolio, error) {
 	return s.repo.EnsureDefaultPortfolio(ctx, userID)
+}
+
+// SetAutoFundPurchases toggles the portfolio-level preference that lets a buy
+// automatically draw an implicit deposit for any shortfall (default true).
+// When disabled, a buy that would need funding is rejected with
+// ErrInsufficientCash (see coordinator.go) instead of silently creating cash
+// the user never explicitly deposited.
+func (s *Service) SetAutoFundPurchases(ctx context.Context, userID string, enabled bool) error {
+	if _, err := s.GetOrCreateDefaultPortfolio(ctx, userID); err != nil {
+		return err
+	}
+	return s.repo.SetAutoFundPurchases(ctx, userID, enabled)
 }
 
 // Mutate is the single entry point for every position mutation. Callers that
@@ -156,6 +192,13 @@ func (s *Service) CorrectActivity(ctx context.Context, userID, requestID string,
 }
 
 func (s *Service) BuyPosition(ctx context.Context, userID, requestID string, input BuyInput) (MutationResult, error) {
+	quality, err := s.resolveBuyIdentity(ctx, &input)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	if quality == instrument.QualityAmbiguous {
+		return MutationResult{}, ErrInstrumentIdentityAmbiguous
+	}
 	return s.Mutate(ctx, MutationRequest{
 		Kind: MutationBuy, UserID: userID, RequestID: requestID, Buy: input,
 	})
@@ -272,7 +315,7 @@ func activityView(activity Activity) ActivityView {
 		episodeID, _ = activity.Metadata["position_episode_id"].(string)
 	}
 	return ActivityView{
-		ID: activity.ID, Type: activity.Type, Symbol: activity.Symbol,
+		ID: activity.ID, Type: activity.Type, Symbol: activity.Symbol, InstrumentID: activity.InstrumentID,
 		AssetType: activity.AssetType, Currency: activity.Currency,
 		Quantity: activity.Quantity, UnitPrice: activity.UnitPrice,
 		GrossAmount:                round2(activity.GrossAmount),
@@ -333,9 +376,9 @@ func activityCategory(kind ActivityType) string {
 }
 
 // PreviewBuy projects what a purchase would do WITHOUT mutating anything. It
-// performs reads only (portfolio, positions, cash, quote) and writes no
-// activity, cash, position, episode, ranked or audit state. Calling it twice is
-// indistinguishable from calling it zero times.
+// writes no activity, cash, position, episode, ranked, audit or outbox state.
+// Stable identity resolution is the sole exception: an unambiguous provider
+// result may populate the shared instrument register and is idempotent.
 func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput) (BuyPreview, error) {
 	clean, err := validateAndNormalize(PositionInput{
 		Symbol: input.Symbol, AssetType: input.AssetType, Quantity: input.Quantity,
@@ -346,8 +389,16 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 	if input.ExecutionPrice != 0 && !finitePositive(input.ExecutionPrice) {
 		return BuyPreview{}, ErrInvalidBuyPrice
 	}
+	if input.EffectiveAt != nil && input.EffectiveAt.UTC().Before(time.Now().UTC()) &&
+		input.ExecutionPrice == 0 {
+		return BuyPreview{}, ErrHistoricalExecutionPriceRequired
+	}
 	if !isFinite(input.Fee) || input.Fee < 0 {
 		return BuyPreview{}, ErrInvalidBuyFee
+	}
+	identityQuality, err := s.resolveBuyIdentity(ctx, &input)
+	if err != nil {
+		return BuyPreview{}, err
 	}
 	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
 	if err != nil {
@@ -408,7 +459,7 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 		return BuyPreview{}, err
 	}
 	preview := BuyPreview{
-		Symbol: clean.Symbol, AssetType: clean.AssetType, Quantity: clean.Quantity,
+		Symbol: clean.Symbol, InstrumentID: input.InstrumentID, AssetType: clean.AssetType, Quantity: clean.Quantity,
 		ExecutionPrice: price, ExecutionPriceSource: priceSource,
 		Fee: input.Fee, FeeSource: feeSource,
 		GrossPurchaseAmount: round2(gross), TotalCashRequired: round2(totalRequired),
@@ -423,7 +474,11 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 		if positionStatus(position) != PositionStatusOpen {
 			continue
 		}
-		if position.Symbol == clean.Symbol && position.AssetType == clean.AssetType &&
+		sameInstrument := input.InstrumentID != "" && position.InstrumentID == input.InstrumentID
+		legacyMatch := input.InstrumentID == "" && input.IdentityQuality == "" &&
+			position.InstrumentID == "" &&
+			position.Symbol == clean.Symbol
+		if (sameInstrument || legacyMatch) && position.AssetType == clean.AssetType &&
 			position.Currency == currency {
 			total := position.Quantity + clean.Quantity
 			preview.CreatesNewEpisode = false
@@ -443,13 +498,60 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 		// Surfaced rather than silently previewed as feasible.
 		preview.CalculationStatus = "insufficient_cash_auto_funding_disabled"
 	}
+	if identityQuality == instrument.QualityAmbiguous {
+		preview.CalculationStatus = "instrument_identity_ambiguous"
+	} else if identityQuality == instrument.QualityUnresolved {
+		preview.CalculationStatus = "instrument_identity_unresolved"
+	}
 	return preview, nil
 }
 
+// resolveSellPosition finds the open position a sell/preview targets, honoring
+// the same two ways of addressing a sale as the committed mutation path
+// (coordinator.findSalePosition): an explicit PositionID, or a bare Symbol
+// resolved against the user's own open positions. Preview and commit must
+// agree on which position a symbol-only request resolves to, since the
+// preview is presented to the user as an exact forecast of the commit.
+func (s *Service) resolveSellPosition(ctx context.Context, userID string, input SellInput) (*Position, error) {
+	if id := strings.TrimSpace(input.PositionID); id != "" {
+		position, err := s.repo.GetPosition(ctx, id)
+		if err != nil || position.UserID != userID {
+			return nil, ErrPositionNotFound
+		}
+		return position, nil
+	}
+	symbol := normalizeSymbol(input.Symbol)
+	if symbol == "" {
+		return nil, ErrPositionNotFound
+	}
+	positions, err := s.repo.ListPositionsByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	var found *Position
+	for _, position := range positions {
+		if positionStatus(position) != PositionStatusOpen || normalizeSymbol(position.Symbol) != symbol {
+			continue
+		}
+		if found != nil {
+			return nil, ErrMutationConflict
+		}
+		found = position
+	}
+	if found == nil {
+		return nil, ErrPositionNotFound
+	}
+	return found, nil
+}
+
 func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInput) (SellPreview, error) {
-	position, err := s.repo.GetPosition(ctx, strings.TrimSpace(input.PositionID))
-	if err != nil || position.UserID != userID {
-		return SellPreview{}, ErrPositionNotFound
+	if input.EffectiveAt != nil && input.EffectiveAt.UTC().Before(time.Now().UTC()) &&
+		input.ExecutionPrice == 0 {
+		return SellPreview{}, ErrHistoricalExecutionPriceRequired
+	}
+	position, err := s.resolveSellPosition(ctx, userID, input)
+	if err != nil {
+		return SellPreview{}, err
 	}
 	if positionStatus(position) != PositionStatusOpen {
 		return SellPreview{}, ErrPositionClosed
@@ -546,6 +648,36 @@ func (s *Service) ClosePosition(ctx context.Context, userID, positionID string) 
 	return *res.Closed, nil
 }
 
+// WriteOffUnpriceablePosition realizes a position's full cost basis as a loss
+// when its symbol has no available market price. It is the narrow escape
+// hatch for a holding that would otherwise be permanently stuck: every
+// ordinary mutation prices every currently-held symbol for the ranked-index
+// checkpoint, so a symbol with no live quote and no cached fallback (a
+// delisting, a provider dropping coverage, a provider switch) makes the whole
+// account unusable — deposits, buys, sells of OTHER positions, everything —
+// with no way to remove the one broken position. This is NOT a general write-
+// off: a position whose symbol can still be priced is rejected with
+// ErrPositionIsPriceable and must be sold normally, so it can't be used to
+// erase a losing but perfectly tradeable position from realized results.
+func (s *Service) WriteOffUnpriceablePosition(ctx context.Context, userID, requestID, positionID string) (MutationResult, error) {
+	position, err := s.repo.GetPosition(ctx, strings.TrimSpace(positionID))
+	if err != nil || position.UserID != userID {
+		return MutationResult{}, ErrPositionNotFound
+	}
+	if positionStatus(position) != PositionStatusOpen {
+		return MutationResult{}, ErrPositionClosed
+	}
+	if _, priceErr := s.provider.GetLatestPrice(ctx, position.Symbol); priceErr == nil {
+		return MutationResult{}, ErrPositionIsPriceable
+	}
+	return s.Mutate(ctx, MutationRequest{
+		Kind: MutationWriteOff, UserID: userID, RequestID: requestID,
+		CorpAction: CorpActionInput{
+			Subtype: CorpWriteOff, Symbol: position.Symbol, Provenance: ProvenanceUserReported,
+		},
+	})
+}
+
 // ReplaceWithStrategyWeights replaces the portfolio from public percentage
 // weights. The entire target allocation is validated and priced before anything
 // destructive happens, the swap is atomic (closed history preserved), and the
@@ -588,6 +720,59 @@ func (s *Service) ListClosedPositions(ctx context.Context, userID string) ([]Clo
 // PortfolioIndex here is the CURRENT-BASKET figure (value vs the sum of position
 // baselines) — a private display value. It is NOT the ranked career index; that
 // comes only from the performance service.
+// PublicWeightsSummary computes just enough to derive a public allocation
+// breakdown (open positions valued at current price, plus cash) — the same
+// inputs buildComposition actually reads. Unlike Summary, it never scans the
+// activity ledger or touches closed positions, because callers that only need
+// weights (the leaderboard enriching every public row, Explore matching) were
+// paying for Summary's full economic reconstruction (income, fees, realized
+// P&L over the entire ledger) just to throw it away. That scan is the
+// dominant cost of Summary and runs once per row on every leaderboard
+// request, so skipping it here removes an O(users) full-ledger-scan fan-out
+// from a hot, frequently-polled path.
+func (s *Service) PublicWeightsSummary(ctx context.Context, userID string) (*PortfolioSummary, error) {
+	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	positions, err := s.repo.ListPositionsByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	cashViews, totalCash, err := s.CashBalances(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make([]PositionSummary, 0, len(positions))
+	for _, pos := range positions {
+		if positionStatus(pos) != PositionStatusOpen {
+			continue
+		}
+		price, err := s.provider.GetLatestPrice(ctx, pos.Symbol)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
+		}
+		costLocal := pos.Quantity * pos.AverageBuyPrice
+		valueLocal := pos.Quantity * price.Price
+		costBase, err := s.fx.Convert(ctx, costLocal, pos.Currency, fx.BaseCurrency)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
+		}
+		valueBase, err := s.fx.Convert(ctx, valueLocal, price.Currency, fx.BaseCurrency)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
+		}
+		summaries = append(summaries, CalculatePositionSummary(pos, price.Price, price.Currency, costBase, valueBase, fx.BaseCurrency))
+	}
+
+	summary := CalculatePortfolioSummary(userID, pf.ID, fx.BaseCurrency, summaries)
+	summary.CashBalances = cashViews
+	summary.TotalCashValueBase = round2(totalCash)
+	summary.CurrentValue = round2(summary.ActiveCurrentValueBase + totalCash)
+	return &summary, nil
+}
+
 func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary, error) {
 	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
 	if err != nil {
@@ -656,6 +841,7 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 	summary.TotalCashValueBase = round2(totalCash)
 	summary.CurrentValue = round2(summary.ActiveCurrentValueBase + totalCash)
 	summary.RealizedGainLossBase = round2(ledger.realized)
+	summary.HasSelfReportedExecutionPrice = ledger.hasSelfReportedExecutionPrice
 
 	// Deprecated compatibility aliases now have one precise scope: open
 	// holdings only. They are not total P&L and never use ranked return.
@@ -732,6 +918,15 @@ type ledgerMetrics struct {
 	income                                   IncomeMetrics
 	fees                                     FeeMetrics
 	hasBuy, hasOpening                       bool
+	// hasSelfReportedExecutionPrice is true when any buy/sell contributing to
+	// the current cost basis or realized P&L used a USER-ENTERED execution
+	// price rather than a provider-estimated one. Unlike the ranked index
+	// (which values every holding at the tracked market quote regardless of
+	// what price the user claims to have paid), open/closed holdings P&L is
+	// built directly from this figure — so callers that surface those numbers
+	// publicly must be able to disclose that they may include unverifiable,
+	// self-reported data.
+	hasSelfReportedExecutionPrice bool
 	// bySymbol carries the instrument-attributable slice of the SAME ledger
 	// figures above, keyed by normalized symbol. It is an aggregation of the
 	// ledger, never a second calculation of it.
@@ -792,7 +987,13 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 			result.hasOpening = true
 		case ActivityBuy:
 			result.hasBuy = true
-		case ActivitySell:
+			if activity.Metadata["execution_price_source"] == PriceSourceUserRecorded {
+				result.hasSelfReportedExecutionPrice = true
+			}
+		case ActivitySell, ActivityWriteOff:
+			if activity.Metadata["execution_price_source"] == PriceSourceUserRecorded {
+				result.hasSelfReportedExecutionPrice = true
+			}
 			if activity.RealizedGainLossBase != nil {
 				result.realized += *activity.RealizedGainLossBase
 				if normalizeSymbol(activity.Symbol) == "" {

@@ -298,3 +298,114 @@ func (v fakeVerifier) Verify(context.Context, string) (ProviderClaims, error) {
 	}
 	return v.claims, nil
 }
+
+func TestChangePassword_WrongCurrentPasswordFails(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+
+	err = svc.ChangePassword(user.ID, "NotTheRealPassword", "NewStrongPassword123")
+
+	assert.ErrorIs(t, err, ErrInvalidCredentials)
+	_, _, loginErr := svc.Login("user@example.com", "StrongPassword123")
+	assert.NoError(t, loginErr, "the original password must still work after a rejected change")
+}
+
+func TestChangePassword_WeakNewPasswordFails(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+
+	err = svc.ChangePassword(user.ID, "StrongPassword123", "short")
+
+	assert.ErrorIs(t, err, ErrPasswordTooShort)
+}
+
+func TestChangePassword_CorrectCurrentPasswordUpdatesHash(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+
+	err = svc.ChangePassword(user.ID, "StrongPassword123", "NewStrongPassword123")
+	require.NoError(t, err)
+
+	_, _, err = svc.Login("user@example.com", "StrongPassword123")
+	assert.ErrorIs(t, err, ErrInvalidCredentials, "the old password must stop working")
+
+	_, _, err = svc.Login("user@example.com", "NewStrongPassword123")
+	assert.NoError(t, err, "the new password must work")
+}
+
+func TestDeleteAccount_WrongPasswordFails(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+
+	err = svc.DeleteAccount(context.Background(), user.ID, "NotTheRealPassword")
+
+	assert.ErrorIs(t, err, ErrInvalidCredentials)
+	_, err = svc.UserByID(user.ID)
+	assert.NoError(t, err, "a rejected deletion must not remove the account")
+}
+
+// TestDeleteAccount_RemovesAccountFromEveryLookup is the property that matters
+// most: once deleted, the account must disappear from login, from
+// RequireAuthWithUser's existence check (via UserByID/FindByID), and from
+// ListUsers (leaderboard/achievement enumeration) — all at once, with no
+// separate revocation step.
+func TestDeleteAccount_RemovesAccountFromEveryLookup(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+
+	err = svc.DeleteAccount(context.Background(), user.ID, "StrongPassword123")
+	require.NoError(t, err)
+
+	_, _, loginErr := svc.Login("user@example.com", "StrongPassword123")
+	assert.ErrorIs(t, loginErr, ErrInvalidCredentials, "login must fail for a deleted account")
+
+	_, err = svc.UserByID(user.ID)
+	assert.ErrorIs(t, err, ErrUserNotFound, "UserByID (used by RequireAuthWithUser) must reject a deleted account")
+
+	users, err := svc.ListUsers(context.Background())
+	require.NoError(t, err)
+	for _, u := range users {
+		assert.NotEqual(t, user.ID, u.ID, "a deleted account must not appear in ListUsers")
+	}
+}
+
+type recordingDeletionHook struct {
+	called []string
+	err    error
+}
+
+func (h *recordingDeletionHook) OnAccountDeleted(_ context.Context, userID string) error {
+	h.called = append(h.called, userID)
+	return h.err
+}
+
+func TestDeleteAccount_RunsRegisteredHooks(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	hook := &recordingDeletionHook{}
+	svc.RegisterDeletionHook(hook)
+
+	err = svc.DeleteAccount(context.Background(), user.ID, "StrongPassword123")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{user.ID}, hook.called)
+}
+
+func TestDeleteAccount_HookFailureDoesNotUndoDeletion(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	svc.RegisterDeletionHook(&recordingDeletionHook{err: errors.New("downstream unavailable")})
+
+	err = svc.DeleteAccount(context.Background(), user.ID, "StrongPassword123")
+
+	require.NoError(t, err, "the account deletion itself must succeed even if a best-effort hook fails")
+	_, err = svc.UserByID(user.ID)
+	assert.ErrorIs(t, err, ErrUserNotFound)
+}

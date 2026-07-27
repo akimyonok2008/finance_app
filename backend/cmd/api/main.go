@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -21,6 +23,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/db"
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/income"
+	"github.com/ardakimyonok/finance_app/internal/instrument"
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
@@ -33,7 +36,14 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/server"
 	"github.com/ardakimyonok/finance_app/internal/social"
 	"github.com/ardakimyonok/finance_app/internal/strategy"
+	"github.com/ardakimyonok/finance_app/internal/ttlcache"
 )
+
+// mutationPriceCacheTTL bounds the in-process burst-absorption cache placed in
+// front of the price provider consumed by mutation-time repricing (see the
+// priceProvider wrapping below). It is deliberately short: this exists to
+// absorb rapid successive mutations, not to relax real quote freshness.
+const mutationPriceCacheTTL = 5 * time.Second
 
 // --- adapters -----------------------------------------------------------------
 // These bridge existing service method names/signatures to the small interfaces
@@ -49,6 +59,74 @@ type summaryProvider struct{ s *portfolio.Service }
 
 func (p summaryProvider) GetSummary(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error) {
 	return p.s.Summary(ctx, userID)
+}
+
+// publicWeightsProvider skips Summary's full activity-ledger reconstruction:
+// the leaderboard enriches every public-weights row on every request, and all
+// it reads from the summary is the position/cash valuation buildComposition
+// needs — never income, fees, or realized P&L.
+type publicWeightsProvider struct{ s *portfolio.Service }
+
+func (p publicWeightsProvider) GetPublicWeights(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error) {
+	return p.s.PublicWeightsSummary(ctx, userID)
+}
+
+// leaderboardCacheTTL bounds how long a per-user weights/summary computation
+// is reused across repeated leaderboard/standing or Explore requests. The
+// underlying data is a read-time projection, never the source of truth, so a
+// short, deliberate staleness window is an acceptable tradeoff for not
+// recomputing it (position list + per-symbol price/FX lookups, or — for
+// Explore — the full ledger scan) on every single request.
+const leaderboardCacheTTL = 30 * time.Second
+
+// cachingWeightsProvider memoizes GetPublicWeights per userID so a leaderboard
+// build enriching many public-weights rows (or repeated requests within the
+// TTL window) doesn't recompute the same user's weights over and over.
+type cachingWeightsProvider struct {
+	inner profile.PublicWeightsProvider
+	cache *ttlcache.Cache[*portfolio.PortfolioSummary]
+}
+
+func newCachingWeightsProvider(inner profile.PublicWeightsProvider) cachingWeightsProvider {
+	return cachingWeightsProvider{inner: inner, cache: ttlcache.New[*portfolio.PortfolioSummary](leaderboardCacheTTL)}
+}
+
+func (c cachingWeightsProvider) GetPublicWeights(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error) {
+	if cached, ok := c.cache.Get(userID); ok {
+		return cached, nil
+	}
+	summary, err := c.inner.GetPublicWeights(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	c.cache.Set(userID, summary)
+	return summary, nil
+}
+
+// cachingSummaryProvider is the same memoization applied to a full
+// SummaryProvider — used only for Explore's caller-comparison lookup (see
+// profile.Service.SetExploreSummaryProvider), never for the owner's own
+// profile view or a public profile page, both of which must reflect the
+// caller's own just-made changes immediately.
+type cachingSummaryProvider struct {
+	inner profile.SummaryProvider
+	cache *ttlcache.Cache[*portfolio.PortfolioSummary]
+}
+
+func newCachingSummaryProvider(inner profile.SummaryProvider) cachingSummaryProvider {
+	return cachingSummaryProvider{inner: inner, cache: ttlcache.New[*portfolio.PortfolioSummary](leaderboardCacheTTL)}
+}
+
+func (c cachingSummaryProvider) GetSummary(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error) {
+	if cached, ok := c.cache.Get(userID); ok {
+		return cached, nil
+	}
+	summary, err := c.inner.GetSummary(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	c.cache.Set(userID, summary)
+	return summary, nil
 }
 
 type positionProvider struct{ s *portfolio.Service }
@@ -84,9 +162,32 @@ func (a benchmarkHistoryAdapter) GetAdjustedCloseSeries(ctx context.Context, sym
 	}
 	out := make([]benchmark.PricePoint, 0, len(bars))
 	for _, bar := range bars {
-		out = append(out, benchmark.PricePoint{Date: bar.Date, AdjustedClose: bar.Close})
+		out = append(out, benchmark.PricePoint{Date: bar.Date, RawClose: bar.Close})
 	}
 	return out, nil
+}
+
+func (a benchmarkHistoryAdapter) GetSeries(ctx context.Context, symbol string, start, end time.Time, _ benchmark.SeriesRequirement) (benchmark.BenchmarkPriceSeries, error) {
+	points, err := a.GetAdjustedCloseSeries(ctx, symbol, start, end)
+	if err != nil {
+		return benchmark.BenchmarkPriceSeries{}, err
+	}
+	now := time.Now().UTC()
+	return benchmark.BenchmarkPriceSeries{
+		Symbol: symbol,
+		Points: points,
+		Metadata: benchmark.BenchmarkDataMetadata{
+			Provider:          "twelvedata",
+			ProviderMode:      "real",
+			PriceType:         benchmark.PriceTypeRawClose,
+			Quality:           benchmark.DataQualityAcceptable,
+			CorpActionsKnown:  false,
+			RetrievedAt:       now,
+			SourceAsOf:        now,
+			ProviderDataset:   "time_series_daily_close",
+			CurrencyTreatment: "native_quote_currency_unhedged",
+		},
+	}, nil
 }
 
 // benchmarkComparisonAdapter exposes the benchmark construction engine to the
@@ -114,7 +215,27 @@ func (a benchmarkComparisonAdapter) ReturnOver(ctx context.Context, recipeID str
 		EffectiveEnd:     result.EffectiveEnd,
 		Quality:          string(result.DataMetadata.Quality),
 		Synthetic:        result.DataMetadata.IsSynthetic,
+		DataType:         benchmarkComparisonDataType(result.DataMetadata),
+		TotalReturnComparable: result.DataMetadata.AllSeriesAdjusted ||
+			result.DataMetadata.AllSeriesTotalReturn || result.DataMetadata.IsSynthetic,
+		CurrencyTreatment: result.DataMetadata.CurrencyTreatment,
 	}, nil
+}
+
+func benchmarkComparisonDataType(meta benchmark.BenchmarkEvaluationMetadata) string {
+	if meta.IsSynthetic {
+		return "synthetic"
+	}
+	if meta.AllSeriesTotalReturn {
+		return "total_return"
+	}
+	if meta.AllSeriesAdjusted {
+		return "adjusted_close"
+	}
+	if len(meta.PriceTypes) > 0 {
+		return string(meta.PriceTypes[0])
+	}
+	return "unavailable"
 }
 
 // portfolioSnapshotAdapter preserves the private daily cost-basis/composition
@@ -333,11 +454,24 @@ type repositories struct {
 	profiles     profile.Repository
 	marketdata   marketdata.Repository
 	social       social.Repository
+	instruments  instrument.Repository
 }
+
+func shouldStartOutbox(storageProvider string, optionalWorkers bool) bool {
+	return storageProvider == "postgres" || optionalWorkers
+}
+
+func shouldStartOptionalJobs(optionalWorkers bool) bool { return optionalWorkers }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
-	ctx := context.Background()
+	// Cancelled on SIGINT/SIGTERM. Background workers below (outbox, ranked
+	// snapshots, quote refresh, corporate actions, income) all select on this
+	// same ctx, so a container stop or Ctrl-C now drains them cleanly instead
+	// of killing them mid-write — the previous context.Background() never
+	// cancelled, so shutdown was a hard kill regardless of signal.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		slog.Error("invalid configuration", "error", err)
@@ -389,6 +523,7 @@ func main() {
 			profiles:     profile.NewInMemoryRepository(),
 			marketdata:   marketdata.NewInMemoryRepository(),
 			social:       social.NewInMemoryRepository(),
+			instruments:  instrument.NewInMemoryRepository(),
 		}
 	case "postgres":
 		pool, err := db.ConnectPostgres(ctx, cfg.DatabaseURL)
@@ -416,6 +551,7 @@ func main() {
 			profiles:     profile.NewPostgresRepository(pool),
 			marketdata:   marketdata.NewPostgresRepository(pool),
 			social:       social.NewPostgresRepository(pool),
+			instruments:  instrument.NewPostgresRepository(pool),
 		}
 		corpActionStorer = corpactions.NewPostgresStore(pool)
 		incomeStorer = income.NewPostgresStore(pool)
@@ -475,6 +611,15 @@ func main() {
 		MaxQuoteBatchSize:     25,
 	})
 	var priceProvider prices.PriceProvider = marketDataSvc
+	// A short in-process cache absorbs bursts of mutations against the same
+	// held symbols in quick succession: every mutation re-prices EVERY
+	// currently-held symbol for the ranked-index checkpoint, so without this,
+	// several buys/sells in a row each pay a repo/provider round trip per
+	// held symbol even though the price hasn't (and can't have) changed in
+	// that window. The TTL is short and purely a burst absorber — real quote
+	// freshness is still governed by marketDataSvc's own QuoteCacheTTL
+	// underneath, which this sits in front of, not instead of.
+	priceProvider = prices.NewCachedPriceProvider(priceProvider, prices.NewInMemoryPriceCache(), mutationPriceCacheTTL)
 	if redisClient != nil {
 		readinessChecks = append(readinessChecks, server.ReadinessCheck{
 			Name:  "redis",
@@ -493,6 +638,14 @@ func main() {
 	})
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
+	var identityProvider instrument.IdentityProvider
+	if cfg.OpenFIGIEnabled {
+		identityProvider = instrument.NewOpenFIGIProvider(instrument.OpenFIGIConfig{
+			BaseURL: cfg.OpenFIGIBaseURL, APIKey: cfg.OpenFIGIAPIKey,
+			Timeout: cfg.OpenFIGIRequestTimeout,
+		})
+	}
+	portfolioSvc.SetInstrumentResolver(instrument.NewResolver(repos.instruments, identityProvider))
 	// Ranked-performance engine: the single trusted source of global ranked
 	// performance. It is READ-ONLY — ranked state is written exclusively inside
 	// the portfolio aggregate transaction (portfolio.MutationCoordinator), so a
@@ -509,8 +662,14 @@ func main() {
 		EligibilityThreshold: cfg.RankedActiveCoverage,
 		IntradayRetention:    cfg.RankedSnapshotRetention,
 	})
+	portfolioSvc.Coordinator().SetTrustedSnapshotBoundary(historySvc)
 	leaderboardSvc := leaderboard.NewService(authSvc, rankedPerformanceAdapter{performanceSvc})
 	leaderboardSvc.SetSnapshotStore(historySvc)
+	// Same tolerance performancehistory itself uses for "close enough to a
+	// requested boundary" (RANKED_BOUNDARY_TOLERANCE), so a windowed
+	// leaderboard/standing and /performance/history agree on how large a gap
+	// in recorded snapshots is still acceptable for a given window.
+	leaderboardSvc.SetMaxSnapshotAge(cfg.RankedBoundaryTolerance)
 	competitionsSvc := competitions.NewService(
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
@@ -568,6 +727,8 @@ func main() {
 	achievementsSvc.SetAwardPolicy(awardMode, environment)
 	slog.Info("benchmark award policy configured", "mode", string(awardMode), "environment", string(environment))
 	profileSvc := profile.NewService(repos.profiles, userProvider{authSvc}, summaryProvider{portfolioSvc})
+	profileSvc.SetPublicWeightsProvider(newCachingWeightsProvider(publicWeightsProvider{portfolioSvc}))
+	profileSvc.SetExploreSummaryProvider(newCachingSummaryProvider(summaryProvider{portfolioSvc}))
 	profileSvc.SetAchievementProvider(achievementsSvc)
 	profileSvc.SetSprintRankProvider(competitionsSvc)
 	profileSvc.SetGlobalRankProvider(leaderboardSvc)
@@ -576,6 +737,10 @@ func main() {
 	profileSvc.SetRankedPerformanceProvider(profileRankedAdapter{performanceSvc})
 	// Enrich leaderboard rows with public profile data (handle/tag/weights).
 	leaderboardSvc.SetProfileProvider(leaderboardProfileAdapter{profileSvc})
+	// Deleting an account also unpublishes its profile, so it stops appearing
+	// on Explore or via a direct handle lookup (those read the profile
+	// repository directly and never check whether the account still exists).
+	authSvc.RegisterDeletionHook(profileSvc)
 
 	strategySvc := strategy.NewService(profileSvc, portfolioSvc)
 	socialSvc := social.NewService(repos.social, repos.profiles)
@@ -616,21 +781,62 @@ func main() {
 	// the mutation commits, driven by durable events written inside the same
 	// transaction. A projection failure retries; it can never roll back or fail a
 	// portfolio mutation, and Redis being down cannot corrupt core state.
-	if store, ok := repos.portfolio.(jobs.EventSource); ok && cfg.EnableBackgroundWorkers {
+	store, eventSourceOK := repos.portfolio.(jobs.EventSource)
+	mandatoryProjection := cfg.StorageProvider == "postgres"
+	optionalJobs := shouldStartOptionalJobs(cfg.EnableBackgroundWorkers)
+	if mandatoryProjection && !eventSourceOK {
+		slog.Error("mandatory portfolio projector cannot be constructed: repository has no outbox event source")
+		os.Exit(1)
+	}
+	if eventSourceOK && shouldStartOutbox(cfg.StorageProvider, optionalJobs) {
 		outboxProcessor := jobs.NewOutboxProcessor(store, cfg.LeaderboardRefreshInterval)
 		if rankedCache != nil {
 			outboxProcessor.SetCache(rankedCache, rankedCacheStateAdapter{
 				users: authSvc, performance: performanceSvc,
 			})
 		}
-		outboxProcessor.SetSnapshotRecorder(portfolioSvc)
 		outboxProcessor.SetRankedSnapshotRecorder(rankedMutationSnapshotAdapter{history: historySvc})
+		if optionalJobs {
+			outboxProcessor.SetSnapshotRecorder(portfolioSvc)
+		}
 		outboxProcessor.Start(ctx)
-		slog.Info("portfolio outbox processor started")
+		slog.Info("mandatory portfolio outbox projector started", "postgres_mandatory", mandatoryProjection)
+		if mandatoryProjection {
+			backlog, ok := repos.portfolio.(jobs.BacklogSource)
+			if !ok {
+				slog.Error("mandatory portfolio projector readiness cannot be constructed")
+				os.Exit(1)
+			}
+			readinessChecks = append(readinessChecks, server.ReadinessCheck{
+				Name: "projector",
+				Check: func(ctx context.Context) error {
+					return jobs.CheckProjectorReadiness(ctx, outboxProcessor.Running(), backlog,
+						int64(cfg.OutboxReadinessMaxPending), cfg.OutboxReadinessMaxAge)
+				},
+				Details: func(ctx context.Context) map[string]string {
+					pending, age, err := backlog.OutboxBacklog(ctx)
+					if err != nil {
+						return map[string]string{"projector_running": strconv.FormatBool(outboxProcessor.Running())}
+					}
+					return map[string]string{
+						"projector_running":         strconv.FormatBool(outboxProcessor.Running()),
+						"pending_outbox_count":      strconv.FormatInt(pending, 10),
+						"oldest_pending_outbox_age": age.String(),
+					}
+				},
+			})
+			readinessChecks = append(readinessChecks, server.ReadinessCheck{
+				Name: "outbox_backlog",
+				Check: func(ctx context.Context) error {
+					_, _, err := backlog.OutboxBacklog(ctx)
+					return err
+				},
+			})
+		}
 	}
 
 	// --- background workers ---
-	if cfg.EnableBackgroundWorkers {
+	if optionalJobs {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
 		// Private daily portfolio archives remain available for owner analytics;
 		// ranked achievements use the independent canonical snapshot worker below.
@@ -675,7 +881,7 @@ func main() {
 		corpSvc := corpactions.NewService(corpProvider, corpStore, corpActionGateway{svc: portfolioSvc})
 		corpSvc.SetLookback(cfg.CorporateActionLookback)
 		corpActionView = corpActionViewAdapter{svc: corpSvc}
-		if cfg.EnableBackgroundWorkers {
+		if optionalJobs {
 			jobs.NewCorporateActionWorker(corpSvc, cfg.CorporateActionPollInterval).Start(ctx)
 			slog.Info("corporate-action pipeline enabled",
 				"primary_provider", cfg.CorporateActionPrimary,
@@ -711,7 +917,7 @@ func main() {
 			Withholding:       income.WithholdingProfile{DefaultRate: cfg.IncomeWithholdingDefault},
 		})
 		incomeView = incomeViewAdapter{svc: incomeSvc}
-		if cfg.EnableBackgroundWorkers {
+		if optionalJobs {
 			jobs.NewIncomeWorker(incomeSvc, cfg.IncomePollInterval).Start(ctx)
 			slog.Info("income pipeline enabled",
 				"primary_provider", cfg.IncomePrimaryProvider,
@@ -737,6 +943,9 @@ func main() {
 		CorporateActionView: corpActionView,
 		IncomeEventView:     incomeView,
 		ReadinessChecks:     readinessChecks,
+		AppEnv:              cfg.AppEnv,
+		CORSAllowedOrigins:  cfg.CORSAllowedOrigins,
+		RateLimitRedis:      redisClient,
 		Info: map[string]string{
 			"storage_provider": cfg.StorageProvider,
 			"price_provider":   priceProviderName,
@@ -757,8 +966,43 @@ func main() {
 		"quote_refresh_interval", cfg.QuoteRefreshInterval.String(),
 		"quote_cache_ttl", cfg.QuoteCacheTTL.String(),
 	)
-	if err := http.ListenAndServe(":"+cfg.Port, handler); err != nil {
-		slog.Error("server error", "error", err)
-		os.Exit(1)
+	// Explicit timeouts close the Slowloris-style gap of a bare
+	// http.ListenAndServe (an idle/slow client can otherwise hold a connection
+	// open indefinitely, exhausting server file descriptors). WriteTimeout is
+	// long enough for the slower aggregate/leaderboard endpoints without
+	// letting any single request hang forever.
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+			return
+		}
+		serveErr <- nil
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		slog.Info("shutdown signal received; draining in-flight requests")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("graceful shutdown failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("server shut down cleanly")
 	}
 }

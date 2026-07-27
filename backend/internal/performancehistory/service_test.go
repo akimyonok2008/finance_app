@@ -79,6 +79,22 @@ func TestRecordCurrentUsesPersistentRankedIndexAndIsBucketIdempotent(t *testing.
 	}
 }
 
+func TestLatestTrustedSnapshotAtIgnoresNewerUntrustedPoint(t *testing.T) {
+	epoch := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	trusted := epoch.Add(24 * time.Hour)
+	repo := NewInMemoryRepository()
+	insertPoint(t, repo, "trusted", epoch, trusted, 101,
+		performance.StatusActive, KindTransition, QualityComplete)
+	insertPoint(t, repo, "newer-stale", epoch, trusted.Add(time.Hour), 102,
+		performance.StatusActive, KindTransition, QualityStale)
+	svc := NewService(repo, rankedStub{value: rankedAt(epoch, trusted, 101, performance.StatusActive)}, DefaultConfig())
+
+	got, found, err := svc.LatestTrustedSnapshotAt(context.Background(), "u1", "pf-1", epoch)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, trusted, got)
+}
+
 func TestRecordCurrentRejectsFailedOrInvalidValuation(t *testing.T) {
 	repo := NewInMemoryRepository()
 	svc := NewService(repo, rankedStub{err: errors.New("price unavailable")}, DefaultConfig())

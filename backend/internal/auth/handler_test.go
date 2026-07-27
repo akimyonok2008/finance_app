@@ -26,6 +26,8 @@ func newTestHandler() (*Handler, *Service, http.Handler) {
 	r.Post("/auth/login", h.Login)
 	r.Post("/auth/google", h.Google)
 	r.With(RequireAuth(tm)).Get("/me", h.Me)
+	r.With(RequireAuth(tm)).Post("/auth/change-password", h.ChangePassword)
+	r.With(RequireAuth(tm)).Post("/auth/delete-account", h.DeleteAccount)
 	return h, svc, r
 }
 
@@ -257,6 +259,77 @@ func TestSecurity_MeResponseNeverExposesPassword(t *testing.T) {
 	rec := doJSON(t, router, http.MethodGet, "/me", "", reg.Token)
 
 	assertNoPasswordLeak(t, rec.Body.String())
+}
+
+func TestHandlerChangePassword_Returns204AndRotatesCredential(t *testing.T) {
+	_, _, router := newTestHandler()
+	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
+	var reg authResponse
+	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/change-password",
+		`{"current_password":"StrongPassword123","new_password":"EvenStrongerPassword456"}`, reg.Token)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	oldLogin := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
+	assert.Equal(t, http.StatusUnauthorized, oldLogin.Code, "the old password must stop working")
+
+	newLogin := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"EvenStrongerPassword456"}`, "")
+	assert.Equal(t, http.StatusOK, newLogin.Code)
+}
+
+func TestHandlerChangePassword_Returns401ForWrongCurrentPassword(t *testing.T) {
+	_, _, router := newTestHandler()
+	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
+	var reg authResponse
+	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/change-password",
+		`{"current_password":"WrongPassword","new_password":"EvenStrongerPassword456"}`, reg.Token)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assertHasError(t, rec.Body.Bytes())
+}
+
+func TestHandlerChangePassword_Returns401WithoutToken(t *testing.T) {
+	_, _, router := newTestHandler()
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/change-password",
+		`{"current_password":"x","new_password":"EvenStrongerPassword456"}`, "")
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandlerDeleteAccount_Returns204ThenTokenStopsWorking(t *testing.T) {
+	_, _, router := newTestHandler()
+	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
+	var reg authResponse
+	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/delete-account",
+		`{"password":"StrongPassword123"}`, reg.Token)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	loginRec := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
+	assert.Equal(t, http.StatusUnauthorized, loginRec.Code, "login must fail after deletion")
+}
+
+func TestHandlerDeleteAccount_Returns401ForWrongPassword(t *testing.T) {
+	_, _, router := newTestHandler()
+	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
+	var reg authResponse
+	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/delete-account",
+		`{"password":"WrongPassword"}`, reg.Token)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	loginRec := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
+	assert.Equal(t, http.StatusOK, loginRec.Code, "a rejected deletion must leave the account usable")
 }
 
 func assertHasError(t *testing.T, body []byte) {

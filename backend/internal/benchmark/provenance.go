@@ -116,6 +116,7 @@ type BenchmarkDataMetadata struct {
 	SourceAsOf        time.Time `json:"source_as_of"`
 	ProviderRequestID string    `json:"provider_request_id,omitempty"`
 	ProviderDataset   string    `json:"provider_dataset,omitempty"`
+	CurrencyTreatment string    `json:"currency_treatment,omitempty"`
 }
 
 // BenchmarkPriceSeries couples a symbol's points with their provenance. The
@@ -179,6 +180,7 @@ type BenchmarkEvaluationMetadata struct {
 	AllSeriesAdjusted    bool        `json:"all_series_adjusted"`
 	AllSeriesTotalReturn bool        `json:"all_series_total_return"`
 	CorpActionsKnown     bool        `json:"corp_actions_known"`
+	CurrencyTreatment    string      `json:"currency_treatment,omitempty"`
 	EvaluatedAt          time.Time   `json:"evaluated_at"`
 }
 

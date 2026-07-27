@@ -31,9 +31,22 @@ vi.mock("@/components/portfolio/PortfolioStateTab", () => ({
   },
 }));
 vi.mock("@/components/portfolio/PortfolioPerformanceTab", () => ({
-  PortfolioPerformanceTab: () => {
+  PortfolioPerformanceTab: ({
+    timeframe,
+    onTimeframeChange,
+  }: {
+    timeframe: string;
+    onTimeframeChange: (value: "3M") => void;
+  }) => {
     mountCounts.performance += 1;
-    return <div data-testid="tab-performance">performance</div>;
+    return (
+      <div data-testid="tab-performance">
+        performance:{timeframe}
+        <button type="button" onClick={() => onTimeframeChange("3M")}>
+          choose 3M
+        </button>
+      </div>
+    );
   },
 }));
 vi.mock("@/components/layout/AppNav", () => ({
@@ -123,6 +136,38 @@ describe("unified /portfolio tab routing", () => {
     expect(screen.queryByTestId("tab-state")).toBeNull();
   });
 
+  it("reads the selected timeframe from the URL and writes changes back", async () => {
+    renderAt("/portfolio?tab=performance&timeframe=6M");
+    expect(screen.getByTestId("tab-performance").textContent).toContain("performance:6M");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "choose 3M" }).click();
+    });
+    expect(screen.getByTestId("location").textContent).toBe(
+      "/portfolio?tab=performance&timeframe=3M",
+    );
+  });
+
+  it("falls back safely for an invalid performance timeframe", () => {
+    renderAt("/portfolio?tab=performance&timeframe=forever");
+    expect(screen.getByTestId("tab-performance").textContent).toContain("performance:1M");
+  });
+
+  it("browser navigation restores the selected timeframe", async () => {
+    renderAt("/portfolio?tab=performance&timeframe=6M");
+    await act(async () => {
+      screen.getByRole("button", { name: "choose 3M" }).click();
+    });
+    await act(async () => {
+      router.go(-1);
+    });
+    expect(screen.getByTestId("tab-performance").textContent).toContain("performance:6M");
+    await act(async () => {
+      router.go(1);
+    });
+    expect(screen.getByTestId("tab-performance").textContent).toContain("performance:3M");
+  });
+
   it("redirects /activity to the transactions tab", () => {
     renderAt("/activity");
     expect(screen.getByTestId("location").textContent).toBe(
@@ -134,7 +179,7 @@ describe("unified /portfolio tab routing", () => {
   it("redirects /performance to the performance tab", () => {
     renderAt("/performance");
     expect(screen.getByTestId("location").textContent).toBe(
-      "/portfolio?tab=performance",
+      "/portfolio?tab=performance&timeframe=1M",
     );
     expect(screen.getByTestId("tab-performance")).toBeDefined();
   });
@@ -147,7 +192,7 @@ describe("unified /portfolio tab routing", () => {
       screen.getByRole("tab", { name: /Performance/ }).click();
     });
     expect(screen.getByTestId("location").textContent).toBe(
-      "/portfolio?tab=performance",
+      "/portfolio?tab=performance&timeframe=1M",
     );
     expect(screen.getByTestId("tab-performance")).toBeDefined();
 
@@ -161,7 +206,7 @@ describe("unified /portfolio tab routing", () => {
       router.go(1);
     });
     expect(screen.getByTestId("location").textContent).toBe(
-      "/portfolio?tab=performance",
+      "/portfolio?tab=performance&timeframe=1M",
     );
   });
 
@@ -242,7 +287,7 @@ describe("unified /portfolio tab routing", () => {
         fireEvent.keyDown(tablist, { key: "End" });
       });
       expect(screen.getByTestId("location").textContent).toBe(
-        "/portfolio?tab=performance",
+        "/portfolio?tab=performance&timeframe=1M",
       );
 
       await act(async () => {

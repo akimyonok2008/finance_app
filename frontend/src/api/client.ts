@@ -51,6 +51,16 @@ type RequestOptions = {
   body?: unknown;
   signal?: AbortSignal;
   idempotencyKey?: string;
+  /**
+   * Some authenticated endpoints legitimately return 401 for a reason OTHER
+   * than an invalid/expired token — e.g. change-password and delete-account
+   * re-verify the current password and return 401 for a WRONG password. That
+   * is not a session problem, so treating it as one would wrongly log the
+   * caller out and discard their form input. Pass true to let a 401 surface
+   * as a normal ApiError instead of triggering the global session-expired
+   * redirect.
+   */
+  skipAuthRedirectOn401?: boolean;
 };
 
 /**
@@ -61,7 +71,7 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const { method = "GET", body, signal, idempotencyKey } = options;
+  const { method = "GET", body, signal, idempotencyKey, skipAuthRedirectOn401 } = options;
 
   const headers: Record<string, string> = { Accept: "application/json" };
   const token = getToken();
@@ -85,7 +95,7 @@ export async function apiRequest<T>(
     );
   }
 
-  if (res.status === 401) {
+  if (res.status === 401 && !skipAuthRedirectOn401) {
     handleUnauthorized();
     throw new ApiError("Your session has expired. Please sign in again.", 401);
   }

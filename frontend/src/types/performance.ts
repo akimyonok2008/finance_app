@@ -92,6 +92,9 @@ export type BenchmarkComparison = {
   portfolio_return_percentage?: number;
   difference_percentage_points?: number;
   data_quality?: string;
+  data_type: "total_return" | "adjusted_close" | "raw_close" | "synthetic" | "unavailable";
+  data_quality_status: string;
+  currency_treatment?: string;
   is_synthetic?: boolean;
 };
 

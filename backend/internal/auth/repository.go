@@ -23,6 +23,15 @@ type UserRepository interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error)
 	CreateIdentity(identity *AuthIdentity) error
+	// UpdatePassword sets a new password hash for an existing, non-deleted
+	// user. Returns ErrUserNotFound if the user doesn't exist (or is deleted).
+	UpdatePassword(userID, passwordHash string) error
+	// SoftDelete marks the user deleted. From that point on FindByEmail,
+	// FindByID, and ListUsers must all treat the account as gone — which also
+	// means any outstanding JWT stops working, since RequireAuthWithUser
+	// re-checks FindByID on every request. Returns ErrUserNotFound if the user
+	// doesn't exist (or is already deleted).
+	SoftDelete(userID string) error
 }
 
 // InMemoryUserRepository is a goroutine-safe, process-local store used for the
@@ -97,6 +106,34 @@ func (r *InMemoryUserRepository) ListUsers(_ context.Context) ([]User, error) {
 		out = append(out, *u)
 	}
 	return out, nil
+}
+
+// UpdatePassword overwrites the stored password hash for userID.
+func (r *InMemoryUserRepository) UpdatePassword(userID, passwordHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	u, ok := r.byID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	u.PasswordHash = passwordHash
+	return nil
+}
+
+// SoftDelete removes the user from both lookup indexes, so FindByEmail,
+// FindByID, and ListUsers all treat the account as gone immediately.
+func (r *InMemoryUserRepository) SoftDelete(userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	u, ok := r.byID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	delete(r.byID, userID)
+	delete(r.byEmail, normalizeEmail(u.Email))
+	return nil
 }
 
 func (r *InMemoryUserRepository) FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error) {

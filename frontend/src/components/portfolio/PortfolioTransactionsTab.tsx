@@ -1,14 +1,14 @@
 import { useState } from "react";
 import {
-  ArrowRight,
   CircleDollarSign,
   History,
   MinusCircle,
   PlusCircle,
 } from "lucide-react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
 import { AddPositionForm } from "@/components/portfolio/AddPositionForm";
+import { ActivityTimeline } from "@/components/portfolio/ActivityTimeline";
 import { ClosePositionDialog } from "@/components/portfolio/ClosePositionDialog";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -18,18 +18,13 @@ import {
   usePositions,
   useWithdrawCash,
 } from "@/hooks/usePositions";
-import type {
-  ActivityCategory,
-} from "@/types/activity";
+import type { ActivityCategory } from "@/types/activity";
 import type { Position } from "@/types/portfolio";
 import {
   CURRENCIES,
   type CurrencyCode,
-  type PortfolioActivity,
 } from "@/types/portfolio";
 import { cn } from "@/utils/cn";
-import { formatMoney } from "@/utils/formatMoney";
-import { gainLossColor } from "@/utils/gainLoss";
 
 const FILTERS: Array<{ value: ActivityCategory; label: string }> = [
   { value: "all", label: "All" },
@@ -161,9 +156,7 @@ export function PortfolioTransactionsTab() {
           <section className="mt-4 space-y-2" aria-live="polite">
             {activity.isLoading && <Card className="p-6 text-sm text-zinc-500">Searching…</Card>}
             {activity.isError && <Card className="p-6 text-sm text-rose-300">Activity is unavailable.</Card>}
-            {(activity.data?.items ?? []).map((item) => (
-              <ActivityRow key={item.id} activity={item} />
-            ))}
+            <ActivityTimeline activities={activity.data?.items ?? []} />
             {!activity.isLoading && !activity.isError && (activity.data?.items.length ?? 0) === 0 && (
               <Card className="p-10 text-center">
                 <h2 className="font-semibold text-zinc-100">No matching activity</h2>
@@ -285,64 +278,6 @@ function RecordSaleCard({
             <span className="text-xs font-medium text-amber-300">Sell</span>
           </button>
         ))}
-      </div>
-    </Card>
-  );
-}
-
-function ActivityRow({ activity }: { activity: PortfolioActivity }) {
-  const automatic = activity.origin !== "user_recorded";
-  const amount = activity.net_amount ?? activity.gross_amount;
-  const signed = activity.activity_type === "withdrawal" ||
-    activity.activity_type.includes("fee") ? -amount : amount;
-
-  return (
-    <Card className="grid gap-3 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
-      <div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-semibold capitalize text-zinc-100">
-            {activity.activity_type.replaceAll("_", " ")}
-          </span>
-          {activity.symbol && <span className="font-mono text-xs text-zinc-400">{activity.symbol}</span>}
-          <span className="rounded-full border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500">
-            {automatic ? "Automatic" : "User recorded"}
-          </span>
-          <span className="text-[10px] capitalize text-zinc-600">{activity.status}</span>
-        </div>
-        <p className="mt-1 text-xs text-zinc-500">
-          {new Date(activity.occurred_at).toLocaleString()}
-          {automatic ? " · No action required" : ""}
-        </p>
-        {activity.position_episode_id && (
-          /*
-           * Deep-link into the Portfolio State tab. The subview is deliberately
-           * NOT hard-coded to open or closed: an activity does not know whether
-           * its episode is still open, so the State tab resolves that from the
-           * data and switches itself.
-           */
-          <Link
-            to={`/portfolio?tab=state&episode=${encodeURIComponent(activity.position_episode_id)}`}
-            aria-label={`View the ${activity.symbol ?? ""} position episode this activity belongs to`}
-            className="mt-2 inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/40"
-          >
-            View position episode <ArrowRight className="h-3 w-3" />
-          </Link>
-        )}
-      </div>
-      <div className="text-left sm:text-right">
-        <div className={cn("font-mono text-sm tabular-nums", gainLossColor(signed))}>
-          {formatMoney(signed, activity.currency)}
-        </div>
-        {activity.quantity !== undefined && activity.unit_price !== undefined && (
-          <p className="mt-1 text-xs text-zinc-500">
-            {activity.quantity} at {formatMoney(activity.unit_price, activity.currency)}
-          </p>
-        )}
-        {activity.realized_gain_loss_base !== undefined && (
-          <p className={cn("mt-1 text-xs", gainLossColor(activity.realized_gain_loss_base))}>
-            Realized {formatMoney(activity.realized_gain_loss_base, "USD")}
-          </p>
-        )}
       </div>
     </Card>
   );

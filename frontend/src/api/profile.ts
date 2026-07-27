@@ -256,6 +256,9 @@ function normalizeInsights(
         numberValue(openClosed.closed_contribution_points) ?? 0,
       has_closed_positions: booleanValue(openClosed.has_closed_positions),
       composition_visible: booleanValue(openClosed.composition_visible),
+      includes_self_reported_prices: booleanValue(
+        openClosed.includes_self_reported_prices,
+      ),
     },
   };
 }

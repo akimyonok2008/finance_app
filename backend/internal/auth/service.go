@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -23,6 +24,23 @@ type Service struct {
 	appleEnabled   bool
 	googleVerifier ProviderVerifier
 	appleVerifier  ProviderVerifier
+	deletionHooks  []AccountDeletionHook
+}
+
+// AccountDeletionHook lets other domains react to account deletion, e.g.
+// unpublishing a public profile so it stops appearing on Explore or a direct
+// handle lookup once the account is gone. Hooks run best-effort: a hook
+// failure is logged by the caller but never blocks the deletion itself, since
+// the account row is already gone by the time hooks run.
+type AccountDeletionHook interface {
+	OnAccountDeleted(ctx context.Context, userID string) error
+}
+
+// RegisterDeletionHook attaches an additional best-effort side effect to run
+// after DeleteAccount soft-deletes the auth row. May be called multiple times
+// to wire more than one domain (profile takedown, etc.).
+func (s *Service) RegisterDeletionHook(h AccountDeletionHook) {
+	s.deletionHooks = append(s.deletionHooks, h)
 }
 
 // NewService wires a Service with its repository and token manager.
@@ -110,6 +128,56 @@ func (s *Service) Login(email, password string) (*User, string, error) {
 		return nil, "", err
 	}
 	return user, token, nil
+}
+
+// ChangePassword verifies currentPassword against the stored hash and, if it
+// matches, replaces it with a hash of newPassword. Existing JWTs are
+// unaffected (they carry no password state), so a compromised session is not
+// automatically invalidated by a password change alone.
+func (s *Service) ChangePassword(userID, currentPassword, newPassword string) error {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return err
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrInvalidCredentials
+	}
+	if len(newPassword) < minPasswordLength {
+		return ErrPasswordTooShort
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	return s.repo.UpdatePassword(userID, string(hash))
+}
+
+// DeleteAccount verifies password (a destructive action requires
+// re-confirming the credential, not just holding a live token) and then
+// soft-deletes the account. From that instant, FindByEmail/FindByID/ListUsers
+// all exclude the user, so RequireAuthWithUser rejects the caller's own token
+// on its very next request — there is no separate revocation step. Registered
+// deletion hooks then run best-effort so other domains (a public profile) stop
+// surfacing the account too; a hook failure does not undo the deletion, since
+// the safety property that matters (login and API access are gone) already
+// holds by the time hooks run.
+func (s *Service) DeleteAccount(ctx context.Context, userID, password string) error {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return err
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return ErrInvalidCredentials
+	}
+	if err := s.repo.SoftDelete(userID); err != nil {
+		return err
+	}
+	for _, hook := range s.deletionHooks {
+		if err := hook.OnAccountDeleted(ctx, userID); err != nil {
+			slog.Warn("account_deletion_hook_failed", "user_id", userID, "error", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) LoginWithGoogle(ctx context.Context, credential string) (*User, string, error) {

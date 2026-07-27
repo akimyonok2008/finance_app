@@ -69,17 +69,17 @@ export function ProfileForm({ profile, onSubmit, isSaving, serverError }: { prof
   });
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5 sm:p-6">
-      <h2 className="text-sm font-semibold text-zinc-100">Profile settings</h2>
-      <p className="mt-1 text-xs text-zinc-500">Shape your public strategy identity.</p>
+    <form onSubmit={handleSubmit(onSubmit)} className="rounded-2xl border border-cyan-300/15 bg-gradient-to-br from-cyan-400/[0.045] via-zinc-900/70 to-violet-500/[0.055] p-5 shadow-xl shadow-cyan-950/10 sm:p-6">
+      <h2 className="text-base font-semibold text-zinc-50">Public profile</h2>
+      <p className="mt-1 text-xs text-zinc-400">Shape your strategy identity and choose exactly what others can see.</p>
 
-      <div className="mt-6 space-y-5">
+      <div className="mt-6 grid gap-5 sm:grid-cols-2">
         <div>
           <Label htmlFor="display_name">Display name</Label>
           <Input id="display_name" className="mt-2" aria-invalid={!!errors.display_name} {...register("display_name")} />
           <FieldError message={errors.display_name?.message} />
         </div>
-        <div>
+        <div className="sm:col-span-2">
           <Label htmlFor="bio">Bio</Label>
           <textarea id="bio" rows={4} className="mt-2 flex w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus-visible:border-zinc-500 focus-visible:ring-1 focus-visible:ring-zinc-500 aria-[invalid=true]:border-rose-400/60" aria-invalid={!!errors.bio} {...register("bio")} />
           <FieldError message={errors.bio?.message} />
@@ -99,15 +99,19 @@ export function ProfileForm({ profile, onSubmit, isSaving, serverError }: { prof
             )}
           />
         </div>
-        <Controller control={control} name="is_public" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Public profile" description="When off, other users cannot view your profile." />} />
-        <Controller control={control} name="show_public_weights" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Show public weights" description="Others can see symbols and percentage weights, never quantities or values." />} />
+        <div className="sm:col-span-2 grid gap-3 sm:grid-cols-2">
+          <Controller control={control} name="is_public" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Public profile" description="When off, other users cannot view your profile." />} />
+          <Controller control={control} name="show_public_weights" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Show public weights" description="Others see symbols and percentage weights, never quantities or values." />} />
+        </div>
       </div>
 
       {serverError ? <p role="alert" className="mt-5 text-sm text-rose-300">{serverError}</p> : null}
-      <Button type="submit" className="mt-6 w-full" disabled={isSaving || !isDirty}>
+      <div className="mt-6 flex justify-end border-t border-cyan-300/10 pt-5">
+      <Button type="submit" className="bg-cyan-200 text-zinc-950 hover:bg-cyan-100 sm:min-w-40" disabled={isSaving || !isDirty}>
         {isSaving ? <LoaderCircle className="animate-spin" /> : null}
         {isSaving ? "Saving profile" : "Save profile"}
       </Button>
+      </div>
     </form>
   );
 }

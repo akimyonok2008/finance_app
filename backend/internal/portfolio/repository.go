@@ -32,6 +32,8 @@ type Repository interface {
 	GetPosition(ctx context.Context, id string) (*Position, error)
 	ListPositionsByUser(ctx context.Context, userID string) ([]*Position, error)
 	ListActiveSymbols(ctx context.Context) ([]string, error)
+	ListIncomeDiscoveryInstruments(ctx context.Context, since time.Time) ([]IncomeDiscoveryInstrument, error)
+	ListIncomeHistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]SymbolHolder, error)
 	// ListOpenPositionsBySymbol returns every user's OPEN position in a symbol.
 	// The automatic corporate-action pipeline uses it to discover which
 	// portfolios an issuer/exchange event affects.
@@ -180,6 +182,78 @@ func (r *InMemoryRepository) ListActiveSymbols(ctx context.Context) ([]string, e
 				out = append(out, p.Symbol)
 			}
 		}
+	}
+	return out, nil
+}
+
+func (r *InMemoryRepository) ListIncomeDiscoveryInstruments(ctx context.Context, since time.Time) ([]IncomeDiscoveryInstrument, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	byKey := map[string]IncomeDiscoveryInstrument{}
+	for _, agg := range r.aggregates {
+		for _, p := range agg.positions {
+			if positionStatus(p) != PositionStatusOpen && (p.ClosedAt == nil || p.ClosedAt.Before(since)) {
+				continue
+			}
+			key := p.InstrumentID + "|alias:" + normalizeSymbol(p.Symbol)
+			if p.InstrumentID == "" {
+				key = "symbol:" + normalizeSymbol(p.Symbol)
+			}
+			byKey[key] = IncomeDiscoveryInstrument{
+				InstrumentID: p.InstrumentID, Symbol: p.Symbol, AssetType: p.AssetType,
+			}
+		}
+		for _, a := range agg.activities {
+			if a.OccurredAt.Before(since) || a.Symbol == "" {
+				continue
+			}
+			key := a.InstrumentID + "|alias:" + normalizeSymbol(a.Symbol)
+			if a.InstrumentID == "" {
+				key = "symbol:" + normalizeSymbol(a.Symbol)
+			}
+			byKey[key] = IncomeDiscoveryInstrument{
+				InstrumentID: a.InstrumentID, Symbol: a.Symbol, AssetType: a.AssetType,
+			}
+		}
+	}
+	out := make([]IncomeDiscoveryInstrument, 0, len(byKey))
+	for _, item := range byKey {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Symbol < out[j].Symbol })
+	return out, nil
+}
+
+func (r *InMemoryRepository) ListIncomeHistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]SymbolHolder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	byPortfolio := map[string]SymbolHolder{}
+	for _, agg := range r.aggregates {
+		for _, p := range agg.positions {
+			matches := instrumentID != "" && p.InstrumentID == instrumentID
+			if !matches && instrumentID == "" {
+				matches = normalizeSymbol(p.Symbol) == normalizeSymbol(symbol)
+			}
+			if !matches {
+				continue
+			}
+			h, ok := byPortfolio[p.PortfolioID]
+			if !ok || p.CreatedAt.Before(h.AcquiredAt) {
+				byPortfolio[p.PortfolioID] = SymbolHolder{
+					UserID: p.UserID, PortfolioID: p.PortfolioID, AssetType: p.AssetType, AcquiredAt: p.CreatedAt,
+				}
+			}
+		}
+	}
+	out := make([]SymbolHolder, 0, len(byPortfolio))
+	for _, h := range byPortfolio {
+		out = append(out, h)
 	}
 	return out, nil
 }

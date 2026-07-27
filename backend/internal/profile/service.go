@@ -22,6 +22,15 @@ type SummaryProvider interface {
 	GetSummary(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error)
 }
 
+// PublicWeightsProvider supplies just enough valuation data to compute a
+// public allocation breakdown (open positions + cash), without the full
+// ledger-scan economics SummaryProvider carries. It exists so enriching a
+// leaderboard row with public weights doesn't pay for income/fee/realized-P&L
+// reconstruction it never uses.
+type PublicWeightsProvider interface {
+	GetPublicWeights(ctx context.Context, userID string) (*portfolio.PortfolioSummary, error)
+}
+
 type AchievementProvider interface {
 	ListAchievementsForUser(ctx context.Context, userID string) ([]achievements.AchievementResponse, error)
 }
@@ -66,22 +75,47 @@ type RankedPerformanceProvider interface {
 }
 
 type Service struct {
-	repo           Repository
-	users          UserProvider
-	summaries      SummaryProvider
-	achievements   AchievementProvider
-	sprintRanks    SprintRankProvider
-	globalRanks    GlobalRankProvider
-	timeframeRanks TimeframeRankProvider
-	history        PerformanceHistoryProvider
-	ranked         RankedPerformanceProvider
-	dna            *dna.Service
-	now            func() time.Time
+	repo             Repository
+	users            UserProvider
+	summaries        SummaryProvider
+	exploreSummaries SummaryProvider // optional; defaults to summaries
+	weights          PublicWeightsProvider
+	achievements     AchievementProvider
+	sprintRanks      SprintRankProvider
+	globalRanks      GlobalRankProvider
+	timeframeRanks   TimeframeRankProvider
+	history          PerformanceHistoryProvider
+	ranked           RankedPerformanceProvider
+	dna              *dna.Service
+	now              func() time.Time
 }
 
 // SetRankedPerformanceProvider attaches the ranked-performance source used for
 // public profile performance.
 func (s *Service) SetRankedPerformanceProvider(p RankedPerformanceProvider) { s.ranked = p }
+
+// SetPublicWeightsProvider attaches the cheap weights-only valuation source
+// used to enrich leaderboard rows. Without it, PublicInfoForUser falls back
+// to the full SummaryProvider (correct, just more expensive).
+func (s *Service) SetPublicWeightsProvider(p PublicWeightsProvider) { s.weights = p }
+
+// SetExploreSummaryProvider attaches a distinct SummaryProvider used only by
+// Explore's buildSimilar (the caller's own composition/DNA comparison). It
+// exists so a caching decorator can sit in front of THAT one call site
+// without also caching the owner's own profile preview (GetMe) or a public
+// profile page view (GetPublic) — both of which callers reasonably expect to
+// reflect their own just-made changes immediately. Unset means "use the same
+// summaries provider everywhere", the previous behavior.
+func (s *Service) SetExploreSummaryProvider(p SummaryProvider) { s.exploreSummaries = p }
+
+// exploreSummaryProvider returns the dedicated Explore provider if set,
+// falling back to the shared one.
+func (s *Service) exploreSummaryProvider() SummaryProvider {
+	if s.exploreSummaries != nil {
+		return s.exploreSummaries
+	}
+	return s.summaries
+}
 
 func NewService(repo Repository, users UserProvider, summaries SummaryProvider) *Service {
 	return &Service{
@@ -120,7 +154,11 @@ func (s *Service) PublicInfoForUser(ctx context.Context, userID string) (Leaderb
 		ShowWeights: p.ShowPublicWeights,
 	}
 	if p.IsPublic && p.ShowPublicWeights {
-		if summary, err := s.summaries.GetSummary(ctx, userID); err == nil && summary != nil {
+		if s.weights != nil {
+			if summary, err := s.weights.GetPublicWeights(ctx, userID); err == nil && summary != nil {
+				info.Weights, _, _, _ = buildComposition(summary)
+			}
+		} else if summary, err := s.summaries.GetSummary(ctx, userID); err == nil && summary != nil {
 			info.Weights, _, _, _ = buildComposition(summary)
 		}
 	}
@@ -192,6 +230,28 @@ func (s *Service) UpdateMe(ctx context.Context, userID string, input UpdateInput
 		return OwnerProfile{}, err
 	}
 	return s.ownerProjection(ctx, p), nil
+}
+
+// OnAccountDeleted implements auth.AccountDeletionHook: it unpublishes the
+// user's profile so it stops resolving via Explore or a direct handle lookup
+// (GetPublic/Explore read straight from the profile repository and never
+// check whether the underlying account still exists). A user who never
+// created a profile is a no-op, not an error.
+func (s *Service) OnAccountDeleted(ctx context.Context, userID string) error {
+	p, err := s.repo.GetByUserID(ctx, userID)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !p.IsPublic && !p.ShowPublicWeights {
+		return nil
+	}
+	p.IsPublic = false
+	p.ShowPublicWeights = false
+	p.UpdatedAt = s.now()
+	return s.repo.Update(ctx, p)
 }
 
 func (s *Service) GetPublic(ctx context.Context, handle string) (PublicProfile, error) {

@@ -27,21 +27,22 @@ func (s *PostgresSnapshotStore) Record(ctx context.Context, userID string, index
 	return err
 }
 
-func (s *PostgresSnapshotStore) IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (float64, bool, error) {
+func (s *PostgresSnapshotStore) IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (float64, time.Time, bool, error) {
 	var index float64
+	var capturedAt time.Time
 	// The captured_at >= notBefore floor drops legacy pre-epoch snapshots; a zero
 	// notBefore ('0001-01-01') is harmlessly below every real timestamp.
 	err := s.pool.QueryRow(ctx, `
-		SELECT portfolio_index FROM leaderboard_snapshots
+		SELECT portfolio_index, captured_at FROM leaderboard_snapshots
 		WHERE user_id = $1 AND captured_at <= $2 AND captured_at >= $3
 		ORDER BY captured_at DESC
 		LIMIT 1
-	`, userID, cutoff.UTC(), notBefore.UTC()).Scan(&index)
+	`, userID, cutoff.UTC(), notBefore.UTC()).Scan(&index, &capturedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		return 0, time.Time{}, false, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return 0, time.Time{}, false, err
 	}
-	return index, true, nil
+	return index, capturedAt, true, nil
 }

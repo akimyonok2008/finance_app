@@ -40,3 +40,32 @@ func TestValidateRequiresGoogleClientIDWhenEnabled(t *testing.T) {
 
 	assert.ErrorContains(t, cfg.Validate(), "GOOGLE_CLIENT_ID")
 }
+
+// TestValidateRefusesDefaultSecretInProduction: a missing JWT_SECRET must not
+// merely warn once APP_ENV=production — that would let a credential-less
+// deployment look healthy while every token is forgeable from the public
+// default secret string.
+func TestValidateRefusesDefaultSecretInProduction(t *testing.T) {
+	cfg := Config{AppEnv: "production", JWTSecret: defaultJWTSecret}
+
+	assert.ErrorContains(t, cfg.Validate(), "JWT_SECRET")
+}
+
+func TestValidateAllowsDefaultSecretOutsideProduction(t *testing.T) {
+	for _, env := range []string{"development", "test", "demo", ""} {
+		cfg := Config{AppEnv: env, JWTSecret: defaultJWTSecret}
+		assert.NoError(t, cfg.Validate(), "env %q should only warn, not fail", env)
+	}
+}
+
+func TestValidateAllowsProductionWithRealSecret(t *testing.T) {
+	cfg := Config{AppEnv: "production", JWTSecret: "a-real-generated-secret"}
+
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidateProductionCheckIsCaseInsensitive(t *testing.T) {
+	cfg := Config{AppEnv: "Production", JWTSecret: defaultJWTSecret}
+
+	assert.ErrorContains(t, cfg.Validate(), "JWT_SECRET")
+}

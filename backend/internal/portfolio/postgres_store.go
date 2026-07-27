@@ -60,16 +60,16 @@ func (t *postgresTx) RecordActivity(ctx context.Context, activity Activity) erro
 	}
 	_, err = t.tx.Exec(ctx, `
 		INSERT INTO portfolio_activities (
-			id, request_id, portfolio_id, user_id, activity_type, symbol,
+			id, request_id, portfolio_id, user_id, activity_type, symbol, instrument_id,
 			asset_type, currency, quantity, unit_price, gross_amount,
 			cost_basis_allocated, realized_gain_loss_base,
 			realized_gain_loss_percentage, occurred_at, portfolio_version,
 			metadata_json, created_at, position_episode_id,
 			execution_price_source, fee_source, recorded_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
 		activity.ID, nullIfEmpty(activity.RequestID), activity.PortfolioID,
 		activity.UserID, string(activity.Type), nullIfEmpty(activity.Symbol),
-		nullIfEmpty(activity.AssetType), activity.Currency, activity.Quantity,
+		nullIfEmpty(activity.InstrumentID), nullIfEmpty(activity.AssetType), activity.Currency, activity.Quantity,
 		activity.UnitPrice, activity.GrossAmount, activity.CostBasisAllocated,
 		activity.RealizedGainLossBase, activity.RealizedGainLossPercentage,
 		activity.OccurredAt, activity.PortfolioVersion, metadata, activity.CreatedAt,
@@ -92,7 +92,8 @@ func (t *postgresTx) RecordActivity(ctx context.Context, activity Activity) erro
 func (t *postgresTx) LedgerActivities(ctx context.Context) ([]Activity, error) {
 	rows, err := t.tx.Query(ctx, `
 		SELECT id, activity_type, COALESCE(symbol,''), COALESCE(asset_type,''),
-		       currency, quantity, unit_price, gross_amount, occurred_at, created_at
+		       currency, quantity, unit_price, gross_amount, occurred_at, created_at,
+		       COALESCE(position_episode_id::text,'')
 		FROM portfolio_activities
 		WHERE portfolio_id=$1
 		ORDER BY occurred_at, created_at`, t.portfolio.ID)
@@ -107,7 +108,7 @@ func (t *postgresTx) LedgerActivities(ctx context.Context) ([]Activity, error) {
 		if err := rows.Scan(&activity.ID, &activityType, &activity.Symbol,
 			&activity.AssetType, &activity.Currency, &activity.Quantity,
 			&activity.UnitPrice, &activity.GrossAmount, &activity.OccurredAt,
-			&activity.CreatedAt); err != nil {
+			&activity.CreatedAt, &activity.PositionEpisodeID); err != nil {
 			return nil, fmt.Errorf("portfolio: scan ledger activity: %w", err)
 		}
 		activity.Type = ActivityType(activityType)
@@ -127,7 +128,7 @@ func (t *postgresTx) FindActivityByRequestID(ctx context.Context, requestID stri
 	var episodeID *string
 	err := t.tx.QueryRow(ctx, `
 		SELECT id, COALESCE(request_id,''), portfolio_id, user_id, activity_type,
-		       COALESCE(symbol,''), COALESCE(asset_type,''), currency, quantity,
+		       COALESCE(symbol,''), COALESCE(instrument_id::text,''), COALESCE(asset_type,''), currency, quantity,
 		       unit_price, gross_amount, cost_basis_allocated,
 		       realized_gain_loss_base, realized_gain_loss_percentage,
 		       occurred_at, portfolio_version, metadata_json, created_at,
@@ -136,7 +137,7 @@ func (t *postgresTx) FindActivityByRequestID(ctx context.Context, requestID stri
 		WHERE portfolio_id=$1 AND request_id=$2`,
 		t.portfolio.ID, requestID).Scan(
 		&activity.ID, &activity.RequestID, &activity.PortfolioID, &activity.UserID,
-		&activityType, &activity.Symbol, &activity.AssetType, &activity.Currency,
+		&activityType, &activity.Symbol, &activity.InstrumentID, &activity.AssetType, &activity.Currency,
 		&activity.Quantity, &activity.UnitPrice, &activity.GrossAmount,
 		&activity.CostBasisAllocated, &activity.RealizedGainLossBase,
 		&activity.RealizedGainLossPercentage, &activity.OccurredAt,
@@ -158,11 +159,11 @@ func (t *postgresTx) FindActivityByRequestID(ctx context.Context, requestID stri
 func (t *postgresTx) CreatePosition(ctx context.Context, p *Position) error {
 	_, err := t.tx.Exec(ctx,
 		`INSERT INTO positions (
-			id, user_id, portfolio_id, symbol, asset_type, quantity, average_buy_price,
+			id, user_id, portfolio_id, symbol, instrument_id, asset_type, quantity, average_buy_price,
 			currency, status, closed_at, close_price, close_price_currency,
 			realized_gain_loss_base, realized_gain_loss_percentage, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-		p.ID, p.UserID, p.PortfolioID, p.Symbol, p.AssetType, p.Quantity,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		p.ID, p.UserID, p.PortfolioID, p.Symbol, nullIfEmpty(p.InstrumentID), p.AssetType, p.Quantity,
 		p.AverageBuyPrice, p.Currency, firstNonEmptyStatus(p.Status), p.ClosedAt,
 		p.ClosePrice, p.CloseCurrency, p.RealizedGainLossBase,
 		p.RealizedGainLossPercentage, p.CreatedAt, p.UpdatedAt,
@@ -176,11 +177,11 @@ func (t *postgresTx) CreatePosition(ctx context.Context, p *Position) error {
 func (t *postgresTx) UpdatePosition(ctx context.Context, p *Position) error {
 	tag, err := t.tx.Exec(ctx,
 		`UPDATE positions
-		 SET symbol=$2, asset_type=$3, quantity=$4, average_buy_price=$5, currency=$6,
-		     status=$7, closed_at=$8, close_price=$9, close_price_currency=$10,
-		     realized_gain_loss_base=$11, realized_gain_loss_percentage=$12, updated_at=$13
+		 SET symbol=$2, instrument_id=$3, asset_type=$4, quantity=$5, average_buy_price=$6, currency=$7,
+		     status=$8, closed_at=$9, close_price=$10, close_price_currency=$11,
+		     realized_gain_loss_base=$12, realized_gain_loss_percentage=$13, updated_at=$14
 		 WHERE id=$1`,
-		p.ID, p.Symbol, p.AssetType, p.Quantity, p.AverageBuyPrice, p.Currency,
+		p.ID, p.Symbol, nullIfEmpty(p.InstrumentID), p.AssetType, p.Quantity, p.AverageBuyPrice, p.Currency,
 		firstNonEmptyStatus(p.Status), p.ClosedAt, p.ClosePrice, p.CloseCurrency,
 		p.RealizedGainLossBase, p.RealizedGainLossPercentage, p.UpdatedAt,
 	)
@@ -509,6 +510,24 @@ func (r *PostgresRepository) MarkOutboxFailed(ctx context.Context, id, cause str
 		return fmt.Errorf("portfolio: mark outbox failed: %w", err)
 	}
 	return nil
+}
+
+func (r *PostgresRepository) OutboxBacklog(ctx context.Context) (int64, time.Duration, error) {
+	var count int64
+	var oldest *time.Time
+	if err := r.pool.QueryRow(ctx, `
+		SELECT count(*), min(created_at)
+		FROM portfolio_outbox WHERE processed_at IS NULL`).Scan(&count, &oldest); err != nil {
+		return 0, 0, fmt.Errorf("portfolio: inspect outbox backlog: %w", err)
+	}
+	if oldest == nil {
+		return count, 0, nil
+	}
+	age := time.Since(oldest.UTC())
+	if age < 0 {
+		age = 0
+	}
+	return count, age, nil
 }
 
 // newAuditID is used by callers that need a stable audit identifier.

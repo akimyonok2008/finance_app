@@ -172,12 +172,12 @@ func EvidenceFromResult(result BenchmarkReturnResult) BenchmarkDataEvidence {
 	return ev
 }
 
-// PricePoint is a single benchmark price observation. AdjustedClose is the
-// provider-neutral legacy field name; the Twelve Data adapter currently puts
-// unadjusted daily closes here, a limitation documented in the backend README.
+// PricePoint is a single benchmark price observation. Raw provider closes are
+// kept separate so they can never be silently blessed as adjusted data.
 type PricePoint struct {
 	Date          string  `json:"date"` // YYYY-MM-DD
 	AdjustedClose float64 `json:"adjusted_close"`
+	RawClose      float64 `json:"raw_close,omitempty"`
 }
 
 // IndexPoint is a generic normalized index point. Ranked achievements do not

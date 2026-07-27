@@ -19,12 +19,22 @@ type incomeGateway struct {
 	svc *portfolio.Service
 }
 
-func (g incomeGateway) ActiveSymbols(ctx context.Context) ([]string, error) {
-	return g.svc.ActiveSymbols(ctx)
+func (g incomeGateway) DiscoveryInstruments(ctx context.Context, since time.Time) ([]income.DiscoveryInstrument, error) {
+	items, err := g.svc.IncomeDiscoveryInstruments(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]income.DiscoveryInstrument, 0, len(items))
+	for _, item := range items {
+		out = append(out, income.DiscoveryInstrument{
+			InstrumentID: item.InstrumentID, Symbol: item.Symbol, AssetType: item.AssetType,
+		})
+	}
+	return out, nil
 }
 
-func (g incomeGateway) HoldersOfSymbol(ctx context.Context, symbol string) ([]income.Holder, error) {
-	holders, err := g.svc.HoldersOfSymbol(ctx, symbol)
+func (g incomeGateway) HistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]income.Holder, error) {
+	holders, err := g.svc.IncomeHistoricalHolders(ctx, instrumentID, symbol)
 	if err != nil {
 		return nil, err
 	}
@@ -37,8 +47,8 @@ func (g incomeGateway) HoldersOfSymbol(ctx context.Context, symbol string) ([]in
 	return out, nil
 }
 
-func (g incomeGateway) EligibleQuantity(ctx context.Context, userID, symbol string, asOf time.Time) (float64, error) {
-	return g.svc.EligibleQuantity(ctx, userID, symbol, asOf)
+func (g incomeGateway) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error) {
+	return g.svc.EligibleQuantity(ctx, userID, instrumentID, symbol, asOf)
 }
 
 // ApplyIncome routes one normalized income component to the correct portfolio

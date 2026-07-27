@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   LogOut,
   Medal,
+  Settings,
   Trophy,
   WalletCards,
 } from "lucide-react";
@@ -73,6 +74,19 @@ export function AppNav({ actions }: AppNavProps) {
 
       <div className="flex items-center gap-1">
         {actions}
+        <Link
+          to="/settings/account"
+          aria-label="Account settings"
+          aria-current={location.pathname.startsWith("/settings") ? "page" : undefined}
+          className={cn(
+            "rounded-lg p-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500",
+            location.pathname.startsWith("/settings")
+              ? "bg-zinc-800/70 text-zinc-100"
+              : "text-zinc-400 hover:bg-zinc-800/70 hover:text-zinc-100",
+          )}
+        >
+          <Settings className="h-3.5 w-3.5" />
+        </Link>
         <button
           type="button"
           onClick={handleLogout}

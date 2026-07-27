@@ -12,8 +12,9 @@ import (
 // ReadinessCheck is a named dependency probe (postgres, redis, ...). Check
 // returns nil when the dependency is reachable.
 type ReadinessCheck struct {
-	Name  string
-	Check func(ctx context.Context) error
+	Name    string
+	Check   func(ctx context.Context) error
+	Details func(ctx context.Context) map[string]string
 }
 
 // healthHandler answers GET /health: 200 whenever the process is alive.
@@ -35,6 +36,11 @@ func readyHandler(checks []ReadinessCheck, info map[string]string) http.HandlerF
 
 		allOK := true
 		for _, c := range checks {
+			if c.Details != nil {
+				for key, value := range c.Details(ctx) {
+					resp[key] = value
+				}
+			}
 			if err := c.Check(ctx); err != nil {
 				allOK = false
 				resp[c.Name] = "error"

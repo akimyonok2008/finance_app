@@ -19,12 +19,20 @@ import (
 // activity — not just recorded calls. It mirrors the production incomeGateway.
 type testGateway struct{ svc *portfolio.Service }
 
-func (g testGateway) ActiveSymbols(ctx context.Context) ([]string, error) {
-	return g.svc.ActiveSymbols(ctx)
+func (g testGateway) DiscoveryInstruments(ctx context.Context, since time.Time) ([]DiscoveryInstrument, error) {
+	items, err := g.svc.IncomeDiscoveryInstruments(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DiscoveryInstrument, 0, len(items))
+	for _, item := range items {
+		out = append(out, DiscoveryInstrument{InstrumentID: item.InstrumentID, Symbol: item.Symbol, AssetType: item.AssetType})
+	}
+	return out, nil
 }
 
-func (g testGateway) HoldersOfSymbol(ctx context.Context, symbol string) ([]Holder, error) {
-	holders, err := g.svc.HoldersOfSymbol(ctx, symbol)
+func (g testGateway) HistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]Holder, error) {
+	holders, err := g.svc.IncomeHistoricalHolders(ctx, instrumentID, symbol)
 	if err != nil {
 		return nil, err
 	}
@@ -35,8 +43,8 @@ func (g testGateway) HoldersOfSymbol(ctx context.Context, symbol string) ([]Hold
 	return out, nil
 }
 
-func (g testGateway) EligibleQuantity(ctx context.Context, userID, symbol string, asOf time.Time) (float64, error) {
-	return g.svc.EligibleQuantity(ctx, userID, symbol, asOf)
+func (g testGateway) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error) {
+	return g.svc.EligibleQuantity(ctx, userID, instrumentID, symbol, asOf)
 }
 
 func (g testGateway) ApplyIncome(ctx context.Context, userID, requestID string, in AppliedIncome) error {
@@ -222,6 +230,82 @@ func TestEligibility_UsesHistoricalHoldingsNotCurrentQuantity(t *testing.T) {
 
 	// Eligible quantity = 100 (held on ex-date), not 40 (current). $1 × 100 = $100.
 	assert.InDelta(t, cashBefore+100, h.cashUSD(t, "u1"), 0.001)
+}
+
+func TestEligibility_FullySoldAfterExDateStillReceivesDividend(t *testing.T) {
+	h := newHarness(t)
+	h.fund(t, "u1", 100)
+	sellAt := h.now.AddDate(0, 0, -2)
+	_, err := h.svc.SellPosition(context.Background(), "u1", "sell-all", portfolio.SellInput{
+		Symbol: "AAPL", Quantity: 100, ExecutionPrice: 195, EffectiveAt: &sellAt,
+	})
+	require.NoError(t, err)
+	cashBefore := h.cashUSD(t, "u1")
+	h.prov.Seed(ProviderIncomeEvent{
+		ProviderEventID: "AAPL-CLOSED", Type: TypeCashDividend,
+		Instrument: InstrumentReference{Symbol: "AAPL"}, AmountPerUnit: 1, Currency: "USD",
+		ExDate: dayPtr(h.now, -5), PaymentDate: h.now.AddDate(0, 0, -1),
+	})
+
+	require.NoError(t, h.income.RunOnce(context.Background()))
+	assert.InDelta(t, cashBefore+100, h.cashUSD(t, "u1"), 0.001)
+}
+
+func TestEligibility_BuyAfterExDateReceivesNothing(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: 100000})
+	require.NoError(t, err)
+	buyAt := h.now.AddDate(0, 0, -2)
+	_, err = h.svc.BuyPosition(context.Background(), "u1", "late-buy", portfolio.BuyInput{
+		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 100,
+		ExecutionPrice: 190, EffectiveAt: &buyAt,
+	})
+	require.NoError(t, err)
+	cashBefore := h.cashUSD(t, "u1")
+	h.prov.Seed(ProviderIncomeEvent{
+		ProviderEventID: "AAPL-LATE", Type: TypeCashDividend,
+		Instrument: InstrumentReference{Symbol: "AAPL"}, AmountPerUnit: 1, Currency: "USD",
+		ExDate: dayPtr(h.now, -5), PaymentDate: h.now.AddDate(0, 0, -1),
+	})
+
+	require.NoError(t, h.income.RunOnce(context.Background()))
+	assert.InDelta(t, cashBefore, h.cashUSD(t, "u1"), 0.001)
+	ev, ok, err := h.store.GetEvent(context.Background(), "manual_dev:AAPL-LATE")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, StatusProcessedNoEntitlement, ev.Status)
+}
+
+func TestProcessedNoEntitlement_ReevaluatesAfterBackdatedBuy(t *testing.T) {
+	h := newHarness(t)
+	raw := ProviderIncomeEvent{
+		ProviderEventID: "AAPL-REEVAL", Type: TypeCashDividend,
+		Instrument: InstrumentReference{Symbol: "AAPL"}, AmountPerUnit: 1, Currency: "USD",
+		ExDate: dayPtr(h.now, -5), PaymentDate: h.now.AddDate(0, 0, -1),
+		RetrievedAt: h.now,
+	}
+	_, err := h.store.UpsertEvent(context.Background(), normalize(h.prov.Name(), raw, h.now))
+	require.NoError(t, err)
+	require.NoError(t, h.income.Process(context.Background()))
+	ev, ok, err := h.store.GetEvent(context.Background(), "manual_dev:AAPL-REEVAL")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, StatusProcessedNoEntitlement, ev.Status)
+
+	_, err = h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: 100000})
+	require.NoError(t, err)
+	buyAt := h.now.AddDate(0, 0, -10)
+	_, err = h.svc.BuyPosition(context.Background(), "u1", "backdated-buy", portfolio.BuyInput{
+		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 25,
+		ExecutionPrice: 180, EffectiveAt: &buyAt,
+	})
+	require.NoError(t, err)
+	cashBefore := h.cashUSD(t, "u1")
+	require.NoError(t, h.income.Process(context.Background()))
+	assert.InDelta(t, cashBefore+25, h.cashUSD(t, "u1"), 0.001)
+	// A further evaluation cannot credit twice.
+	require.NoError(t, h.income.Process(context.Background()))
+	assert.InDelta(t, cashBefore+25, h.cashUSD(t, "u1"), 0.001)
 }
 
 func TestPaymentDate_NotCreditedBeforePayment(t *testing.T) {

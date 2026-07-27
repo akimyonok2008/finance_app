@@ -427,6 +427,29 @@ func (r *InMemoryRepository) MarkOutboxFailed(_ context.Context, id, cause strin
 	return nil
 }
 
+func (r *InMemoryRepository) OutboxBacklog(ctx context.Context) (int64, time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var pending int64
+	var oldest time.Time
+	for _, event := range r.outbox {
+		if event.ProcessedAt != nil {
+			continue
+		}
+		pending++
+		if oldest.IsZero() || event.CreatedAt.Before(oldest) {
+			oldest = event.CreatedAt
+		}
+	}
+	if oldest.IsZero() {
+		return pending, 0, nil
+	}
+	return pending, time.Since(oldest), nil
+}
+
 // --- ranked-state read side ---------------------------------------------------
 
 // GetByPortfolio implements performance.StateReader against committed state.

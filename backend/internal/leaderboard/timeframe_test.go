@@ -50,6 +50,72 @@ func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 	assert.InDelta(t, 109.09, board[0].RankedIndex, 0.05)
 }
 
+// TestBuildTimeframe_ExcludesUserWhenSnapshotGapExceedsMaxAge: a base snapshot
+// that IS at-or-before the window's cutoff but sits well before it (a missed
+// snapshot run, a paused-then-resumed account) must not be used — otherwise a
+// board labeled "1W" would silently measure a much longer real span for that
+// user.
+func TestBuildTimeframe_ExcludesUserWhenSnapshotGapExceedsMaxAge(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	svc := NewService(users, sums)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	store := NewInMemorySnapshotStore()
+	svc.SetSnapshotStore(store)
+
+	// Timeframe1W cutoff = now - 7d. Record a snapshot 2 days further back
+	// than that — a 48h gap, beyond the 36h default tolerance.
+	tooOld := now.Add(-7 * 24 * time.Hour).Add(-2 * 24 * time.Hour)
+	require.NoError(t, store.Record(context.Background(), "u1", 110, tooOld))
+
+	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
+	require.NoError(t, err)
+	assert.Empty(t, board, "a snapshot gap beyond the max-age tolerance must exclude the user, not silently stretch the window")
+}
+
+// TestBuildTimeframe_IncludesUserWithinMaxAgeTolerance is the boundary case:
+// a snapshot slightly before cutoff (within tolerance) must still count.
+func TestBuildTimeframe_IncludesUserWithinMaxAgeTolerance(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	svc := NewService(users, sums)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	store := NewInMemorySnapshotStore()
+	svc.SetSnapshotStore(store)
+
+	// 1 hour before cutoff — well within the 36h default tolerance.
+	closeEnough := now.Add(-7 * 24 * time.Hour).Add(-time.Hour)
+	require.NoError(t, store.Record(context.Background(), "u1", 110, closeEnough))
+
+	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
+	require.NoError(t, err)
+	require.Len(t, board, 1)
+}
+
+// TestSetMaxSnapshotAge_OverridesDefault confirms the tolerance is actually
+// configurable rather than hardcoded.
+func TestSetMaxSnapshotAge_OverridesDefault(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	svc := NewService(users, sums)
+	svc.SetMaxSnapshotAge(48 * time.Hour) // wider than the 36h default
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	store := NewInMemorySnapshotStore()
+	svc.SetSnapshotStore(store)
+
+	// A 40h gap: excluded by the 36h default, but allowed by the wider 48h
+	// tolerance configured above.
+	gap := now.Add(-7 * 24 * time.Hour).Add(-40 * time.Hour)
+	require.NoError(t, store.Record(context.Background(), "u1", 110, gap))
+
+	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
+	require.NoError(t, err)
+	require.Len(t, board, 1, "a wider configured tolerance must be honored")
+}
+
 func TestBuildTimeframe_ExcludesUsersWithoutOldEnoughSnapshot(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
@@ -237,7 +303,7 @@ func TestRefreshCache_DoesNotWriteIndependentSnapshotHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, skipped)
 
-	idx, found, err := store.IndexAtOrBefore(context.Background(), "u1", now, time.Time{})
+	idx, _, found, err := store.IndexAtOrBefore(context.Background(), "u1", now, time.Time{})
 	require.NoError(t, err)
 	assert.False(t, found, "canonical ranked-snapshot worker owns history writes")
 	assert.Zero(t, idx)

@@ -131,10 +131,11 @@ func (h *Handler) evaluatePortfolio(ctx context.Context, userID string) {
 // --- response views ----------------------------------------------------------
 
 type portfolioView struct {
-	ID       string `json:"id"`
-	UserID   string `json:"user_id"`
-	Name     string `json:"name"`
-	Currency string `json:"currency"`
+	ID                string `json:"id"`
+	UserID            string `json:"user_id"`
+	Name              string `json:"name"`
+	Currency          string `json:"currency"`
+	AutoFundPurchases bool   `json:"auto_fund_purchases"`
 }
 
 // positionView is the owner-private position shape. BaselinePrice is the price
@@ -143,6 +144,7 @@ type portfolioView struct {
 type positionView struct {
 	ID                string  `json:"id"`
 	Symbol            string  `json:"symbol"`
+	InstrumentID      string  `json:"instrument_id,omitempty"`
 	AssetType         string  `json:"asset_type"`
 	Quantity          float64 `json:"quantity"`
 	BaselinePrice     float64 `json:"baseline_price"`
@@ -173,9 +175,11 @@ type cashFlowRequest struct {
 }
 
 type buyRequest struct {
-	Symbol    string  `json:"symbol"`
-	AssetType string  `json:"asset_type"`
-	Quantity  float64 `json:"quantity"`
+	Symbol       string  `json:"symbol"`
+	ExchangeCode string  `json:"exchange_code,omitempty"`
+	MIC          string  `json:"mic,omitempty"`
+	AssetType    string  `json:"asset_type"`
+	Quantity     float64 `json:"quantity"`
 	// Optional real execution details. Omitted price/fee/date default to the
 	// latest tracked quote / zero / now and are labelled as estimates.
 	ExecutionPrice float64 `json:"execution_price,omitempty"`
@@ -204,6 +208,7 @@ func toPositionView(p *Position) positionView {
 	return positionView{
 		ID:                p.ID,
 		Symbol:            p.Symbol,
+		InstrumentID:      p.InstrumentID,
 		AssetType:         p.AssetType,
 		Quantity:          p.Quantity,
 		BaselinePrice:     p.AverageBuyPrice,
@@ -237,6 +242,43 @@ func (h *Handler) GetPortfolio(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, portfolioView{
 		ID: pf.ID, UserID: pf.UserID, Name: pf.Name, Currency: pf.Currency,
+		AutoFundPurchases: pf.AutoFundPurchases,
+	})
+}
+
+type portfolioSettingsRequest struct {
+	AutoFundPurchases *bool `json:"auto_fund_purchases,omitempty"`
+}
+
+// UpdatePortfolioSettings handles PATCH /portfolio/settings. Currently the
+// only setting is auto_fund_purchases (default true): when disabled, a buy
+// that would need automatic funding is rejected with ErrInsufficientCash
+// instead of silently drawing an implicit deposit — the "buys require
+// sufficient cash" behavior the README describes, for users who want it.
+func (h *Handler) UpdatePortfolioSettings(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userID(w, r)
+	if !ok {
+		return
+	}
+	var req portfolioSettingsRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AutoFundPurchases != nil {
+		if err := h.svc.SetAutoFundPurchases(r.Context(), userID, *req.AutoFundPurchases); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+	}
+	pf, err := h.svc.GetOrCreateDefaultPortfolio(r.Context(), userID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, portfolioView{
+		ID: pf.ID, UserID: pf.UserID, Name: pf.Name, Currency: pf.Currency,
+		AutoFundPurchases: pf.AutoFundPurchases,
 	})
 }
 
@@ -412,6 +454,7 @@ func (h *Handler) BuyPosition(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.svc.BuyPosition(r.Context(), uid, requestID, BuyInput{
 		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
+		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
 		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
 	})
 	if err != nil {
@@ -469,6 +512,7 @@ func (h *Handler) PreviewBuy(w http.ResponseWriter, r *http.Request) {
 	}
 	preview, err := h.svc.PreviewBuy(r.Context(), uid, BuyInput{
 		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
+		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
 		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
 	})
 	if err != nil {
@@ -514,7 +558,7 @@ func mutationView(res MutationResult) activityMutationView {
 	}
 	if res.Activity != nil {
 		activity := ActivityView{
-			ID: res.Activity.ID, Type: res.Activity.Type, Symbol: res.Activity.Symbol,
+			ID: res.Activity.ID, Type: res.Activity.Type, Symbol: res.Activity.Symbol, InstrumentID: res.Activity.InstrumentID,
 			AssetType: res.Activity.AssetType, Currency: res.Activity.Currency,
 			Quantity: res.Activity.Quantity, UnitPrice: res.Activity.UnitPrice,
 			GrossAmount:                round2(res.Activity.GrossAmount),
@@ -584,6 +628,37 @@ func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
 	h.evaluatePortfolio(r.Context(), userID)
 	if res.Closed == nil {
 		// Idempotent replay of a close whose summary is no longer reconstructable.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, *res.Closed)
+}
+
+// WriteOffPosition handles POST /portfolio/positions/{positionId}/write-off.
+// It is deliberately narrow: it only succeeds when the position's symbol has
+// no available market price (a delisting, a coverage gap, a provider
+// switch) — every other mutation on the account revalues every held symbol,
+// so such a position would otherwise brick the account permanently. A
+// position whose symbol can still be priced is rejected (409): it must be
+// sold normally, so this can never be used to erase a losing but tradeable
+// position from realized results.
+func (h *Handler) WriteOffPosition(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userID(w, r)
+	if !ok {
+		return
+	}
+	requestID, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	positionID := chi.URLParam(r, "positionId")
+	res, err := h.svc.WriteOffUnpriceablePosition(r.Context(), userID, requestID, positionID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	h.evaluatePortfolio(r.Context(), userID)
+	if res.Closed == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -698,6 +773,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrInvalidSaleFee),
 		errors.Is(err, ErrInvalidBuyPrice),
 		errors.Is(err, ErrInvalidBuyFee),
+		errors.Is(err, ErrHistoricalExecutionPriceRequired),
+		errors.Is(err, ErrImplausibleExecutionPrice),
 		errors.Is(err, ErrCorrectionNotSupported),
 		errors.Is(err, ErrNothingToCorrect):
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -709,12 +786,16 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrPositionClosed),
 		errors.Is(err, ErrSymbolChangeConflict),
-		errors.Is(err, ErrActivityAlreadyCorrected):
+		errors.Is(err, ErrActivityAlreadyCorrected),
+		errors.Is(err, ErrPositionIsPriceable):
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrInsufficientCash),
 		errors.Is(err, ErrInsufficientCashForFee),
 		errors.Is(err, ErrHistoricalRankedConflict),
 		errors.Is(err, ErrHistoricalQuantityInsufficient),
+		errors.Is(err, ErrHistoricalEpisodeNotOpen),
+		errors.Is(err, ErrInstrumentIdentityAmbiguous),
+		errors.Is(err, ErrInstrumentIdentityUnresolvedConflict),
 		errors.Is(err, ErrInvalidSaleQuantity):
 		httpx.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrDuplicateActivity):

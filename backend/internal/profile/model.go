@@ -110,6 +110,14 @@ type ProfileOpenClosedPerformance struct {
 	ClosedContributionPoints float64 `json:"closed_contribution_points"`
 	HasClosedPositions       bool    `json:"has_closed_positions"`
 	CompositionVisible       bool    `json:"composition_visible"`
+	// IncludesSelfReportedPrices is true when OpenReturnPercentage or
+	// ClosedReturnPercentage above is built from at least one user-entered
+	// execution price rather than a provider estimate. Unlike the top-level
+	// PortfolioIndex/ReturnPercentage (the ranked index, always priced from
+	// tracked market quotes and immune to this), these two figures are
+	// unverifiable whenever this is true — a viewer should not read them as
+	// equally trustworthy.
+	IncludesSelfReportedPrices bool `json:"includes_self_reported_prices"`
 }
 
 type ProfileInsights struct {

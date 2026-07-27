@@ -2,9 +2,11 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
@@ -45,6 +47,17 @@ type Deps struct {
 	ReadinessChecks []ReadinessCheck
 	// Info is static metadata echoed by GET /ready (storage_provider, ...).
 	Info map[string]string
+
+	// AppEnv and CORSAllowedOrigins configure the CORS policy (see corsMiddleware
+	// in web.go): production requires an explicit allow-list rather than
+	// silently falling back to "*".
+	AppEnv             string
+	CORSAllowedOrigins []string
+
+	// RateLimitRedis is optional. When set, the auth/account rate limiters
+	// (see ratelimit.go) share their budget across every replica via Redis
+	// instead of each replica enforcing its own separate in-memory limit.
+	RateLimitRedis *redis.Client
 }
 
 // New builds the application's HTTP router, wiring public auth routes and
@@ -56,7 +69,8 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(devCORS)
+	r.Use(metricsMiddleware)
+	r.Use(corsMiddleware(d.AppEnv, d.CORSAllowedOrigins))
 
 	authHandler := auth.NewHandler(d.Auth)
 	portfolioHandler := portfolio.NewHandler(d.Portfolio)
@@ -93,9 +107,22 @@ func New(d Deps) http.Handler {
 
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler(d.ReadinessChecks, d.Info))
+	r.Handle("/metrics", metricsHandler())
+
+	// Per-IP rate limits. Without them, /auth/login and /auth/register are an
+	// unbounded credential-stuffing surface: each guess costs the attacker
+	// nothing but forces the server through a deliberately slow bcrypt compare
+	// every time. accountLimiter covers change-password/delete-account too —
+	// those need a valid JWT already, but a stolen token still shouldn't turn
+	// "verify the current password" into an unlimited guessing oracle. Both
+	// are Redis-backed when d.RateLimitRedis is set, so every replica behind a
+	// load balancer shares one budget instead of each getting its own.
+	authLimiter := newRateLimiter(d.RateLimitRedis, "auth", 20, 5*time.Minute)
+	accountLimiter := newRateLimiter(d.RateLimitRedis, "account", 10, 5*time.Minute)
 
 	// Public auth routes.
 	r.Route("/auth", func(r chi.Router) {
+		r.Use(rateLimitMiddleware(authLimiter))
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 		r.Post("/google", authHandler.Google)
@@ -107,6 +134,8 @@ func New(d Deps) http.Handler {
 		r.Use(auth.RequireAuthWithUser(d.Tokens, d.Auth))
 
 		r.Get("/me", authHandler.Me)
+		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/change-password", authHandler.ChangePassword)
+		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/delete-account", authHandler.DeleteAccount)
 
 		if marketDataHandler != nil {
 			r.Get("/instruments/search", marketDataHandler.SearchInstruments)
@@ -127,6 +156,7 @@ func New(d Deps) http.Handler {
 		}
 
 		r.Get("/portfolio", portfolioHandler.GetPortfolio)
+		r.Patch("/portfolio/settings", portfolioHandler.UpdatePortfolioSettings)
 		r.Get("/portfolio/summary", portfolioHandler.Summary)
 		r.Get("/portfolio/archives", portfolioHandler.Archives)
 		r.Post("/portfolio/deposits", portfolioHandler.DepositCash)
@@ -151,6 +181,9 @@ func New(d Deps) http.Handler {
 		r.Post("/portfolio/activities/{id}/correction", portfolioHandler.CorrectActivity)
 		r.Get("/portfolio/positions/closed", portfolioHandler.ListClosedPositions)
 		r.Get("/portfolio/positions", portfolioHandler.ListPositions)
+		// Narrow escape hatch: only succeeds when the position's symbol has no
+		// available market price. A priceable position must be sold instead.
+		r.Post("/portfolio/positions/{positionId}/write-off", portfolioHandler.WriteOffPosition)
 
 		r.Get("/activity", portfolioHandler.ActivityList)
 		r.Get("/activity/{activityId}", portfolioHandler.ActivityDetail)

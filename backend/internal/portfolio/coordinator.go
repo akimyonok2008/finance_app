@@ -115,6 +115,11 @@ type MutationCoordinator struct {
 	provider prices.PriceProvider
 	fx       fx.FXProvider
 	now      func() time.Time
+	history  TrustedSnapshotBoundary
+}
+
+type TrustedSnapshotBoundary interface {
+	LatestTrustedSnapshotAt(ctx context.Context, userID, portfolioID string, epoch time.Time) (time.Time, bool, error)
 }
 
 // NewMutationCoordinator wires the single portfolio write path.
@@ -130,6 +135,10 @@ func NewMutationCoordinator(store AggregateStore, reader PositionReader, provide
 
 // SetClock overrides the time source (tests).
 func (c *MutationCoordinator) SetClock(now func() time.Time) { c.now = now }
+
+func (c *MutationCoordinator) SetTrustedSnapshotBoundary(boundary TrustedSnapshotBoundary) {
+	c.history = boundary
+}
 
 // maxMutationAttempts bounds valuation rebuilds. Each attempt rebuilds every
 // input from current state; this is not a retry of a stale calculation.
@@ -160,9 +169,13 @@ func (c *MutationCoordinator) Apply(ctx context.Context, req MutationRequest) (M
 		}
 		return MutationResult{}, err
 	}
-	// Symbols already held: a failure here is an upstream problem (502).
+	// Symbols already held: a failure here is an upstream problem (502), except
+	// for a write-off's own target symbol (see observeHeldPositions) — a
+	// write-off exists specifically to unstick a position whose symbol cannot
+	// be priced at all, so requiring a market price for it here would defeat
+	// the whole point.
 	if pre, err := c.reader.ListPositionsByUser(ctx, req.UserID); err == nil {
-		if err := c.observe(ctx, valuation, openSymbols(pre)); err != nil {
+		if err := c.observeHeldPositions(ctx, valuation, req, pre); err != nil {
 			return MutationResult{}, err
 		}
 	}
@@ -187,7 +200,7 @@ func (c *MutationCoordinator) Apply(ctx context.Context, req MutationRequest) (M
 		if errors.Is(err, errRebuildValuation) {
 			// Composition changed before we locked. Fetch the missing quotes
 			// outside the lock and rebuild every input from current state.
-			if err := c.observe(ctx, valuation, missing); err != nil {
+			if err := c.observeMissingAfterRebuild(ctx, valuation, req, missing); err != nil {
 				return MutationResult{}, err
 			}
 			continue
@@ -198,6 +211,70 @@ func (c *MutationCoordinator) Apply(ctx context.Context, req MutationRequest) (M
 		return result, nil
 	}
 	return MutationResult{}, ErrMutationConflict
+}
+
+// observeHeldPositions prices every open position needed for the ranked-index
+// before/after checkpoint. A write-off's own target symbol is exempt from
+// requiring a real quote: planWriteOff realizes the position's KNOWN COST
+// BASIS as a loss regardless of any market price, so the only thing missing a
+// quote would break is the "value before" checkpoint calculation — which this
+// pins with a synthetic, clearly-marked cost-basis observation instead of a
+// fabricated market price. Every other held symbol still requires a real
+// quote: this narrows the write-off exemption to exactly the mutation kind
+// (and exactly the symbol) it exists for.
+func (c *MutationCoordinator) observeHeldPositions(ctx context.Context, val *Valuation, req MutationRequest, positions []*Position) error {
+	exemptSymbol := ""
+	if req.Kind == MutationWriteOff {
+		exemptSymbol = strings.ToUpper(strings.TrimSpace(req.CorpAction.Symbol))
+	}
+
+	toObserve := make([]string, 0, len(positions))
+	for _, sym := range openSymbols(positions) {
+		if exemptSymbol != "" && sym == exemptSymbol {
+			continue
+		}
+		toObserve = append(toObserve, sym)
+	}
+	if err := c.observe(ctx, val, toObserve); err != nil {
+		return err
+	}
+	if exemptSymbol == "" {
+		return nil
+	}
+	if _, ok := val.Quote(exemptSymbol); ok {
+		return nil // priced normally after all; no fallback needed
+	}
+
+	var exemptPosition *Position
+	for _, p := range positions {
+		if p.Symbol == exemptSymbol && positionStatus(p) == PositionStatusOpen {
+			exemptPosition = p
+			break
+		}
+	}
+	if exemptPosition == nil {
+		return nil // nothing open under that symbol; planWriteOff rejects it
+	}
+	rate, ok := val.rates[exemptPosition.Currency]
+	if !ok || !finitePositive(rate) {
+		return ErrUnsupportedCurrency
+	}
+	val.pinCostBasisFallback(exemptSymbol, exemptPosition.AverageBuyPrice, exemptPosition.Currency)
+	return nil
+}
+
+// observeMissingAfterRebuild re-prices symbols that became newly relevant
+// after a composition change was detected inside the lock, applying the same
+// write-off exemption as observeHeldPositions.
+func (c *MutationCoordinator) observeMissingAfterRebuild(ctx context.Context, val *Valuation, req MutationRequest, missing []string) error {
+	if req.Kind != MutationWriteOff {
+		return c.observe(ctx, val, missing)
+	}
+	positions, err := c.reader.ListPositionsByUser(ctx, req.UserID)
+	if err != nil {
+		return c.observe(ctx, val, missing) // fall back to the original behavior
+	}
+	return c.observeHeldPositions(ctx, val, req, positions)
 }
 
 // EnsureRankedEpoch initializes ranked tracking for an existing portfolio that
@@ -500,28 +577,15 @@ const quantityTolerance = 1e-9
 // It is deliberately NOT a deterministic replay engine: Alarvest does not
 // recompute ranked history. The exact rules, in order:
 //
-//  1. A transaction with no effective_at (or one dated now/later) is current and
-//     always allowed.
-//  2. A BACKDATED SALE is validated against the quantity the position actually
-//     held at effective_at, computed by replaying only the ledger's QUANTITY
-//     effects chronologically up to that instant (buys/opening balances/stock
-//     dividends add, sales/write-offs subtract). This is bookkeeping replay, not
-//     ranked replay. Insufficient historical quantity is rejected.
-//  3. The TRUSTED RANKED HISTORY BOUNDARY is the START OF THE UTC DAY of the
-//     most recent committed ranked checkpoint (State.SegmentStartedAt). Ranked
-//     snapshots in this system are captured per UTC day, so the current day is
-//     not yet snapshotted and remains freely writable: a transaction dated at
-//     or after the boundary — backdated relative to recorded_at or not — is
-//     applied exactly like a current-dated one.
-//  4. A transaction dated BEFORE the boundary falls inside a day whose ranked
-//     snapshot is already trusted. It is rejected (ErrHistoricalRankedConflict)
-//     when it would change state that snapshot captured: EVERY backdated sale,
-//     and every backdated buy into an instrument that already has ANY ledger
-//     history (inserting a purchase before existing history retroactively
-//     rewrites that episode's quantity/basis timeline). The one allowed case is
-//     a backdated buy of an instrument with NO ledger history at all: it opens
-//     a genuinely new episode and cannot alter what the snapshot recorded.
-//     Ranked snapshots are NEVER rebuilt in either case.
+//  1. A transaction with no effective_at (or one dated now/later) is current.
+//  2. Every backdated trade requires an explicit execution price; a live quote
+//     is never substituted for a historical fill.
+//  3. A backdated sale is validated only against its selected durable position
+//     episode. The episode must already be open and must contain enough units at
+//     effective_at. This is quantity bookkeeping, not ranked-history replay.
+//  4. The trusted boundary is the exact captured_at of the latest complete
+//     canonical ranked snapshot in the current tracking epoch. Every buy or sale
+//     before that instant is rejected. There is no exception for a new symbol.
 //
 // Nothing has been written when this runs, so a rejection leaves current state
 // completely untouched.
@@ -530,15 +594,14 @@ func (c *MutationCoordinator) validateHistorical(
 	state performance.State, haveState bool,
 ) error {
 	var effectiveAt *time.Time
-	symbol := ""
+	var selected *Position
 	switch req.Kind {
 	case MutationBuy:
 		effectiveAt = req.Buy.EffectiveAt
-		symbol = req.Buy.Symbol
 	case MutationSell:
 		effectiveAt = req.Sell.EffectiveAt
 		if position, err := findSalePosition(all, req); err == nil {
-			symbol = position.Symbol
+			selected = position
 		} else {
 			return err
 		}
@@ -552,50 +615,49 @@ func (c *MutationCoordinator) validateHistorical(
 	if !at.Before(c.now()) {
 		return nil // current-dated (or clock skew); nothing historical about it
 	}
+	if (req.Kind == MutationBuy && req.Buy.ExecutionPrice == 0) ||
+		(req.Kind == MutationSell && req.Sell.ExecutionPrice == 0) {
+		return ErrHistoricalExecutionPriceRequired
+	}
 
 	ledger, err := tx.LedgerActivities(ctx)
 	if err != nil {
 		return err
 	}
 
-	// (2) Historical quantity validation for sales.
+	// Historical quantity validation for sales.
 	if req.Kind == MutationSell {
-		held := historicalQuantity(ledger, symbol, at)
+		held, opened := historicalEpisodeQuantity(ledger, selected.ID, at)
+		if !opened {
+			return ErrHistoricalEpisodeNotOpen
+		}
 		if req.Sell.Quantity > held+quantityTolerance {
 			return fmt.Errorf("%w: the position held only %g units at %s",
 				ErrHistoricalQuantityInsufficient, held, at.Format(time.RFC3339))
 		}
 	}
 
-	// (3) Everything after the trusted ranked boundary behaves normally.
-	if !haveState || state.SegmentStartedAt == nil {
+	// Everything at or after the trusted ranked boundary behaves normally.
+	if !haveState || c.history == nil {
 		return nil
 	}
-	checkpoint := state.SegmentStartedAt.UTC()
-	boundary := time.Date(checkpoint.Year(), checkpoint.Month(), checkpoint.Day(), 0, 0, 0, 0, time.UTC)
-	if !at.Before(boundary) {
+	boundary, found, err := c.history.LatestTrustedSnapshotAt(
+		ctx, req.UserID, tx.Portfolio().ID, state.TrackingStartedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if !found || !at.Before(boundary) {
 		return nil
 	}
-
-	// (4) Before the boundary: inside an already-snapshotted day.
-	if req.Kind == MutationSell {
-		return ErrHistoricalRankedConflict
-	}
-	for _, activity := range ledger {
-		if activity.Symbol == symbol {
-			return ErrHistoricalRankedConflict
-		}
-	}
-	return nil
+	return ErrHistoricalRankedConflict
 }
 
-// historicalQuantity replays the activity ledger's QUANTITY effects for one
-// symbol chronologically up to (and including) `at`. It is intentionally narrow:
-// no valuation, no FX, no ranked state — just the units held at that instant.
-func historicalQuantity(ledger []Activity, symbol string, at time.Time) float64 {
+// historicalEpisodeQuantity replays quantity effects for one durable episode.
+func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time) (float64, bool) {
 	ordered := make([]Activity, 0, len(ledger))
 	for _, activity := range ledger {
-		if activity.Symbol == symbol && !activity.OccurredAt.After(at) {
+		if activity.PositionEpisodeID == episodeID && !activity.OccurredAt.After(at) {
 			ordered = append(ordered, activity)
 		}
 	}
@@ -606,12 +668,16 @@ func historicalQuantity(ledger []Activity, symbol string, at time.Time) float64 
 		return ordered[i].OccurredAt.Before(ordered[j].OccurredAt)
 	})
 	total := 0.0
+	opened := false
 	for _, activity := range ordered {
 		if activity.Quantity == nil {
 			continue
 		}
 		switch activity.Type {
-		case ActivityBuy, ActivityOpeningBalance, ActivityStockDividend, ActivityReinvestedDividend:
+		case ActivityBuy, ActivityOpeningBalance:
+			opened = true
+			total += *activity.Quantity
+		case ActivityStockDividend, ActivityReinvestedDividend:
 			total += *activity.Quantity
 		case ActivitySell, ActivityWriteOff:
 			total -= *activity.Quantity
@@ -623,7 +689,7 @@ func historicalQuantity(ledger []Activity, symbol string, at time.Time) float64 
 	if total < 0 {
 		total = 0
 	}
-	return total
+	return total, opened && total > 0
 }
 
 // neutral reports whether two ranked indexes are equal within a relative
@@ -801,6 +867,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		if !finitePositive(executionPrice) {
 			return mutationPlan{}, ErrInvalidBuyPrice
 		}
+		if err := validateLiveExecutionPrice(req.Buy.EffectiveAt, priceSource, executionPrice, quote.Price); err != nil {
+			return mutationPlan{}, err
+		}
 		fee := req.Buy.Fee
 		feeSource := FeeSourceUserRecorded
 		if fee == 0 {
@@ -850,7 +919,17 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		var result *Position
 		var create bool
 		for _, position := range oldOpen {
-			if position.Symbol == req.Buy.Symbol && position.AssetType == req.Buy.AssetType &&
+			sameInstrument := req.Buy.InstrumentID != "" && position.InstrumentID == req.Buy.InstrumentID
+			legacyMatch := req.Buy.InstrumentID == "" && req.Buy.IdentityQuality == "" &&
+				position.InstrumentID == "" &&
+				position.Symbol == req.Buy.Symbol
+			unresolvedConflict := req.Buy.InstrumentID == "" && req.Buy.IdentityQuality != "" &&
+				position.InstrumentID == "" && position.Symbol == req.Buy.Symbol &&
+				position.AssetType == req.Buy.AssetType && position.Currency == quote.Currency
+			if unresolvedConflict {
+				return mutationPlan{}, ErrInstrumentIdentityUnresolvedConflict
+			}
+			if (sameInstrument || legacyMatch) && position.AssetType == req.Buy.AssetType &&
 				position.Currency == quote.Currency {
 				merged := *position
 				totalQuantity := position.Quantity + req.Buy.Quantity
@@ -868,21 +947,22 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			create = true
 			result = &Position{
 				ID: uuid.NewString(), UserID: req.UserID, PortfolioID: pf.ID,
-				Symbol: req.Buy.Symbol, AssetType: req.Buy.AssetType,
+				Symbol: req.Buy.Symbol, InstrumentID: req.Buy.InstrumentID, AssetType: req.Buy.AssetType,
 				Quantity: req.Buy.Quantity, AverageBuyPrice: (gross + fee) / req.Buy.Quantity,
 				Currency: quote.Currency, Status: PositionStatusOpen,
-				CreatedAt: now, UpdatedAt: now,
+				CreatedAt: occurred, UpdatedAt: now,
 			}
 		}
 
 		// One purchase = one activity group: [automatic funding] + buy + [fee].
 		groupID := uuid.NewString()
 		buyMeta := activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceUserReported, map[string]any{
-			"activity_group_id":      groupID,
-			"execution_price_source": priceSource,
-			"fee_source":             feeSource,
-			"effective_at":           occurred.Format(time.RFC3339Nano),
-			"recorded_at":            now.Format(time.RFC3339Nano),
+			"activity_group_id":           groupID,
+			"execution_price_source":      priceSource,
+			"fee_source":                  feeSource,
+			"effective_at":                occurred.Format(time.RFC3339Nano),
+			"recorded_at":                 now.Format(time.RFC3339Nano),
+			"instrument_identity_quality": req.Buy.IdentityQuality,
 		})
 		if funding > 0 {
 			buyMeta["automatic_funding_amount"] = funding
@@ -890,7 +970,8 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		activity := &Activity{
 			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
 			UserID: req.UserID, Type: ActivityBuy, Symbol: result.Symbol,
-			AssetType: result.AssetType, Currency: quote.Currency,
+			InstrumentID: result.InstrumentID,
+			AssetType:    result.AssetType, Currency: quote.Currency,
 			Quantity: floatPointer(req.Buy.Quantity), UnitPrice: floatPointer(executionPrice),
 			GrossAmount: gross, OccurredAt: occurred, CreatedAt: now,
 			Metadata: buyMeta, PositionEpisodeID: result.ID, GroupID: groupID,
@@ -921,7 +1002,8 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			extraActivities = append(extraActivities, Activity{
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivityBuyFee, Symbol: result.Symbol, Currency: quote.Currency,
-				GrossAmount: fee, OccurredAt: occurred, CreatedAt: now,
+				InstrumentID: result.InstrumentID,
+				GrossAmount:  fee, OccurredAt: occurred, CreatedAt: now,
 				GroupID: groupID, PositionEpisodeID: result.ID,
 				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, ProvenanceUserReported, map[string]any{
 					"component":         "purchase_fee",
@@ -975,6 +1057,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			executionPrice = quote.Price
 			priceSource = PriceSourceProviderEstimate
 		}
+		if err := validateLiveExecutionPrice(req.Sell.EffectiveAt, priceSource, executionPrice, quote.Price); err != nil {
+			return mutationPlan{}, err
+		}
 		feeSource := FeeSourceUserRecorded
 		if req.Sell.Fee == 0 {
 			feeSource = FeeSourceDefaultZero
@@ -1008,7 +1093,8 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		activity := &Activity{
 			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
 			UserID: req.UserID, Type: ActivitySell, Symbol: existing.Symbol,
-			AssetType: existing.AssetType, Currency: quote.Currency,
+			InstrumentID: existing.InstrumentID,
+			AssetType:    existing.AssetType, Currency: quote.Currency,
 			Quantity: floatPointer(quantity), UnitPrice: floatPointer(executionPrice),
 			GrossAmount: proceeds, CostBasisAllocated: floatPointer(allocatedBasis),
 			RealizedGainLossBase:       floatPointer(realizedBase),
@@ -1029,7 +1115,8 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			extraActivities = append(extraActivities, Activity{
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivitySellFee, Symbol: existing.Symbol, Currency: quote.Currency,
-				GrossAmount: req.Sell.Fee, OccurredAt: occurred, CreatedAt: now,
+				InstrumentID: existing.InstrumentID,
+				GrossAmount:  req.Sell.Fee, OccurredAt: occurred, CreatedAt: now,
 				GroupID: groupID, PositionEpisodeID: existing.ID,
 				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, ProvenanceUserReported, map[string]any{
 					"component": "sale_fee",
@@ -1061,7 +1148,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		closePrice := executionPrice
 		closed := *existing
 		closed.Status = PositionStatusClosed
-		closed.ClosedAt = &now
+		closed.ClosedAt = &occurred
 		closed.ClosePrice = &closePrice
 		closed.CloseCurrency = quote.Currency
 		closed.RealizedGainLossBase = round2(realizedBase)
@@ -1071,7 +1158,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType,
 			Quantity: quantity, BaselinePrice: closed.AverageBuyPrice,
 			BaselineCurrency: closed.Currency, ClosePrice: round2(closePrice),
-			ClosePriceCurrency: quote.Currency, ClosedAt: now.Format(time.RFC3339),
+			ClosePriceCurrency: quote.Currency, ClosedAt: occurred.Format(time.RFC3339),
 			RealizedGainLossBase:       round2(realizedBase),
 			RealizedGainLossPercentage: round2(realizedPct),
 			ClosedCostBasisBase:        round2(allocatedBasis * basisRate),
@@ -1262,15 +1349,18 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 	// reference the paying instrument's open position episode so the closed-
 	// episode aggregator can find it later; account-level income (interest,
 	// other-provider income with no symbol) has no episode to attach to.
-	episodeID := ""
+	episodeID, instrumentID, assetType := "", "", ""
 	if req.Income.Symbol != "" {
 		if pos := findOpenBySymbol(oldOpen, req.Income.Symbol); pos != nil {
 			episodeID = pos.ID
+			instrumentID = pos.InstrumentID
+			assetType = pos.AssetType
 		}
 	}
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: incomeActivityType(req.Income.Subtype), Symbol: req.Income.Symbol,
+		InstrumentID: instrumentID, AssetType: assetType,
 		Currency: currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: episodeID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance,
@@ -1403,14 +1493,16 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 	incomeActivity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityReinvestedDividend, Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
-		Currency: quote.Currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
+		InstrumentID: result.InstrumentID,
+		Currency:     quote.Currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
 		CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, incomeMeta),
 	}
 	buyLeg := Activity{
 		ID: uuid.NewString(), RequestID: "", PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityBuy, Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
-		Currency: quote.Currency, Quantity: floatPointer(qty), UnitPrice: floatPointer(price),
+		InstrumentID: result.InstrumentID,
+		Currency:     quote.Currency, Quantity: floatPointer(qty), UnitPrice: floatPointer(price),
 		GrossAmount: net, OccurredAt: now, CreatedAt: now,
 		GroupID: groupID, PositionEpisodeID: result.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, map[string]any{
@@ -1484,7 +1576,8 @@ func (c *MutationCoordinator) planReturnOfCapital(req MutationRequest, pf *Portf
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityReturnOfCapital, Symbol: req.Income.Symbol, AssetType: existing.AssetType,
-		Currency: currency, GrossAmount: net, CostBasisAllocated: floatPointer(round2(basisReduction)),
+		InstrumentID: existing.InstrumentID,
+		Currency:     currency, GrossAmount: net, CostBasisAllocated: floatPointer(round2(basisReduction)),
 		OccurredAt: occurredAt(req.Income.OccurredAt, now), CreatedAt: now,
 		PositionEpisodeID: existing.ID,
 		Metadata:          activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, meta),
@@ -1526,7 +1619,8 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityStockDividend, Symbol: req.Income.Symbol, AssetType: existing.AssetType,
-		Currency: existing.Currency, Quantity: floatPointer(updated.Quantity - existing.Quantity),
+		InstrumentID: existing.InstrumentID,
+		Currency:     existing.Currency, Quantity: floatPointer(updated.Quantity - existing.Quantity),
 		OccurredAt: occurredAt(req.Income.OccurredAt, now), CreatedAt: now,
 		PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.Income.Provenance, map[string]any{
@@ -1613,7 +1707,8 @@ func (c *MutationCoordinator) planWriteOff(req MutationRequest, pf *Portfolio, o
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityWriteOff, Symbol: existing.Symbol, AssetType: existing.AssetType, Currency: existing.Currency,
-		Quantity: floatPointer(existing.Quantity), GrossAmount: 0,
+		InstrumentID: existing.InstrumentID,
+		Quantity:     floatPointer(existing.Quantity), GrossAmount: 0,
 		CostBasisAllocated: floatPointer(allocatedBasis), RealizedGainLossBase: floatPointer(realizedBase),
 		RealizedGainLossPercentage: floatPointer(-100), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: existing.ID,
@@ -1654,7 +1749,8 @@ func (c *MutationCoordinator) planSplit(req MutationRequest, pf *Portfolio, oldO
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: splitActivityType(subtype), Symbol: existing.Symbol, AssetType: existing.AssetType,
-		Currency: existing.Currency, Quantity: floatPointer(updated.Quantity), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
+		InstrumentID: existing.InstrumentID,
+		Currency:     existing.Currency, Quantity: floatPointer(updated.Quantity), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
 			"corporate_action":  string(subtype),
@@ -1686,7 +1782,8 @@ func (c *MutationCoordinator) planSymbolChange(req MutationRequest, pf *Portfoli
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivitySymbolChange, Symbol: req.CorpAction.NewSymbol, AssetType: existing.AssetType,
-		Currency: existing.Currency, OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
+		InstrumentID: existing.InstrumentID,
+		Currency:     existing.Currency, OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
 			"corporate_action": string(CorpSymbolChange),
@@ -1817,13 +1914,19 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if req.Buy.ExecutionPrice != 0 && !finitePositive(req.Buy.ExecutionPrice) {
 			return nil, ErrInvalidBuyPrice
 		}
+		if req.Buy.EffectiveAt != nil && req.Buy.EffectiveAt.UTC().Before(c.now()) &&
+			req.Buy.ExecutionPrice == 0 {
+			return nil, ErrHistoricalExecutionPriceRequired
+		}
 		if !isFinite(req.Buy.Fee) || req.Buy.Fee < 0 {
 			return nil, ErrInvalidBuyFee
 		}
 		req.Buy = BuyInput{
 			Symbol: clean.Symbol, AssetType: clean.AssetType, Quantity: clean.Quantity,
 			ExecutionPrice: req.Buy.ExecutionPrice, Fee: req.Buy.Fee,
-			EffectiveAt: req.Buy.EffectiveAt,
+			EffectiveAt: req.Buy.EffectiveAt, InstrumentID: req.Buy.InstrumentID,
+			ExchangeCode: req.Buy.ExchangeCode, MIC: req.Buy.MIC,
+			IdentityQuality: req.Buy.IdentityQuality,
 		}
 		return []string{clean.Symbol}, nil
 	case MutationSell:
@@ -1832,6 +1935,10 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		}
 		if req.Sell.ExecutionPrice != 0 && !finitePositive(req.Sell.ExecutionPrice) {
 			return nil, ErrInvalidSalePrice
+		}
+		if req.Sell.EffectiveAt != nil && req.Sell.EffectiveAt.UTC().Before(c.now()) &&
+			req.Sell.ExecutionPrice == 0 {
+			return nil, ErrHistoricalExecutionPriceRequired
 		}
 		if !isFinite(req.Sell.Fee) || req.Sell.Fee < 0 {
 			return nil, ErrInvalidSaleFee

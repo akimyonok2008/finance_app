@@ -55,6 +55,7 @@ type Activity struct {
 	UserID                     string
 	Type                       ActivityType
 	Symbol                     string
+	InstrumentID               string
 	AssetType                  string
 	Currency                   string
 	Quantity                   *float64
@@ -79,6 +80,7 @@ type ActivityView struct {
 	ID                         string       `json:"id"`
 	Type                       ActivityType `json:"activity_type"`
 	Symbol                     string       `json:"symbol,omitempty"`
+	InstrumentID               string       `json:"instrument_id,omitempty"`
 	AssetType                  string       `json:"asset_type,omitempty"`
 	Currency                   string       `json:"currency"`
 	Quantity                   *float64     `json:"quantity,omitempty"`
@@ -139,6 +141,7 @@ type Position struct {
 	UserID                     string
 	PortfolioID                string
 	Symbol                     string
+	InstrumentID               string
 	AssetType                  string
 	Quantity                   float64
 	AverageBuyPrice            float64 // locked baseline price (today's price at add)
@@ -210,8 +213,9 @@ const (
 // required: the user records the essential action and the backend infers the
 // accounting consequences.
 //
-//   - ExecutionPrice: the real per-unit price paid. Zero means "estimate it from
-//     the latest tracked quote" (recorded as provider_estimate).
+//   - ExecutionPrice: the real per-unit price paid. For a live trade, zero means
+//     "estimate it from the latest tracked quote" (provider_estimate). A
+//     backdated trade must always provide this value explicitly.
 //   - Fee: the transaction fee actually charged. Zero means default_zero.
 //   - EffectiveAt: when the trade really happened. Nil means now.
 //
@@ -219,18 +223,23 @@ const (
 // INCLUDES the purchase price and the buy fee, mirroring the canonical sale
 // contract where realized P&L is measured net of the sale fee.
 type BuyInput struct {
-	Symbol         string
-	AssetType      string
-	Quantity       float64
-	ExecutionPrice float64
-	Fee            float64
-	EffectiveAt    *time.Time
+	Symbol          string
+	InstrumentID    string
+	ExchangeCode    string
+	MIC             string
+	IdentityQuality string
+	AssetType       string
+	Quantity        float64
+	ExecutionPrice  float64
+	Fee             float64
+	EffectiveAt     *time.Time
 }
 
-// BuyPreview is the non-mutating projection of what a buy would do. It is
-// computed from committed state and never writes anything.
+// BuyPreview never writes portfolio, cash, activity, ranked, audit or outbox
+// state. Identity resolution may register one unambiguous instrument/alias.
 type BuyPreview struct {
 	Symbol               string  `json:"symbol"`
+	InstrumentID         string  `json:"instrument_id,omitempty"`
 	AssetType            string  `json:"asset_type"`
 	Quantity             float64 `json:"quantity"`
 	ExecutionPrice       float64 `json:"execution_price"`
@@ -353,6 +362,14 @@ type PortfolioSummary struct {
 	Fees                   FeeMetrics              `json:"fees"`
 	EconomicPerformance    EconomicPerformance     `json:"economic_performance"`
 	Reconciliation         ReconciliationStatus    `json:"reconciliation"`
+
+	// HasSelfReportedExecutionPrice is true when any buy/sell contributing to
+	// the current cost basis or realized P&L used a user-entered execution
+	// price rather than a provider estimate. It exists so a public consumer of
+	// this data (a profile page) can disclose that open/closed holdings P&L —
+	// unlike the ranked index, which is always priced from tracked market
+	// quotes — may include unverifiable, self-reported figures.
+	HasSelfReportedExecutionPrice bool `json:"has_self_reported_execution_price"`
 
 	// EconomicAttribution and Contributions are computed alongside the summary
 	// but are NOT part of the portfolio-state DTO: they are performance-layer

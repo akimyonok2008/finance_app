@@ -17,6 +17,20 @@ type SymbolHolder struct {
 	AcquiredAt  time.Time
 }
 
+type IncomeDiscoveryInstrument struct {
+	InstrumentID string
+	Symbol       string
+	AssetType    string
+}
+
+func (s *Service) IncomeDiscoveryInstruments(ctx context.Context, since time.Time) ([]IncomeDiscoveryInstrument, error) {
+	return s.repo.ListIncomeDiscoveryInstruments(ctx, since)
+}
+
+func (s *Service) IncomeHistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]SymbolHolder, error) {
+	return s.repo.ListIncomeHistoricalHolders(ctx, instrumentID, symbol)
+}
+
 // ActiveSymbols returns every currently-held symbol across all portfolios.
 func (s *Service) ActiveSymbols(ctx context.Context) ([]string, error) {
 	return s.repo.ListActiveSymbols(ctx)
@@ -74,7 +88,7 @@ func (s *Service) RecordIncome(ctx context.Context, userID, requestID string, in
 //
 // This is portfolio tracking, not a tax lot engine: it assumes a single default
 // portfolio per user and per-symbol netting.
-func (s *Service) EligibleQuantity(ctx context.Context, userID, symbol string, asOf time.Time) (float64, error) {
+func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error) {
 	// A high explicit limit: the Postgres reader caps a non-positive limit at 100,
 	// but eligibility must consider the full history.
 	activities, err := s.repo.ListActivities(ctx, userID, 100000)
@@ -87,14 +101,18 @@ func (s *Service) EligibleQuantity(ctx context.Context, userID, symbol string, a
 	sym := normalizeSymbol(symbol)
 	var qty float64
 	for _, a := range activities {
-		if normalizeSymbol(a.Symbol) != sym {
+		matches := instrumentID != "" && a.InstrumentID == instrumentID
+		if !matches && instrumentID == "" {
+			matches = normalizeSymbol(a.Symbol) == sym
+		}
+		if !matches {
 			continue
 		}
 		if a.OccurredAt.After(asOf) {
 			continue
 		}
 		switch a.Type {
-		case ActivityBuy:
+		case ActivityBuy, ActivityOpeningBalance, ActivityReinvestedDividend:
 			if a.Quantity != nil {
 				qty += *a.Quantity
 			}

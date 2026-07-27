@@ -146,7 +146,7 @@ func (s *Service) buildSimilar(ctx context.Context, callerID string, all []score
 
 	var current exploreCandidate
 	current.userID = callerID
-	if summary, err := s.summaries.GetSummary(ctx, callerID); err == nil && summary != nil {
+	if summary, err := s.exploreSummaryProvider().GetSummary(ctx, callerID); err == nil && summary != nil {
 		weights, _, _, concentration := buildComposition(summary)
 		current.card.PublicWeights = weights
 		current.card.Concentration = concentration

@@ -132,10 +132,11 @@ func TestPGIndexAtOrBeforeIsEpochSafeAndCompleteOnly(t *testing.T) {
 	_, err = repo.Insert(context.Background(), stale)
 	require.NoError(t, err)
 
-	index, found, err := repo.IndexAtOrBefore(context.Background(), userID, now, currentEpoch)
+	index, capturedAt, found, err := repo.IndexAtOrBefore(context.Background(), userID, now, currentEpoch)
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, 110.0, index)
+	assert.WithinDuration(t, complete.CapturedAt, capturedAt, time.Second)
 }
 
 func TestPGCompactionRequiresDailyCoverageAndPreservesEvidence(t *testing.T) {

@@ -84,6 +84,8 @@ const emptyRisk: RiskConsistency = {
 
 const unavailableBenchmark: BenchmarkComparison = {
   available: false,
+  data_type: "unavailable",
+  data_quality_status: "unavailable",
   reason: "Benchmark comparison is unavailable: no benchmark price source is configured.",
 };
 
@@ -298,6 +300,8 @@ describe("benchmark & competition", () => {
         portfolio_return_percentage: 10,
         difference_percentage_points: 6,
         data_quality: "verified",
+        data_type: "adjusted_close",
+        data_quality_status: "sufficient_for_comparison",
       },
     });
     state.standing = {

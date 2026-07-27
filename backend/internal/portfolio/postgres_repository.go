@@ -82,14 +82,14 @@ func (r *PostgresRepository) SetAutoFundPurchases(ctx context.Context, userID st
 	return nil
 }
 
-const positionColumns = `id, user_id, portfolio_id, symbol, asset_type, quantity, average_buy_price, currency,
+const positionColumns = `id, user_id, portfolio_id, symbol, COALESCE(instrument_id::text,''), asset_type, quantity, average_buy_price, currency,
 	COALESCE(status, 'open'), closed_at, close_price, COALESCE(close_price_currency, ''),
 	COALESCE(realized_gain_loss_base, 0), COALESCE(realized_gain_loss_percentage, 0),
 	created_at, updated_at`
 
 func scanPosition(row pgx.Row) (*Position, error) {
 	var p Position
-	err := row.Scan(&p.ID, &p.UserID, &p.PortfolioID, &p.Symbol, &p.AssetType,
+	err := row.Scan(&p.ID, &p.UserID, &p.PortfolioID, &p.Symbol, &p.InstrumentID, &p.AssetType,
 		&p.Quantity, &p.AverageBuyPrice, &p.Currency, &p.Status, &p.ClosedAt,
 		&p.ClosePrice, &p.CloseCurrency, &p.RealizedGainLossBase,
 		&p.RealizedGainLossPercentage, &p.CreatedAt, &p.UpdatedAt)
@@ -113,7 +113,7 @@ func scanPositions(ctx context.Context, q DBTX, sql string, args ...any) ([]*Pos
 	out := make([]*Position, 0)
 	for rows.Next() {
 		var p Position
-		if err := rows.Scan(&p.ID, &p.UserID, &p.PortfolioID, &p.Symbol, &p.AssetType,
+		if err := rows.Scan(&p.ID, &p.UserID, &p.PortfolioID, &p.Symbol, &p.InstrumentID, &p.AssetType,
 			&p.Quantity, &p.AverageBuyPrice, &p.Currency, &p.Status, &p.ClosedAt,
 			&p.ClosePrice, &p.CloseCurrency, &p.RealizedGainLossBase,
 			&p.RealizedGainLossPercentage, &p.CreatedAt, &p.UpdatedAt); err != nil {
@@ -158,6 +158,55 @@ func (r *PostgresRepository) ListActiveSymbols(ctx context.Context) ([]string, e
 	return out, rows.Err()
 }
 
+func (r *PostgresRepository) ListIncomeDiscoveryInstruments(ctx context.Context, since time.Time) ([]IncomeDiscoveryInstrument, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT instrument_id, symbol, asset_type
+		FROM (
+			SELECT COALESCE(instrument_id::text,'') AS instrument_id, symbol, asset_type
+			FROM positions
+			WHERE COALESCE(status,'open')='open' OR closed_at >= $1
+			UNION
+			SELECT COALESCE(instrument_id::text,''), symbol, COALESCE(asset_type,'')
+			FROM portfolio_activities
+			WHERE occurred_at >= $1 AND COALESCE(symbol,'') <> ''
+		) discovery
+		ORDER BY symbol`, since)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list income discovery instruments: %w", err)
+	}
+	defer rows.Close()
+	out := make([]IncomeDiscoveryInstrument, 0)
+	for rows.Next() {
+		var item IncomeDiscoveryInstrument
+		if err := rows.Scan(&item.InstrumentID, &item.Symbol, &item.AssetType); err != nil {
+			return nil, fmt.Errorf("portfolio: scan income discovery instrument: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) ListIncomeHistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]SymbolHolder, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT ON (portfolio_id) user_id::text, portfolio_id::text, asset_type, created_at
+		FROM positions
+		WHERE (($1 <> '' AND instrument_id::text=$1) OR ($1 = '' AND upper(symbol)=upper($2)))
+		ORDER BY portfolio_id, created_at ASC`, instrumentID, symbol)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list income historical holders: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SymbolHolder, 0)
+	for rows.Next() {
+		var h SymbolHolder
+		if err := rows.Scan(&h.UserID, &h.PortfolioID, &h.AssetType, &h.AcquiredAt); err != nil {
+			return nil, fmt.Errorf("portfolio: scan income historical holder: %w", err)
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) ListCashBalances(ctx context.Context, userID string) ([]CashBalance, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT c.portfolio_id, c.currency, c.amount, c.created_at, c.updated_at
@@ -190,7 +239,7 @@ func (r *PostgresRepository) ListActivities(ctx context.Context, userID string, 
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, COALESCE(request_id,''), portfolio_id, user_id, activity_type,
-		       COALESCE(symbol,''), COALESCE(asset_type,''), currency, quantity,
+		       COALESCE(symbol,''), COALESCE(instrument_id::text,''), COALESCE(asset_type,''), currency, quantity,
 		       unit_price, gross_amount, cost_basis_allocated,
 		       realized_gain_loss_base, realized_gain_loss_percentage,
 		       occurred_at, portfolio_version, metadata_json, created_at,
@@ -210,7 +259,7 @@ func (r *PostgresRepository) ListActivities(ctx context.Context, userID string, 
 		var metadata []byte
 		var episodeID *string
 		if err := rows.Scan(&activity.ID, &activity.RequestID, &activity.PortfolioID,
-			&activity.UserID, &activityType, &activity.Symbol, &activity.AssetType,
+			&activity.UserID, &activityType, &activity.Symbol, &activity.InstrumentID, &activity.AssetType,
 			&activity.Currency, &activity.Quantity, &activity.UnitPrice,
 			&activity.GrossAmount, &activity.CostBasisAllocated,
 			&activity.RealizedGainLossBase, &activity.RealizedGainLossPercentage,
@@ -235,7 +284,7 @@ func (r *PostgresRepository) ListActivities(ctx context.Context, userID string, 
 func (r *PostgresRepository) ListActivitiesByPositionEpisode(ctx context.Context, userID, episodeID string) ([]Activity, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, COALESCE(request_id,''), portfolio_id, user_id, activity_type,
-		       COALESCE(symbol,''), COALESCE(asset_type,''), currency, quantity,
+		       COALESCE(symbol,''), COALESCE(instrument_id::text,''), COALESCE(asset_type,''), currency, quantity,
 		       unit_price, gross_amount, cost_basis_allocated,
 		       realized_gain_loss_base, realized_gain_loss_percentage,
 		       occurred_at, portfolio_version, metadata_json, created_at,
@@ -254,7 +303,7 @@ func (r *PostgresRepository) ListActivitiesByPositionEpisode(ctx context.Context
 		var metadata []byte
 		var episode *string
 		if err := rows.Scan(&activity.ID, &activity.RequestID, &activity.PortfolioID,
-			&activity.UserID, &activityType, &activity.Symbol, &activity.AssetType,
+			&activity.UserID, &activityType, &activity.Symbol, &activity.InstrumentID, &activity.AssetType,
 			&activity.Currency, &activity.Quantity, &activity.UnitPrice,
 			&activity.GrossAmount, &activity.CostBasisAllocated,
 			&activity.RealizedGainLossBase, &activity.RealizedGainLossPercentage,

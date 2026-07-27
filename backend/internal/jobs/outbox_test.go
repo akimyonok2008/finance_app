@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +83,26 @@ type fakeSource struct {
 	claimed   map[string]bool
 	processed map[string]bool
 	failed    map[string]string
+	claims    int
+}
+
+type fakeRankedRecorder struct {
+	mu       sync.Mutex
+	recorded map[string]portfolio.OutboxEvent
+	fail     error
+}
+
+func (r *fakeRankedRecorder) RecordMutationSnapshot(_ context.Context, event portfolio.OutboxEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail != nil {
+		return r.fail
+	}
+	if r.recorded == nil {
+		r.recorded = map[string]portfolio.OutboxEvent{}
+	}
+	r.recorded[event.ID] = event
+	return nil
 }
 
 func newFakeSource(events ...portfolio.OutboxEvent) *fakeSource {
@@ -94,6 +115,7 @@ func newFakeSource(events ...portfolio.OutboxEvent) *fakeSource {
 func (s *fakeSource) ClaimOutboxEvents(_ context.Context, limit int) ([]portfolio.OutboxEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.claims++
 	out := make([]portfolio.OutboxEvent, 0, limit)
 	for _, ev := range s.events {
 		if len(out) >= limit || s.claimed[ev.ID] || s.processed[ev.ID] {
@@ -236,6 +258,38 @@ func TestOutbox_ReprocessingSameEventIsHarmless(t *testing.T) {
 	assert.Equal(t, first, cache.scores["u1"], "replaying an event converges on the same state")
 }
 
+func TestOutbox_CommittedMutationProjectsRankedHistoryIdempotently(t *testing.T) {
+	ev := mutatedEvent("ranked-projection", "u1", 142, portfolio.RankingStatusActive)
+	src := newFakeSource(ev)
+	recorder := &fakeRankedRecorder{}
+	p := NewOutboxProcessor(src, 0)
+	p.SetRankedSnapshotRecorder(recorder)
+
+	processed, err := p.ProcessOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+	assert.True(t, src.processed[ev.ID])
+	require.Len(t, recorder.recorded, 1)
+
+	require.NoError(t, p.handle(context.Background(), ev))
+	require.NoError(t, p.handle(context.Background(), ev))
+	assert.Len(t, recorder.recorded, 1, "reprocessing converges on one canonical projection")
+}
+
+func TestOutbox_ProjectorFailureDoesNotCompleteEvent(t *testing.T) {
+	ev := mutatedEvent("ranked-failure", "u1", 142, portfolio.RankingStatusActive)
+	src := newFakeSource(ev)
+	recorder := &fakeRankedRecorder{fail: errors.New("ranked history unavailable")}
+	p := NewOutboxProcessor(src, 0)
+	p.SetRankedSnapshotRecorder(recorder)
+
+	processed, err := p.ProcessOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, processed)
+	assert.False(t, src.processed[ev.ID])
+	assert.Contains(t, src.failed[ev.ID], "ranked history unavailable")
+}
+
 func TestOutbox_ConcurrentProcessorsNeverDoubleClaim(t *testing.T) {
 	events := make([]portfolio.OutboxEvent, 0, 20)
 	for i := 0; i < 20; i++ {
@@ -263,6 +317,44 @@ func TestOutbox_ConcurrentProcessorsNeverDoubleClaim(t *testing.T) {
 		sum += n
 	}
 	assert.Equal(t, len(events), sum, "each event must be processed exactly once across workers")
+}
+
+func TestOutbox_StartIsGuardedAgainstDuplicateLoops(t *testing.T) {
+	src := newFakeSource()
+	p := NewOutboxProcessor(src, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+	p.Start(ctx)
+
+	deadline := time.After(time.Second)
+	for {
+		src.mu.Lock()
+		claims := src.claims
+		src.mu.Unlock()
+		if p.Running() && claims > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("projector did not start")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	cancel()
+
+	deadline = time.After(time.Second)
+	for p.Running() {
+		select {
+		case <-deadline:
+			t.Fatal("projector did not stop")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	assert.Equal(t, 1, src.claims, "calling Start twice must not create a second loop")
 }
 
 func TestOutbox_OutOfOrderEventsAlwaysProjectCurrentState(t *testing.T) {
@@ -304,4 +396,29 @@ func TestOutbox_DeletedUserEventRemovesCachedMember(t *testing.T) {
 	require.NoError(t, p.handle(context.Background(),
 		mutatedEvent("old", "deleted", 120, portfolio.RankingStatusActive)))
 	assert.False(t, cache.has("deleted"))
+}
+
+type fixedBacklog struct {
+	pending int64
+	age     time.Duration
+}
+
+func (b fixedBacklog) OutboxBacklog(context.Context) (int64, time.Duration, error) {
+	return b.pending, b.age, nil
+}
+
+func TestProjectorReadinessDegradesForBacklogThresholds(t *testing.T) {
+	err := CheckProjectorReadiness(context.Background(), true,
+		fixedBacklog{pending: 11, age: time.Minute}, 10, 15*time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backlog degraded")
+
+	err = CheckProjectorReadiness(context.Background(), true,
+		fixedBacklog{pending: 1, age: 16 * time.Minute}, 10, 15*time.Minute)
+	require.Error(t, err)
+
+	require.NoError(t, CheckProjectorReadiness(context.Background(), true,
+		fixedBacklog{pending: 1, age: time.Minute}, 10, 15*time.Minute))
+	require.Error(t, CheckProjectorReadiness(context.Background(), false,
+		fixedBacklog{}, 10, 15*time.Minute))
 }

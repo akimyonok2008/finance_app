@@ -59,18 +59,39 @@ const maxLeaderboardSize = 100
 // precomputed Redis ranking; otherwise (or when the cache is empty or failing)
 // it falls back to live calculation, so the cache is never a single point of
 // failure.
+// defaultMaxSnapshotAge bounds how much older than the requested window start
+// a base snapshot may be and still count for that window. It mirrors
+// performancehistory's own BoundaryTolerance default (36h) so both places
+// agree on what "close enough to the boundary" means.
+const defaultMaxSnapshotAge = 36 * time.Hour
+
 type Service struct {
-	users     UserProvider
-	ranked    RankedPerformanceProvider
-	cache     LeaderboardCache      // optional
-	snapshots SnapshotStore         // optional; enables trailing-window timeframes
-	profiles  ProfilePublicProvider // optional; enriches rows with handle/tag/weights
-	now       func() time.Time
+	users          UserProvider
+	ranked         RankedPerformanceProvider
+	cache          LeaderboardCache      // optional
+	snapshots      SnapshotStore         // optional; enables trailing-window timeframes
+	profiles       ProfilePublicProvider // optional; enriches rows with handle/tag/weights
+	maxSnapshotAge time.Duration
+	now            func() time.Time
 }
 
 // NewService wires a leaderboard Service around the ranked-performance provider.
 func NewService(users UserProvider, ranked RankedPerformanceProvider) *Service {
-	return &Service{users: users, ranked: ranked, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{
+		users: users, ranked: ranked, maxSnapshotAge: defaultMaxSnapshotAge,
+		now: func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// SetMaxSnapshotAge overrides how much older than a window's start a base
+// snapshot may be and still count for that window. A gap larger than this
+// (a missed snapshot run, a paused-then-resumed account) makes the user
+// ineligible for that timeframe rather than silently stretching e.g. "1W"
+// into a much longer real span.
+func (s *Service) SetMaxSnapshotAge(d time.Duration) {
+	if d > 0 {
+		s.maxSnapshotAge = d
+	}
 }
 
 // SetCache attaches an optional ranking cache (Redis in production).
@@ -510,13 +531,21 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 			}
 			// Only post-epoch snapshots are eligible; legacy pre-epoch history is
 			// ignored so a windowed return can never use a manipulable old index.
-			base, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff, rp.TrackingStartedAt)
+			base, capturedAt, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff, rp.TrackingStartedAt)
 			if err != nil {
 				skipped++
 				log.Printf("leaderboard: skipping user %s due to snapshot error: %v", u.ID, err)
 				continue
 			}
 			if !found || base <= 0 {
+				continue
+			}
+			// A base snapshot far older than the window's own start means a gap
+			// in recorded history (a missed snapshot run, a paused-then-resumed
+			// account) — using it would silently stretch e.g. "1W" into a much
+			// longer real span, so the user is excluded from this timeframe
+			// instead of mis-measured.
+			if cutoff.Sub(capturedAt) > s.maxSnapshotAge {
 				continue
 			}
 			retPct = (rp.RankedIndex/base - 1) * 100
