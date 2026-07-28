@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 )
@@ -46,7 +47,7 @@ func windowFrom(startIdx, endIdx float64, start, end time.Time) performancehisto
 	mk := func(id string, at time.Time, idx float64) performancehistory.Snapshot {
 		return performancehistory.Snapshot{
 			ID: id, UserID: "u1", PortfolioID: "pf1", CapturedAt: at,
-			RankedIndex: idx, RankingStatus: performance.StatusActive,
+			RankedIndex: money.IndexValueFromFloat64(idx), RankingStatus: performance.StatusActive,
 			TrackingStartedAt: epoch, DataQualityStatus: "complete",
 		}
 	}

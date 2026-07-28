@@ -27,8 +27,8 @@ func (s *stubBenchmark) ReturnOver(_ context.Context, _ string, start, end time.
 	return s.result, nil
 }
 
-func snapshotAt(at time.Time, index float64) Snapshot {
-	return Snapshot{CapturedAt: at, RankedIndex: index}
+func snapshotAt(at time.Time, index string) Snapshot {
+	return Snapshot{CapturedAt: at, RankedIndex: testIndex(index)}
 }
 
 // Without a benchmark source the block must say so, not report a 0-point
@@ -36,8 +36,8 @@ func snapshotAt(at time.Time, index float64) Snapshot {
 func TestBenchmarkComparisonUnavailableWithoutASource(t *testing.T) {
 	svc := &Service{}
 	got := svc.benchmarkComparison(context.Background(), []Snapshot{
-		snapshotAt(day(2026, time.January, 5), 100),
-		snapshotAt(day(2026, time.January, 9), 110),
+		snapshotAt(day(2026, time.January, 5), "100"),
+		snapshotAt(day(2026, time.January, 9), "110"),
 	})
 
 	assert.False(t, got.Available)
@@ -61,11 +61,11 @@ func TestBenchmarkComparisonAlignsOnTheBenchmarksEffectiveDates(t *testing.T) {
 	svc := &Service{benchmark: stub}
 
 	points := []Snapshot{
-		snapshotAt(day(2026, time.January, 5), 50),  // outside the aligned window
-		snapshotAt(day(2026, time.January, 6), 100), // aligned start
-		snapshotAt(day(2026, time.January, 7), 120),
-		snapshotAt(day(2026, time.January, 8), 110), // aligned end
-		snapshotAt(day(2026, time.January, 9), 400), // outside the aligned window
+		snapshotAt(day(2026, time.January, 5), "50"),  // outside the aligned window
+		snapshotAt(day(2026, time.January, 6), "100"), // aligned start
+		snapshotAt(day(2026, time.January, 7), "120"),
+		snapshotAt(day(2026, time.January, 8), "110"), // aligned end
+		snapshotAt(day(2026, time.January, 9), "400"), // outside the aligned window
 	}
 	got := svc.benchmarkComparison(context.Background(), points)
 
@@ -98,8 +98,8 @@ func TestBenchmarkComparisonWithheldWhenWindowsDoNotOverlap(t *testing.T) {
 		EffectiveEnd:     day(2025, time.January, 8),
 	}}}
 	got := svc.benchmarkComparison(context.Background(), []Snapshot{
-		snapshotAt(day(2026, time.January, 6), 100),
-		snapshotAt(day(2026, time.January, 8), 110),
+		snapshotAt(day(2026, time.January, 6), "100"),
+		snapshotAt(day(2026, time.January, 8), "110"),
 	})
 
 	assert.False(t, got.Available)
@@ -110,8 +110,8 @@ func TestBenchmarkComparisonWithheldWhenWindowsDoNotOverlap(t *testing.T) {
 func TestBenchmarkComparisonWithheldOnProviderError(t *testing.T) {
 	svc := &Service{benchmark: &stubBenchmark{err: errors.New("no series")}}
 	got := svc.benchmarkComparison(context.Background(), []Snapshot{
-		snapshotAt(day(2026, time.January, 6), 100),
-		snapshotAt(day(2026, time.January, 8), 110),
+		snapshotAt(day(2026, time.January, 6), "100"),
+		snapshotAt(day(2026, time.January, 8), "110"),
 	})
 
 	assert.False(t, got.Available)
@@ -128,8 +128,8 @@ func TestBenchmarkComparisonWithheldForRawCloseButPortfolioHistoryRemainsUsable(
 		CurrencyTreatment: "native_quote_currency_unhedged",
 	}}}
 	points := []Snapshot{
-		{CapturedAt: day(2026, time.January, 2), RankedIndex: 100},
-		{CapturedAt: day(2026, time.January, 5), RankedIndex: 105},
+		{CapturedAt: day(2026, time.January, 2), RankedIndex: testIndex("100")},
+		{CapturedAt: day(2026, time.January, 5), RankedIndex: testIndex("105")},
 	}
 
 	got := svc.benchmarkComparison(context.Background(), points)
@@ -153,8 +153,8 @@ func TestBenchmarkComparisonCarriesDataProvenance(t *testing.T) {
 		Synthetic:        true,
 	}}}
 	got := svc.benchmarkComparison(context.Background(), []Snapshot{
-		snapshotAt(day(2026, time.January, 6), 100),
-		snapshotAt(day(2026, time.January, 8), 110),
+		snapshotAt(day(2026, time.January, 6), "100"),
+		snapshotAt(day(2026, time.January, 8), "110"),
 	})
 
 	require.True(t, got.Available)
@@ -168,7 +168,7 @@ func TestBenchmarkComparisonNeedsTwoSnapshots(t *testing.T) {
 	stub := &stubBenchmark{}
 	svc := &Service{benchmark: stub}
 	got := svc.benchmarkComparison(context.Background(),
-		[]Snapshot{snapshotAt(day(2026, time.January, 6), 100)})
+		[]Snapshot{snapshotAt(day(2026, time.January, 6), "100")})
 
 	assert.False(t, got.Available)
 	assert.Zero(t, stub.calls, "must not call the benchmark engine without a measurable window")

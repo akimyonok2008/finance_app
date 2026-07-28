@@ -409,8 +409,8 @@ func (a profileRankedAdapter) CurrentRankedPerformance(ctx context.Context, user
 		return profile.RankedPerformance{}, err
 	}
 	return profile.RankedPerformance{
-		RankedIndex:            rp.RankedIndex,
-		RankedReturnPercentage: rp.RankedReturnPercentage,
+		RankedIndex:            rp.RankedIndex.Float64(),
+		RankedReturnPercentage: rp.RankedReturnPercentage.Float64(),
 		Paused:                 rp.Status == performance.StatusPaused,
 	}, nil
 }
@@ -426,8 +426,8 @@ func (a profileHistoryAdapter) RankedHistory(ctx context.Context, userID string,
 	for _, point := range points {
 		out = append(out, profile.PublicPerformancePoint{
 			CapturedAt:       point.CapturedAt.Format(time.RFC3339),
-			PortfolioIndex:   point.RankedIndex,
-			ReturnPercentage: point.RankedIndex - 100,
+			PortfolioIndex:   point.RankedIndex.Float64(),
+			ReturnPercentage: point.RankedIndex.Sub(money.MustIndexValue("100")).Float64(),
 		})
 	}
 	return out, nil

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/money"
+	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 )
 
 // UserProvider enumerates the users to rank. Implemented by *auth.Service.
@@ -22,8 +24,8 @@ type UserProvider interface {
 // absolute monetary values. Paused users (empty portfolios) preserve their index
 // but are excluded from active ranking.
 type RankedPerformance struct {
-	RankedIndex            float64
-	RankedReturnPercentage float64
+	RankedIndex            money.IndexValue
+	RankedReturnPercentage money.Ratio
 	Paused                 bool
 	TrackingStartedAt      time.Time
 }
@@ -269,6 +271,7 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 		}
 		ranked[u.ID] = true
 		if s.cache != nil {
+			// Redis sorted-set scores require float64; this is the cache boundary.
 			if err := s.cache.UpsertGlobalScore(ctx, u.ID, rp.RankedReturnPercentage); err != nil {
 				cacheFailures++
 				if firstCacheErr == nil {
@@ -387,7 +390,7 @@ func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
 	type rankedUser struct {
 		id          string
 		displayName string
-		returnPct   float64
+		returnPct   money.Ratio
 	}
 	rows := make([]rankedUser, 0, len(users))
 	for _, user := range users {
@@ -397,8 +400,8 @@ func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].returnPct != rows[j].returnPct {
-			return rows[i].returnPct > rows[j].returnPct
+		if cmp := rows[i].returnPct.Cmp(rows[j].returnPct); cmp != 0 {
+			return cmp > 0
 		}
 		if rows[i].displayName != rows[j].displayName {
 			return rows[i].displayName < rows[j].displayName
@@ -478,8 +481,8 @@ func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe)
 		// preserved and excluded from ranking) from a user who has never ranked.
 		if rp, err := s.ranked.CurrentRankedPerformance(ctx, userID); err == nil && rp.Paused {
 			st.Paused = true
-			st.RankedIndex = round2(rp.RankedIndex)
-			st.RankedReturnPercentage = round2(rp.RankedReturnPercentage)
+			st.RankedIndex = round2(rp.RankedIndex.Float64())
+			st.RankedReturnPercentage = round2(rp.RankedReturnPercentage.Float64())
 			st.Reason = "Ranked tracking is paused. Your accumulated index is preserved — add a position to resume from it."
 		} else if _, windowed := tf.window(); windowed {
 			st.Reason = "Not enough ranked history for this timeframe yet."
@@ -493,8 +496,10 @@ func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe)
 // rankedRow pairs an internal user id with its public entry. The id is used for
 // matching/snapshots only and never serialized.
 type rankedRow struct {
-	userID string
-	entry  LeaderboardEntry
+	userID      string
+	entry       LeaderboardEntry
+	returnPct   money.Ratio
+	rankedIndex money.IndexValue
 }
 
 // rankRows is the single live-ranking core: summarize each user, compute the
@@ -537,7 +542,7 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 				log.Printf("leaderboard: skipping user %s due to snapshot error: %v", u.ID, err)
 				continue
 			}
-			if !found || base <= 0 {
+			if !found || base.Sign() <= 0 {
 				continue
 			}
 			// A base snapshot far older than the window's own start means a gap
@@ -548,18 +553,26 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 			if cutoff.Sub(capturedAt) > s.maxSnapshotAge {
 				continue
 			}
-			retPct = (rp.RankedIndex/base - 1) * 100
-			idx = 100 * rp.RankedIndex / base
+			var calcErr error
+			retPct, calcErr = performancehistory.TimeframeReturnRatio(base, rp.RankedIndex)
+			if calcErr != nil {
+				continue
+			}
+			factor, divErr := rp.RankedIndex.DivExact(base, money.ScaleIndex+money.ScaleWeight)
+			if divErr != nil {
+				continue
+			}
+			idx = money.MustIndexValue("100").MulRatio(factor)
 		}
-		e := rankedEntry(0, u.DisplayName, u.AvatarKey, round2(retPct), round2(idx))
+		e := rankedEntry(0, u.DisplayName, u.AvatarKey, round2(retPct.Float64()), round2(idx.Float64()))
 		s.enrich(ctx, u.ID, &e)
-		rows = append(rows, rankedRow{userID: u.ID, entry: e})
+		rows = append(rows, rankedRow{userID: u.ID, entry: e, returnPct: retPct, rankedIndex: idx})
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i].entry, rows[j].entry
-		if a.RankedReturnPercentage != b.RankedReturnPercentage {
-			return a.RankedReturnPercentage > b.RankedReturnPercentage
+		if cmp := rows[i].returnPct.Cmp(rows[j].returnPct); cmp != 0 {
+			return cmp > 0
 		}
 		if a.DisplayName != b.DisplayName {
 			return a.DisplayName < b.DisplayName

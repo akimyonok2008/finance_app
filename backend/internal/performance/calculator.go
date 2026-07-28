@@ -1,8 +1,9 @@
 package performance
 
 import (
-	"math"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // The functions in this file are PURE: no database access, deterministic output,
@@ -10,27 +11,28 @@ import (
 // persistence is owned by the portfolio aggregate transaction — so a checkpoint
 // can never be committed without the position write it belongs to.
 
-// isFinite reports whether v is a usable (non-NaN, non-Inf) number.
-func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
-
 // CalculateCurrentIndex returns the live ranked index for a state given the
 // current base-currency portfolio value. A paused state (or one with no valid
 // segment) reports its preserved checkpoint index unchanged — an empty portfolio
 // never divides by zero and never drifts.
-func CalculateCurrentIndex(state State, currentValueBase float64) float64 {
-	if state.Status != StatusActive || state.SegmentStartValueBase == nil || *state.SegmentStartValueBase <= 0 {
+func CalculateCurrentIndex(state State, currentValueBase money.Amount) money.IndexValue {
+	if state.Status != StatusActive || state.SegmentStartValueBase == nil || state.SegmentStartValueBase.Sign() <= 0 {
 		return state.CheckpointIndex
 	}
-	return state.CheckpointIndex * currentValueBase / *state.SegmentStartValueBase
+	ratio, err := currentValueBase.DivExact(*state.SegmentStartValueBase, money.ScaleIndex+money.ScaleValue)
+	if err != nil {
+		return state.CheckpointIndex
+	}
+	return state.CheckpointIndex.MulRatio(ratio)
 }
 
 // CalculateIndexBeforeMutation computes the ranked index immediately before a
 // mutation, from the pre-mutation value. For an active portfolio this is the live
 // index; for a paused one it is the preserved checkpoint (an empty portfolio has
 // no value to measure).
-func CalculateIndexBeforeMutation(state State, in CheckpointInput) float64 {
-	if state.Status == StatusActive && state.SegmentStartValueBase != nil && *state.SegmentStartValueBase > 0 && in.HasActiveBefore {
-		return state.CheckpointIndex * in.ValueBeforeBase / *state.SegmentStartValueBase
+func CalculateIndexBeforeMutation(state State, in CheckpointInput) money.IndexValue {
+	if state.Status == StatusActive && state.SegmentStartValueBase != nil && state.SegmentStartValueBase.Sign() > 0 && in.HasActiveBefore {
+		return CalculateCurrentIndex(state, in.ValueBeforeBase)
 	}
 	return state.CheckpointIndex
 }
@@ -39,11 +41,11 @@ func CalculateIndexBeforeMutation(state State, in CheckpointInput) float64 {
 // ranked-tracking model for the first time. A non-empty portfolio starts at index
 // 100 with its current value as the first segment start; an empty one starts
 // paused at index 100. TrackingStartedAt is the ranking epoch.
-func ActivateState(portfolioID, userID string, valueBase float64, hasActive bool, at time.Time) State {
+func ActivateState(portfolioID, userID string, valueBase money.Amount, hasActive bool, at time.Time) State {
 	st := State{
 		PortfolioID:       portfolioID,
 		UserID:            userID,
-		CheckpointIndex:   100,
+		CheckpointIndex:   money.MustIndexValue("100"),
 		TrackingStartedAt: at,
 		UpdatedAt:         at,
 		Version:           1,
@@ -80,7 +82,7 @@ func ApplyCheckpoint(prev State, in CheckpointInput) State {
 	next := prev
 	next.SegmentStartValueBase = nil // detach from prev's pointer before reassigning
 	next.UpdatedAt = in.At
-	next.CheckpointIndex = index
+	next.CheckpointIndex = money.QuantizeIndex(index)
 	next.Version = prev.Version + 1
 	if in.HasActiveAfter {
 		v := in.ValueAfterBase
@@ -116,7 +118,7 @@ func ApplyCheckpoint(prev State, in CheckpointInput) State {
 // Version is incremented exactly once, the epoch is preserved.
 func ApplyReturnCheckpoint(prev State, in CheckpointInput) State {
 	activeBefore := prev.Status == StatusActive && prev.SegmentStartValueBase != nil &&
-		*prev.SegmentStartValueBase > 0 && in.HasActiveBefore
+		prev.SegmentStartValueBase.Sign() > 0 && in.HasActiveBefore
 	if !activeBefore {
 		// Undefined return ratio → neutral activation.
 		return ApplyCheckpoint(prev, in)
@@ -124,15 +126,19 @@ func ApplyReturnCheckpoint(prev State, in CheckpointInput) State {
 	next := CloneState(prev)
 	next.Version = prev.Version + 1
 	next.UpdatedAt = in.At
-	if in.HasActiveAfter && in.ValueAfterBase > 0 {
+	if in.HasActiveAfter && in.ValueAfterBase.Sign() > 0 {
 		// Keep the segment baseline untouched: the index moves with value.
 		next.Status = StatusActive
 		return next
 	}
 	// Everything drained to (near) zero. Record the realized loss in the
 	// checkpoint index, floored to a tiny positive, then pause.
-	idxAfter := prev.CheckpointIndex * in.ValueAfterBase / *prev.SegmentStartValueBase
-	next.CheckpointIndex = math.Max(idxAfter, 1e-9)
+	idxAfter := CalculateCurrentIndex(prev, in.ValueAfterBase)
+	floor := money.MustIndexValue("0.000000001")
+	if idxAfter.Cmp(floor) < 0 {
+		idxAfter = floor
+	}
+	next.CheckpointIndex = money.QuantizeIndex(idxAfter)
 	next.Status = StatusPaused
 	next.SegmentStartValueBase = nil
 	next.SegmentStartedAt = nil
@@ -146,7 +152,7 @@ func ValidateState(state State) error {
 	if state.PortfolioID == "" || state.UserID == "" {
 		return ErrInvalidState
 	}
-	if !isFinite(state.CheckpointIndex) || state.CheckpointIndex <= 0 {
+	if state.CheckpointIndex.Sign() <= 0 {
 		return ErrInvalidState
 	}
 	if state.Version <= 0 {
@@ -154,7 +160,7 @@ func ValidateState(state State) error {
 	}
 	switch state.Status {
 	case StatusActive:
-		if state.SegmentStartValueBase == nil || *state.SegmentStartValueBase <= 0 || !isFinite(*state.SegmentStartValueBase) {
+		if state.SegmentStartValueBase == nil || state.SegmentStartValueBase.Sign() <= 0 {
 			return ErrInvalidState
 		}
 	case StatusPaused:
@@ -184,10 +190,10 @@ func CloneState(state State) State {
 
 // Compatibility aliases retained while callers migrate to the exported pure
 // transition API.
-func CurrentIndex(state State, currentValueBase float64) float64 {
+func CurrentIndex(state State, currentValueBase money.Amount) money.IndexValue {
 	return CalculateCurrentIndex(state, currentValueBase)
 }
 
-func activate(portfolioID, userID string, valueBase float64, hasActive bool, at time.Time) State {
+func activate(portfolioID, userID string, valueBase money.Amount, hasActive bool, at time.Time) State {
 	return ActivateState(portfolioID, userID, valueBase, hasActive, at)
 }

@@ -14,7 +14,7 @@ func TestCashFundedBuyWeightedAverageAndPartialSale(t *testing.T) {
 
 	deposit, err := svc.DepositCash(ctx(), "u1", "deposit-1", CashFlowInput{Currency: "usd", Amount: testAmount("5000")})
 	require.NoError(t, err)
-	assert.InDelta(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter)
 
 	first, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
 		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10"),
@@ -22,7 +22,7 @@ func TestCashFundedBuyWeightedAverageAndPartialSale(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, first.Position)
 	assertPriceEqual(t, "195", first.Position.AverageBuyPrice)
-	assert.InDelta(t, first.RankedIndexBefore, first.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, first.RankedIndexBefore, first.RankedIndexAfter)
 
 	quotes.Set("AAPL", 100, "USD")
 	second, err := svc.BuyPosition(ctx(), "u1", "buy-2", BuyInput{
@@ -43,7 +43,7 @@ func TestCashFundedBuyWeightedAverageAndPartialSale(t *testing.T) {
 	assertPriceEqual(t, "147.5", sale.Position.AverageBuyPrice)
 	require.NotNil(t, sale.Activity.RealizedGainLossBase)
 	assertAmountEqual(t, "262.5", *sale.Activity.RealizedGainLossBase)
-	assert.InDelta(t, sale.RankedIndexBefore, sale.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, sale.RankedIndexBefore, sale.RankedIndexAfter)
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
@@ -104,7 +104,7 @@ func TestSellFee_IsCountedOnceAndPartialEpisodeRemainsOpen(t *testing.T) {
 	require.NotNil(t, sale.Position)
 	assertQuantityEqual(t, "9", sale.Position.Quantity)
 	assertPriceEqual(t, "195", sale.Position.AverageBuyPrice)
-	assert.Less(t, sale.RankedIndexAfter, sale.RankedIndexBefore)
+	assert.Less(t, sale.RankedIndexAfter.Cmp(sale.RankedIndexBefore), 0)
 
 	cash, _ := repo.ListCashBalances(ctx(), "u1")
 	assertAmountEqual(t, "8240", cash[0].Amount)
@@ -173,7 +173,7 @@ func TestFullSaleLeavesCashPortfolioActiveAndFinalWithdrawalPauses(t *testing.T)
 
 	withdrawal, err := svc.WithdrawCash(ctx(), "u1", "w1", CashFlowInput{Currency: "USD", Amount: testAmount("195")})
 	require.NoError(t, err)
-	assert.InDelta(t, withdrawal.RankedIndexBefore, withdrawal.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, withdrawal.RankedIndexBefore, withdrawal.RankedIndexAfter)
 	ranked, err = perf.CurrentRankedPerformance(ctx(), "u1")
 	require.NoError(t, err)
 	assert.Equal(t, performance.StatusPaused, ranked.Status)

@@ -47,8 +47,8 @@ func user(id, name string) auth.User {
 
 // summary builds a RankedPerformance from a return percentage and index (the
 // helper name is retained so existing tests read unchanged).
-func summary(pct, index float64) RankedPerformance {
-	return RankedPerformance{RankedReturnPercentage: pct, RankedIndex: index}
+func summary(pct, index string) RankedPerformance {
+	return RankedPerformance{RankedReturnPercentage: testRatio(pct), RankedIndex: testIndex(index)}
 }
 
 // --- tests -------------------------------------------------------------------
@@ -56,9 +56,9 @@ func summary(pct, index float64) RankedPerformance {
 func TestBuild_RanksByGainLossDescending(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(8.1, 108.1),
-		"u2": summary(12.4, 112.4),
-		"u3": summary(-3.0, 97.0),
+		"u1": summary("8.1", "108.1"),
+		"u2": summary("12.4", "112.4"),
+		"u3": summary("-3.0", "97.0"),
 	}}
 	svc := NewService(users, sums)
 
@@ -74,9 +74,9 @@ func TestBuild_RanksByGainLossDescending(t *testing.T) {
 func TestBuild_AssignsSequentialRanks(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(8.1, 108.1),
-		"u2": summary(12.4, 112.4),
-		"u3": summary(5.0, 105.0),
+		"u1": summary("8.1", "108.1"),
+		"u2": summary("12.4", "112.4"),
+		"u3": summary("5.0", "105.0"),
 	}}
 	svc := NewService(users, sums)
 
@@ -99,7 +99,7 @@ func TestBuild_EmptyUserListReturnsEmptyBoard(t *testing.T) {
 func TestBuild_EmptyPortfolioIsZeroAndHundred(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(0, 100), // empty portfolio convention
+		"u1": summary("0", "100"), // empty portfolio convention
 	}}
 	svc := NewService(users, sums)
 
@@ -114,9 +114,9 @@ func TestBuild_TieBrokenByDisplayNameAscending(t *testing.T) {
 	// Insertion order intentionally non-alphabetical to prove sorting is applied.
 	users := fakeUsers{users: []auth.User{user("u3", "CryptoTiger"), user("u1", "AlphaBull"), user("u2", "BetaWolf")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(10, 110),
-		"u2": summary(10, 110),
-		"u3": summary(8, 108),
+		"u1": summary("10", "110"),
+		"u2": summary("10", "110"),
+		"u3": summary("8", "108"),
 	}}
 	svc := NewService(users, sums)
 
@@ -133,8 +133,8 @@ func TestBuild_SkipsUsersWhoseSummaryFails(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
 	sums := fakeRanked{
 		byUser: map[string]RankedPerformance{
-			"u1": summary(8.1, 108.1),
-			"u3": summary(5.0, 105.0),
+			"u1": summary("8.1", "108.1"),
+			"u3": summary("5.0", "105.0"),
 		},
 		errs: map[string]error{"u2": errors.New("price provider exploded")},
 	}
@@ -152,8 +152,8 @@ func TestBuildResult_ReportsSkippedCount(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
 	sums := fakeRanked{
 		byUser: map[string]RankedPerformance{
-			"u1": summary(8.1, 108.1),
-			"u3": summary(5.0, 105.0),
+			"u1": summary("8.1", "108.1"),
+			"u3": summary("5.0", "105.0"),
 		},
 		errs: map[string]error{"u2": errors.New("boom")},
 	}
@@ -174,15 +174,15 @@ func cacheUsers() fakeUsers {
 func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
 	// Summaries deliberately disagree with the cache so we can tell which path ran.
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(1.0, 101), "u2": summary(2.0, 102),
+		"u1": summary("1.0", "101"), "u2": summary("2.0", "102"),
 	}}
 	svc := NewService(cacheUsers(), sums)
 	cache := newTestCache(t)
 	svc.SetCache(cache)
 
 	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "u1", 50.0))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "u2", 25.0))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "u1", testRatio("50.0")))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "u2", testRatio("25.0")))
 
 	board, err := svc.Build(ctx)
 	require.NoError(t, err)
@@ -196,7 +196,7 @@ func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
 
 func TestBuild_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(8.1, 108.1), "u2": summary(12.4, 112.4),
+		"u1": summary("8.1", "108.1"), "u2": summary("12.4", "112.4"),
 	}}
 	svc := NewService(cacheUsers(), sums)
 	svc.SetCache(newTestCache(t)) // attached but empty
@@ -210,7 +210,7 @@ func TestBuild_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
 
 func TestRefreshCache_PopulatesScores(t *testing.T) {
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(8.1, 108.1), "u2": summary(12.4, 112.4),
+		"u1": summary("8.1", "108.1"), "u2": summary("12.4", "112.4"),
 	}}
 	svc := NewService(cacheUsers(), sums)
 	cache := newTestCache(t)
@@ -232,11 +232,11 @@ func TestRefreshCache_ReconcilesPausedDeletedAndPreservesValuationFailures(t *te
 	users := fakeUsers{users: []auth.User{
 		user("active", "Active"), user("paused", "Paused"), user("unpriced", "Unpriced"),
 	}}
-	paused := summary(12, 112)
+	paused := summary("12", "112")
 	paused.Paused = true
 	sums := fakeRanked{
 		byUser: map[string]RankedPerformance{
-			"active": summary(8, 108),
+			"active": summary("8", "108"),
 			"paused": paused,
 		},
 		errs: map[string]error{"unpriced": errors.New("temporary quote failure")},
@@ -245,9 +245,9 @@ func TestRefreshCache_ReconcilesPausedDeletedAndPreservesValuationFailures(t *te
 	cache := newTestCache(t)
 	svc.SetCache(cache)
 	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "paused", 12))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "deleted", 40))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "unpriced", 5))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "paused", testRatio("12")))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "deleted", testRatio("40")))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "unpriced", testRatio("5")))
 
 	skipped, err := svc.RefreshCache(ctx)
 	require.NoError(t, err)
@@ -270,7 +270,7 @@ func TestRefreshCache_ReconcilesPausedDeletedAndPreservesValuationFailures(t *te
 func TestRefreshCache_ConcurrentWorkersConvergeIdempotently(t *testing.T) {
 	users := cacheUsers()
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(8.1, 108.1), "u2": summary(12.4, 112.4),
+		"u1": summary("8.1", "108.1"), "u2": summary("12.4", "112.4"),
 	}}
 	cache := newTestCache(t)
 	services := []*Service{NewService(users, sums), NewService(users, sums)}
@@ -297,13 +297,13 @@ func TestRefreshCache_ConcurrentWorkersConvergeIdempotently(t *testing.T) {
 func TestCachedReadRemovesUnknownUserMember(t *testing.T) {
 	svc := NewService(
 		fakeUsers{users: []auth.User{user("active", "Active")}},
-		fakeRanked{byUser: map[string]RankedPerformance{"active": summary(8, 108)}},
+		fakeRanked{byUser: map[string]RankedPerformance{"active": summary("8", "108")}},
 	)
 	cache := newTestCache(t)
 	svc.SetCache(cache)
 	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "ghost", 99))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "active", 8))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "ghost", testRatio("99")))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "active", testRatio("8")))
 
 	board, err := svc.Build(ctx)
 	require.NoError(t, err)
@@ -326,7 +326,7 @@ func TestBuild_ListUsersErrorIsReturned(t *testing.T) {
 
 func TestBuild_ResponseOmitsForbiddenFields(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(12.4, 112.4)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("12.4", "112.4")}}
 	svc := NewService(users, sums)
 
 	board, err := svc.Build(context.Background())

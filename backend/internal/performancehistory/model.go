@@ -2,9 +2,9 @@ package performancehistory
 
 import (
 	"errors"
-	"math"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
@@ -37,7 +37,7 @@ type Snapshot struct {
 	PortfolioID       string
 	UserID            string
 	TrackingStartedAt time.Time
-	RankedIndex       float64
+	RankedIndex       money.IndexValue
 	RankingStatus     performance.Status
 	CapturedAt        time.Time
 	Kind              SnapshotKind
@@ -53,8 +53,7 @@ func (s Snapshot) Valid() bool {
 	baseValid := s.ID != "" && s.PortfolioID != "" && s.UserID != "" &&
 		!s.TrackingStartedAt.IsZero() && !s.CapturedAt.IsZero() &&
 		!s.ValuationAsOf.IsZero() &&
-		!math.IsNaN(s.RankedIndex) && !math.IsInf(s.RankedIndex, 0) &&
-		s.RankedIndex > 0 &&
+		s.RankedIndex.Sign() > 0 &&
 		(s.RankingStatus == performance.StatusActive || s.RankingStatus == performance.StatusPaused) &&
 		(s.DataQualityStatus == QualityComplete || s.DataQualityStatus == QualityStale ||
 			s.DataQualityStatus == QualityPartial || s.DataQualityStatus == QualityInvalid)

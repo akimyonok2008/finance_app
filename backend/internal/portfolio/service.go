@@ -891,7 +891,7 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 			return nil, rankedErr
 		}
 		ranked = RankedPerformanceView{
-			Index: round2(current.RankedIndex), ReturnPercentage: round2(current.RankedReturnPercentage),
+			Index: round2(current.RankedIndex.Float64()), ReturnPercentage: round2(current.RankedReturnPercentage.Float64()),
 			TrackingStatus: string(current.Status),
 		}
 	}

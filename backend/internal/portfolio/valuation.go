@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Valuation is an immutable market observation used for ONE mutation. It pins
@@ -19,21 +20,21 @@ import (
 // database write rather than silently valuing a position at zero.
 type Valuation struct {
 	quotes            map[string]quoteObservation
-	rates             map[string]float64
+	rates             map[string]money.FXRate
 	ObservedAt        time.Time
 	ValuationAsOf     time.Time
 	DataQualityStatus string
 }
 
 type quoteObservation struct {
-	Price    float64
+	Price    money.Price
 	Currency string
 }
 
 func newValuation(at time.Time) *Valuation {
 	return &Valuation{
 		quotes:            map[string]quoteObservation{},
-		rates:             map[string]float64{},
+		rates:             map[string]money.FXRate{},
 		ObservedAt:        at,
 		ValuationAsOf:     at,
 		DataQualityStatus: "complete",
@@ -79,7 +80,7 @@ func (v *Valuation) Quote(symbol string) (quoteObservation, bool) {
 // invented market price. Callers must never use this to VALUE a position for
 // ordinary holdings/summary purposes; it is scoped to the one write-off
 // mutation that is about to realize this exact basis as a loss anyway.
-func (v *Valuation) pinCostBasisFallback(symbol string, costBasisPrice float64, currency string) {
+func (v *Valuation) pinCostBasisFallback(symbol string, costBasisPrice money.Price, currency string) {
 	v.quotes[symbol] = quoteObservation{Price: costBasisPrice, Currency: currency}
 	v.DataQualityStatus = "stale"
 }
@@ -87,8 +88,8 @@ func (v *Valuation) pinCostBasisFallback(symbol string, costBasisPrice float64, 
 // ValueOpen returns the base-currency market value of the OPEN positions in the
 // set and whether any exist. It is pure with respect to the pinned observation:
 // no network calls, fully deterministic.
-func (v *Valuation) ValueOpen(positions []*Position) (float64, bool, error) {
-	var total float64
+func (v *Valuation) ValueOpen(positions []*Position) (money.Amount, bool, error) {
+	total := money.ZeroAmount()
 	hasActive := false
 	for _, pos := range positions {
 		if positionStatus(pos) != PositionStatusOpen {
@@ -97,57 +98,51 @@ func (v *Valuation) ValueOpen(positions []*Position) (float64, bool, error) {
 		hasActive = true
 		q, ok := v.quotes[pos.Symbol]
 		if !ok {
-			return 0, false, ErrPriceProvider
+			return money.ZeroAmount(), false, ErrPriceProvider
 		}
 		rate, ok := v.rates[q.Currency]
 		if !ok {
-			return 0, false, ErrPriceProvider
+			return money.ZeroAmount(), false, ErrPriceProvider
 		}
 		// Exact decimal sign check: quantity must never be negative or zero
 		// here (no epsilon needed).
 		if pos.Quantity.Sign() <= 0 {
-			return 0, false, ErrInvalidQuantity
+			return money.ZeroAmount(), false, ErrInvalidQuantity
 		}
-		// pos.Quantity.Float64() is a documented boundary conversion: the
-		// running valuation total, quote price and FX rate stay float64
-		// (out of scope for this section).
-		total += pos.Quantity.Float64() * q.Price * rate
+		total = total.Add(pos.Quantity.MulPrice(q.Price).Convert(rate))
 	}
-	if !isFinite(total) || total < 0 {
-		return 0, false, ErrPriceProvider
+	if total.Sign() < 0 {
+		return money.ZeroAmount(), false, ErrPriceProvider
 	}
-	return total, hasActive, nil
+	return money.QuantizeValue(total), hasActive, nil
 }
 
-func (v *Valuation) ValueTracked(positions []*Position, cash []CashBalance) (float64, bool, error) {
+func (v *Valuation) ValueTracked(positions []*Position, cash []CashBalance) (money.Amount, bool, error) {
 	total, active, err := v.ValueOpen(positions)
 	if err != nil {
-		return 0, false, err
+		return money.ZeroAmount(), false, err
 	}
 	for _, balance := range cash {
 		// Exact decimal sign check: cash balances must never be negative. No
 		// epsilon tolerance — decimal arithmetic makes exact comparison safe.
 		if balance.Amount.Sign() < 0 {
-			return 0, false, ErrInsufficientCash
+			return money.ZeroAmount(), false, ErrInsufficientCash
 		}
 		if balance.Amount.IsZero() {
 			continue
 		}
 		rate, ok := v.rates[balance.Currency]
 		if !ok {
-			return 0, false, ErrUnsupportedCurrency
+			return money.ZeroAmount(), false, ErrUnsupportedCurrency
 		}
-		// balance.Amount.Float64() is a documented boundary conversion: the
-		// running valuation total and FX rate remain float64 because they feed
-		// internal/performance and internal/fx, which are not part of this
-		// section's scope.
-		total += balance.Amount.Float64() * rate
+		total = total.Add(balance.Amount.Convert(rate))
 		active = true
 	}
-	if !isFinite(total) || total < 0 {
-		return 0, false, ErrPriceProvider
+	if total.Sign() < 0 {
+		return money.ZeroAmount(), false, ErrPriceProvider
 	}
-	return total, active && total > 0, nil
+	total = money.QuantizeValue(total)
+	return total, active && total.Sign() > 0, nil
 }
 
 func (c *MutationCoordinator) observeCurrency(ctx context.Context, v *Valuation, currency string) error {
@@ -158,7 +153,7 @@ func (c *MutationCoordinator) observeCurrency(ctx context.Context, v *Valuation,
 	if err != nil || !finitePositive(rate) {
 		return ErrUnsupportedCurrency
 	}
-	v.rates[currency] = rate
+	v.rates[currency] = money.QuantizeFX(money.FXRateFromFloat64(rate))
 	return nil
 }
 
@@ -195,9 +190,9 @@ func (c *MutationCoordinator) observe(ctx context.Context, v *Valuation, symbols
 			if !finitePositive(rate) {
 				return ErrUnsupportedCurrency
 			}
-			v.rates[quote.Currency] = rate
+			v.rates[quote.Currency] = money.QuantizeFX(money.FXRateFromFloat64(rate))
 		}
-		v.quotes[symbol] = quoteObservation{Price: quote.Price, Currency: quote.Currency}
+		v.quotes[symbol] = quoteObservation{Price: money.QuantizePrice(money.PriceFromFloat64(quote.Price)), Currency: quote.Currency}
 	}
 	return nil
 }

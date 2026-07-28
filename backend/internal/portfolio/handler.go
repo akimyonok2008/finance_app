@@ -198,11 +198,11 @@ type sellRequest struct {
 }
 
 type activityMutationView struct {
-	Position         *positionView `json:"position,omitempty"`
-	Activity         *ActivityView `json:"activity,omitempty"`
-	PortfolioVersion int64         `json:"portfolio_version"`
-	RankedIndex      float64       `json:"ranked_index"`
-	RankingStatus    string        `json:"ranking_status"`
+	Position         *positionView    `json:"position,omitempty"`
+	Activity         *ActivityView    `json:"activity,omitempty"`
+	PortfolioVersion int64            `json:"portfolio_version"`
+	RankedIndex      money.IndexValue `json:"ranked_index"`
+	RankingStatus    string           `json:"ranking_status"`
 }
 
 func toPositionView(p *Position) positionView {

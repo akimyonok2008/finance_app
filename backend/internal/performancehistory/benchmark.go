@@ -2,8 +2,9 @@ package performancehistory
 
 import (
 	"context"
-	"math"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // BenchmarkReturn is the result of evaluating a benchmark over a requested
@@ -157,17 +158,17 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 
 // indexAtOrBeforeEndOfDay returns the ranked index of the newest snapshot that
 // is not after the END of the given UTC day.
-func indexAtOrBeforeEndOfDay(points []Snapshot, day time.Time) (float64, bool) {
+func indexAtOrBeforeEndOfDay(points []Snapshot, day time.Time) (money.IndexValue, bool) {
 	cutoff := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC).
 		AddDate(0, 0, 1)
 	for i := len(points) - 1; i >= 0; i-- {
 		if points[i].CapturedAt.UTC().Before(cutoff) {
 			idx := points[i].RankedIndex
-			if idx > 0 && !math.IsNaN(idx) && !math.IsInf(idx, 0) {
+			if idx.Sign() > 0 {
 				return idx, true
 			}
-			return 0, false
+			return money.ZeroIndexValue(), false
 		}
 	}
-	return 0, false
+	return money.ZeroIndexValue(), false
 }

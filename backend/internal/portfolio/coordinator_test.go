@@ -3,7 +3,6 @@ package portfolio
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 	"testing"
 
@@ -117,7 +116,7 @@ func assertConsistent(t *testing.T, repo *InMemoryRepository, svc *Service, perf
 	}
 	require.Equal(t, performance.StatusActive, state.Status)
 	require.NotNil(t, state.SegmentStartValueBase)
-	assert.InDeltaf(t, valueBase, *state.SegmentStartValueBase, 1e-6,
+	assert.Truef(t, valueBase.EqualAmount(*state.SegmentStartValueBase),
 		"segment start (%v) must equal the value of the final %d-position set (%v)",
 		*state.SegmentStartValueBase, len(positions), valueBase)
 
@@ -125,7 +124,7 @@ func assertConsistent(t *testing.T, repo *InMemoryRepository, svc *Service, perf
 	// checkpoint, the live index must still equal the stored checkpoint.
 	rp, err := perf.CurrentRankedPerformance(context.Background(), userID)
 	require.NoError(t, err)
-	assert.InDelta(t, state.CheckpointIndex, rp.RankedIndex, 1e-6)
+	assertIndexValuesEqual(t, state.CheckpointIndex, rp.RankedIndex)
 }
 
 func TestConcurrent_SimultaneousAddsSerialize(t *testing.T) {
@@ -273,7 +272,7 @@ func TestConcurrent_RankedStateInitializedExactlyOnce(t *testing.T) {
 	require.NotNil(t, state)
 	// Initialized once at 100, then one increment per further mutation.
 	assert.Equal(t, int64(n), state.Version)
-	assert.InDelta(t, 100.0, state.CheckpointIndex, 1e-9,
+	assertIndexEqual(t, "100", state.CheckpointIndex,
 		"all mutations are neutral, so the checkpoint stays at the epoch index")
 }
 
@@ -351,12 +350,12 @@ func TestAudit_ProvesEveryMutationIsRankNeutral(t *testing.T) {
 	log := repo.AuditLog()
 	require.Len(t, log, 4)
 	for _, entry := range log {
-		assert.InDeltaf(t, entry.RankedIndexBefore, entry.RankedIndexAfter, 1e-9,
+		assertIndexValuesEqual(t, entry.RankedIndexBefore, entry.RankedIndexAfter,
 			"%s mutation generated ranked return: %v -> %v",
 			entry.MutationType, entry.RankedIndexBefore, entry.RankedIndexAfter)
 		assert.Equal(t, entry.PortfolioVersionBefore+1, entry.PortfolioVersionAfter)
 		assert.Equal(t, entry.PerformanceVersionBefore+1, entry.PerformanceVersionAfter)
-		assert.False(t, math.IsNaN(entry.RankedIndexAfter))
+		assert.Greater(t, entry.RankedIndexAfter.Sign(), 0)
 	}
 }
 

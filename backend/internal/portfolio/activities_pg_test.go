@@ -34,7 +34,7 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
-	assert.Greater(t, div.RankedIndexAfter, div.RankedIndexBefore)
+	assert.Greater(t, div.RankedIndexAfter.Cmp(div.RankedIndexBefore), 0)
 
 	// Reinvested dividend commits two grouped activity rows atomically.
 	_, err = svc.RecordIncome(ctx, userID, "pg-reinv", IncomeInput{
@@ -45,14 +45,14 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 	// Management fee (return-bearing negative) lowers the index.
 	fee, err := svc.RecordFee(ctx, userID, "pg-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
-	assert.Less(t, fee.RankedIndexAfter, fee.RankedIndexBefore)
+	assert.Less(t, fee.RankedIndexAfter.Cmp(fee.RankedIndexBefore), 0)
 
 	// Stock split (neutral) preserves the index at the action.
 	split, err := svc.RecordCorporateAction(ctx, userID, "pg-split", CorpActionInput{
 		Subtype: CorpStockSplit, Symbol: "AAPL", RatioNumerator: 2, RatioDenominator: 1,
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, split.RankedIndexBefore, split.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, split.RankedIndexBefore, split.RankedIndexAfter)
 
 	// Symbol change (neutral).
 	quotes.Set("APLX", 97.5, "USD")
@@ -66,7 +66,7 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 		Subtype: CorpWriteOff, Symbol: "APLX",
 	})
 	require.NoError(t, err)
-	assert.Less(t, wo.RankedIndexAfter, wo.RankedIndexBefore)
+	assert.Less(t, wo.RankedIndexAfter.Cmp(wo.RankedIndexBefore), 0)
 
 	// Idempotent replay of the dividend.
 	replay, err := svc.RecordIncome(ctx, userID, "pg-div", IncomeInput{

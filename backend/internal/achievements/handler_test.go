@@ -15,6 +15,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 )
@@ -30,7 +31,7 @@ func (s stubPerformance) Window(_ context.Context, userID string, start, end tim
 	mk := func(id string, at time.Time, idx float64) performancehistory.Snapshot {
 		return performancehistory.Snapshot{
 			ID: id, UserID: userID, PortfolioID: "pf1", CapturedAt: at,
-			RankedIndex: idx, RankingStatus: performance.StatusActive,
+			RankedIndex: money.IndexValueFromFloat64(idx), RankingStatus: performance.StatusActive,
 			TrackingStartedAt: epoch, DataQualityStatus: "complete",
 		}
 	}

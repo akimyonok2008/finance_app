@@ -77,6 +77,22 @@ func (p Price) Float64() float64 {
 	return f
 }
 
+// FXRateFromFloat64 / Float64 are explicit interop boundaries for legacy FX
+// providers that do not yet expose their source decimal text.
+func FXRateFromFloat64(f float64) FXRate {
+	return FXRate{Decimal{d: decimal.NewFromFloat(f)}}
+}
+
+func (r FXRate) Float64() float64 {
+	f, _ := r.Decimal.d.Float64()
+	return f
+}
+
+// IndexValueFromFloat64 is for unavoidable legacy/provider boundaries only.
+func IndexValueFromFloat64(f float64) IndexValue {
+	return IndexValue{Decimal{d: decimal.NewFromFloat(f)}}
+}
+
 // RatioFromFloat64 / Float64: same documented boundary-conversion contract,
 // for dimensionless ratios/factors.
 func RatioFromFloat64(f float64) Ratio {
@@ -307,6 +323,16 @@ func (p Price) DivExact(o Price, places int32) (Ratio, error) {
 // MulRatio scales an index value by a ratio (e.g. checkpoint index *
 // current/segment-start ratio in ranked performance).
 func (i IndexValue) MulRatio(r Ratio) IndexValue { return IndexValue{i.Decimal.mul(r.Decimal)} }
+func (i IndexValue) Cmp(o IndexValue) int        { return i.Decimal.Cmp(o.Decimal) }
+func (i IndexValue) AddRatio(r Ratio) IndexValue { return IndexValue{i.Decimal.add(r.Decimal)} }
+func (i IndexValue) EqualIndex(o IndexValue) bool {
+	return i.Decimal.Equal(o.Decimal)
+}
+
+func (i IndexValue) Float64() float64 {
+	f, _ := i.Decimal.d.Float64()
+	return f
+}
 
 // Sub subtracts two index values, producing a dimensionless Ratio (e.g. an
 // index expressed against a 100-base yields percentage points directly).
@@ -393,6 +419,12 @@ func QuantizeFX(r FXRate) FXRate {
 // QuantizeIndex rounds an IndexValue to the policy scale (18dp).
 func QuantizeIndex(i IndexValue) IndexValue {
 	return IndexValue{i.Decimal.quantize(ScaleIndex)}
+}
+
+// QuantizeRatio rounds a dimensionless ratio at an explicit presentation or
+// persistence boundary. Authoritative intermediate arithmetic remains exact.
+func QuantizeRatio(r Ratio, scale int32) Ratio {
+	return Ratio{r.Decimal.quantize(scale)}
 }
 
 // QuantizeValue rounds a market-value Amount to the policy scale (18dp).

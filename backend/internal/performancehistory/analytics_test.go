@@ -14,20 +14,20 @@ import (
 // A timeframe return is ending/starting - 1, NOT ending - 100. A period that
 // starts at 110 and ends at 121 returned 10%, not 21%.
 func TestTimeframeReturnPercentUsesRatioNotIndexMinus100(t *testing.T) {
-	got, err := TimeframeReturnPercent(110, 121)
+	got, err := TimeframeReturnPercent(testIndex("110"), testIndex("121"))
 	require.NoError(t, err)
 	assert.InDelta(t, 10.0, got, 1e-9)
 	assert.Greater(t, 21.0-got, 1e-6, "must not be the ending-index-minus-100 shortcut")
 }
 
 func TestTimeframeReturnPercentFromBaseline(t *testing.T) {
-	got, err := TimeframeReturnPercent(100, 121)
+	got, err := TimeframeReturnPercent(testIndex("100"), testIndex("121"))
 	require.NoError(t, err)
 	assert.InDelta(t, 21.0, got, 1e-9)
 }
 
 func TestTimeframeReturnPercentRejectsNonPositiveStart(t *testing.T) {
-	_, err := TimeframeReturnPercent(0, 121)
+	_, err := TimeframeReturnPercent(testIndex("0"), testIndex("121"))
 	require.ErrorIs(t, err, ErrNoStartingIndex)
 }
 
@@ -60,7 +60,7 @@ func TestParseTimeframeDefaultsTo1M(t *testing.T) {
 
 func newAnalyticsService(now time.Time) (*Service, Repository) {
 	repo := NewInMemoryRepository()
-	svc := NewService(repo, rankedStub{value: rankedAt(now, now, 100, performance.StatusActive)}, Config{})
+	svc := NewService(repo, rankedStub{value: rankedAt(now, now, "100", performance.StatusActive)}, Config{})
 	svc.SetClock(func() time.Time { return now })
 	return svc, repo
 }
@@ -74,7 +74,7 @@ func TestRankedHistoryDerivesReturnAndDrawdownFromCanonicalSnapshots(t *testing.
 	indexes := []float64{110, 121, 115, 132, 99}
 	for i, idx := range indexes {
 		at := epoch.AddDate(0, 0, i+1)
-		insertPoint(t, repo, "s"+string(rune('a'+i)), epoch, at, idx,
+		insertPointFloat(t, repo, "s"+string(rune('a'+i)), epoch, at, idx,
 			performance.StatusActive, KindDaily, QualityComplete)
 	}
 
@@ -125,7 +125,7 @@ func TestRankedHistoryAgreesWithCanonicalEvidenceWindow(t *testing.T) {
 	indexes := []float64{110, 112, 118, 121}
 	for i, idx := range indexes {
 		at := epoch.AddDate(0, 0, i+1)
-		insertPoint(t, repo, "w"+string(rune('a'+i)), epoch, at, idx,
+		insertPointFloat(t, repo, "w"+string(rune('a'+i)), epoch, at, idx,
 			performance.StatusActive, KindDaily, QualityComplete)
 	}
 
@@ -138,8 +138,8 @@ func TestRankedHistoryAgreesWithCanonicalEvidenceWindow(t *testing.T) {
 	require.True(t, history.Available)
 
 	// Same boundary indexes as the canonical evidence window.
-	assert.InDelta(t, window.StartSnapshot.RankedIndex, *history.StartingIndex, 1e-9)
-	assert.InDelta(t, window.EndSnapshot.RankedIndex, *history.EndingIndex, 1e-9)
+	assert.InDelta(t, window.StartSnapshot.RankedIndex.Float64(), *history.StartingIndex, 1e-9)
+	assert.InDelta(t, window.EndSnapshot.RankedIndex.Float64(), *history.EndingIndex, 1e-9)
 
 	expected, err := TimeframeReturnPercent(
 		window.StartSnapshot.RankedIndex, window.EndSnapshot.RankedIndex)
@@ -149,6 +149,6 @@ func TestRankedHistoryAgreesWithCanonicalEvidenceWindow(t *testing.T) {
 	// And the same point set.
 	require.Len(t, history.Points, len(window.Points))
 	for i := range window.Points {
-		assert.InDelta(t, window.Points[i].RankedIndex, history.Points[i].RankedIndex, 1e-9)
+		assert.InDelta(t, window.Points[i].RankedIndex.Float64(), history.Points[i].RankedIndex, 1e-9)
 	}
 }

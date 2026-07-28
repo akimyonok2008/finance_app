@@ -112,17 +112,17 @@ func TestJoin_StoresSnapshot(t *testing.T) {
 	resp, err := h.svc.JoinCompetition(context.Background(), compID(), "u1")
 	require.NoError(t, err)
 	assert.True(t, resp.Joined)
-	assert.Equal(t, 100.0, resp.StartingIndex)
+	assert.Equal(t, "100", resp.StartingIndex.String())
 
 	entry, err := h.repo.GetEntry(context.Background(), compID(), "u1")
 	require.NoError(t, err)
 	require.Len(t, entry.Snapshots, 1)
 	snap := entry.Snapshots[0]
 	assert.Equal(t, "AAPL", snap.Symbol)
-	assert.Equal(t, 10.0, snap.Quantity)
-	assert.Equal(t, 195.0, snap.StartingPrice)      // mock AAPL price
-	assert.Equal(t, 1950.0, snap.StartingValueBase) // 10 * 195 USD
-	assert.Equal(t, 1950.0, entry.StartingValue)
+	assert.Equal(t, "10", snap.Quantity.String())
+	assert.Equal(t, "195", snap.StartingPrice.String())      // mock AAPL price
+	assert.Equal(t, "1950", snap.StartingValueBase.String()) // 10 * 195 USD
+	assert.Equal(t, "1950", entry.StartingValue.String())
 }
 
 func TestJoin_EmptyPortfolioRejected(t *testing.T) {
@@ -186,15 +186,15 @@ func TestSprint_UsesSnapshotNotLivePortfolio(t *testing.T) {
 	// Sprint return must still be based on the AAPL snapshot (price unchanged → 0%).
 	st, err := h.svc.MyStatus(ctx, compID(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, 0.0, st.SprintReturnPercentage, 0.001)
-	assert.InDelta(t, 100.0, st.SprintIndex, 0.001)
+	assert.Equal(t, "0", st.SprintReturnPercentage.String())
+	assert.Equal(t, "100", st.SprintIndex.String())
 
 	// Now the AAPL market price moves up; sprint reflects only the snapshot.
 	h.mp.Set("AAPL", 214.5, "USD") // +10% vs 195
 	st, err = h.svc.MyStatus(ctx, compID(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, 10.0, st.SprintReturnPercentage, 0.01)
-	assert.InDelta(t, 110.0, st.SprintIndex, 0.01)
+	assert.Equal(t, "10", st.SprintReturnPercentage.String())
+	assert.Equal(t, "110", st.SprintIndex.String())
 }
 
 func TestLeaderboard_RanksAndExcludesNonJoiners(t *testing.T) {
@@ -229,7 +229,7 @@ func TestMyStatus_NotJoined(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, st.Joined)
 	assert.Equal(t, 0, st.CurrentRank)
-	assert.Equal(t, 100.0, st.SprintIndex)
+	assert.Equal(t, "100", st.SprintIndex.String())
 }
 
 // --- cache + jobs support (Phase 3) --------------------------------------------
@@ -277,13 +277,13 @@ func TestLeaderboard_ServesFromCacheWhenPopulated(t *testing.T) {
 	require.NoError(t, err)
 
 	// Seed the cache with a score that differs from live (live would be 0%).
-	require.NoError(t, cache.UpsertCompetitionScore(ctx, compID(), "u1", 7.5))
+	require.NoError(t, cache.UpsertCompetitionScore(ctx, compID(), "u1", money.MustRatio("7.5")))
 
 	board, err := h.svc.Leaderboard(ctx, compID())
 	require.NoError(t, err)
 	require.Len(t, board, 1)
-	assert.Equal(t, 7.5, board[0].SprintReturnPercentage, "cached score must be served")
-	assert.Equal(t, 107.5, board[0].SprintIndex)
+	assert.Equal(t, "7.5", board[0].SprintReturnPercentage.String(), "cached score must be served")
+	assert.Equal(t, "107.5", board[0].SprintIndex.String())
 }
 
 func TestLeaderboard_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
@@ -299,7 +299,7 @@ func TestLeaderboard_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
 	board, err := h.svc.Leaderboard(ctx, compID())
 	require.NoError(t, err)
 	require.Len(t, board, 1, "empty cache must fall back to live snapshot calculation")
-	assert.InDelta(t, 0.0, board[0].SprintReturnPercentage, 0.001)
+	assert.Equal(t, "0", board[0].SprintReturnPercentage.String())
 }
 
 // --- privacy (Problem 3) -----------------------------------------------------

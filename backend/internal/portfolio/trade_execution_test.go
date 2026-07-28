@@ -120,7 +120,7 @@ func TestBuy_NoCash_FullAutomaticFunding(t *testing.T) {
 	assertAmountEqual(t, "0", cashOf(t, repo, "u1", "USD"))
 
 	// Ranked: the funding and allocation are neutral; only the fee is a return.
-	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore,
+	assert.Less(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0,
 		"the purchase fee is the only return-bearing part of the buy")
 }
 
@@ -131,7 +131,7 @@ func TestBuy_NoCashNoFee_IsRankedNeutral(t *testing.T) {
 		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 }
 
 // 2. Buy with partial cash → existing cash is used first, the rest is funded.

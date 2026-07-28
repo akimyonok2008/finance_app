@@ -8,12 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
 // readRankedIndex computes the live ranked index for a user from committed
 // state, valuing positions and cash at current mock prices.
-func readRankedIndex(t *testing.T, svc *Service, userID string) float64 {
+func readRankedIndex(t *testing.T, svc *Service, userID string) money.IndexValue {
 	t.Helper()
 	sr, ok := svc.repo.(performance.StateReader)
 	require.True(t, ok)
@@ -50,15 +51,15 @@ func TestCashDividend_IncreasesCashAndRankedReturn(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// Return-bearing: the index must RISE (not be neutralized).
-	assert.Greater(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Greater(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 
 	after, err := perf.CurrentRankedPerformance(ctx(), "u1")
 	require.NoError(t, err)
-	assert.Greater(t, after.RankedIndex, before.RankedIndex)
+	assert.Greater(t, after.RankedIndex.Cmp(before.RankedIndex), 0)
 
 	// Portfolio value was 10000 (8050 position + 1950 cash). A 100 dividend is
 	// +1% → index ~ +1%.
-	assert.InDelta(t, before.RankedIndex*1.01, after.RankedIndex, before.RankedIndex*0.0005)
+	assertIndexValuesEqual(t, before.RankedIndex.MulRatio(testRatio("1.01")), after.RankedIndex)
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
@@ -85,7 +86,7 @@ func TestDividend_DoesNotResetCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	// A return-bearing event must NOT re-baseline: the segment start stays 10000.
 	require.NotNil(t, state.SegmentStartValueBase)
-	assert.InDelta(t, 10000, *state.SegmentStartValueBase, 1e-6)
+	assertAmountEqual(t, "10000", *state.SegmentStartValueBase)
 }
 
 func TestETFDistributionAndInterest_AreReturnBearing(t *testing.T) {
@@ -98,7 +99,7 @@ func TestETFDistributionAndInterest_AreReturnBearing(t *testing.T) {
 		}
 		res, err := svc.RecordIncome(ctx(), "u1", "inc-"+string(sub), in)
 		require.NoError(t, err)
-		assert.Greaterf(t, res.RankedIndexAfter, res.RankedIndexBefore, "%s must raise the index", sub)
+		assert.Greaterf(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0, "%s must raise the index", sub)
 	}
 }
 
@@ -140,7 +141,7 @@ func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
 	// The income is reflected once: index rises, but only by the dividend amount,
 	// not by dividend + a spurious buy return.
 	after := readRankedIndex(t, svc, "u1")
-	assert.Greater(t, after, before)
+	assert.Greater(t, after.Cmp(before), 0)
 
 	// Two grouped activities were recorded: the income leg and the buy leg.
 	acts, err := repo.ListActivities(ctx(), "u1", 50)
@@ -186,9 +187,9 @@ func TestManagementFee_ReducesCashAndRankedReturn(t *testing.T) {
 	before := readRankedIndex(t, svc, "u1")
 	res, err := svc.RecordFee(ctx(), "u1", "fee-1", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
-	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Less(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 	after := readRankedIndex(t, svc, "u1")
-	assert.Less(t, after, before)
+	assert.Less(t, after.Cmp(before), 0)
 }
 
 func TestFee_InsufficientCashRejected(t *testing.T) {
@@ -241,12 +242,12 @@ func TestStockSplit_PreservesValueBasisAndIndex(t *testing.T) {
 	// Total basis unchanged.
 	assertAmountValuesEqual(t, beforeBasis, res.Position.Quantity.MulPrice(res.Position.AverageBuyPrice))
 	// Ranked index unchanged AT THE ACTION (value-invariant transformation).
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 	// A real split-adjusted feed halves the quote; simulate that, then confirm the
 	// index is still unchanged (no phantom gain from the doubled share count).
 	quotes.Set("AAPL", expectedPrice.Float64(), "USD")
 	afterIdx := readRankedIndex(t, svc, "u1")
-	assert.InDelta(t, beforeIdx, afterIdx, 1e-6)
+	assertIndexValuesEqual(t, beforeIdx, afterIdx)
 }
 
 func TestReverseSplit_PreservesValueAndIndex(t *testing.T) {
@@ -260,7 +261,7 @@ func TestReverseSplit_PreservesValueAndIndex(t *testing.T) {
 	expectedQuantity := buy.Position.Quantity.MulRatio(testRatio("0.1"))
 	assert.True(t, expectedQuantity.EqualQuantity(res.Position.Quantity))
 	assertAmountValuesEqual(t, beforeBasis, res.Position.Quantity.MulPrice(res.Position.AverageBuyPrice))
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 }
 
 func TestSplit_InvalidRatioRejected(t *testing.T) {
@@ -286,7 +287,7 @@ func TestSymbolChange_PreservesPositionAndIndex(t *testing.T) {
 	assert.Equal(t, "APLX", res.Position.Symbol)
 	assert.True(t, buy.Position.Quantity.EqualQuantity(res.Position.Quantity))
 	assert.Equal(t, 0, buy.Position.AverageBuyPrice.Cmp(res.Position.AverageBuyPrice))
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 
 	// The immutable history retains the old symbol.
 	acts, err := repo.ListActivities(ctx(), "u1", 50)
@@ -321,9 +322,9 @@ func TestWriteOff_ProducesNegativeReturnAndClosesPosition(t *testing.T) {
 		Subtype: CorpWriteOff, Symbol: "AAPL",
 	})
 	require.NoError(t, err)
-	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Less(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 	after := readRankedIndex(t, svc, "u1")
-	assert.Less(t, after, before)
+	assert.Less(t, after.Cmp(before), 0)
 
 	// Position is closed; cash and any other holdings remain intact.
 	open, err := svc.ListPositions(ctx(), "u1")

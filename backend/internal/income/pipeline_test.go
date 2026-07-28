@@ -158,7 +158,7 @@ func (h *harness) rankedIndex(t *testing.T, user string) float64 {
 	t.Helper()
 	rp, err := h.perf.CurrentRankedPerformance(context.Background(), user)
 	require.NoError(t, err)
-	return rp.RankedIndex
+	return rp.RankedIndex.Float64()
 }
 
 func dayPtr(base time.Time, days int) *time.Time {

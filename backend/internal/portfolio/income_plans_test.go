@@ -44,7 +44,7 @@ func TestReturnOfCapital_ReducesBasisAndIsReturnBearing(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// Return-bearing: the cash credit raises the index.
-	assert.Greater(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Greater(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestStockDividend_PreservesBasisAndValueNeutral(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// Neutral: the index is unchanged (no artificial ranked jump).
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, res.RankedIndexBefore*0.0005)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)

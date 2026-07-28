@@ -72,8 +72,8 @@ type MutationResult struct {
 	Position          *Position
 	Closed            *ClosedPositionSummary
 	PortfolioVersion  int64
-	RankedIndexBefore float64
-	RankedIndexAfter  float64
+	RankedIndexBefore money.IndexValue
+	RankedIndexAfter  money.IndexValue
 	RankingStatus     performance.Status
 	Activity          *Activity
 	// Duplicate is true when an idempotent retry replayed an earlier commit.
@@ -257,10 +257,10 @@ func (c *MutationCoordinator) observeHeldPositions(ctx context.Context, val *Val
 		return nil // nothing open under that symbol; planWriteOff rejects it
 	}
 	rate, ok := val.rates[exemptPosition.Currency]
-	if !ok || !finitePositive(rate) {
+	if !ok || rate.Sign() <= 0 {
 		return ErrUnsupportedCurrency
 	}
-	val.pinCostBasisFallback(exemptSymbol, exemptPosition.AverageBuyPrice.Float64(), exemptPosition.Currency)
+	val.pinCostBasisFallback(exemptSymbol, exemptPosition.AverageBuyPrice, exemptPosition.Currency)
 	return nil
 }
 
@@ -366,7 +366,7 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 	if err != nil {
 		return MutationResult{}, nil, err
 	}
-	var valueAfter float64
+	valueAfter := money.ZeroAmount()
 	var hasActiveAfter bool
 	if plan.valueInvariant {
 		// A pure re-expression of the same economic holding (split, symbol change).
@@ -425,14 +425,14 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		effect = plan.performanceEffect
 	}
 	var next performance.State
-	var indexAfter float64
+	indexAfter := money.ZeroIndexValue()
 
-	if plan.returnValueBase != 0 {
+	if !plan.returnValueBase.IsZero() {
 		// Mixed mutation: a neutral reallocation plus a return-bearing fee.
 		// Stage 1 re-baselines the segment at the neutral value (index
 		// unchanged); stage 2 preserves that baseline so only the fee moves the
 		// index. Two chained pure transitions, one transaction, one commit.
-		neutralAfter := valueAfter - plan.returnValueBase
+		neutralAfter := valueAfter.Sub(plan.returnValueBase)
 		mid := performance.ApplyCheckpoint(state, performance.CheckpointInput{
 			PortfolioID: pf.ID, UserID: req.UserID,
 			ValueBeforeBase: valueBefore, HasActiveBefore: hadActiveBefore,
@@ -457,7 +457,7 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		}
 		indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
 		// A fee must never raise the ranked index.
-		if plan.returnValueBase < 0 && indexAfter > indexMid+1e-9*math.Max(1, math.Abs(indexMid)) {
+		if plan.returnValueBase.Sign() < 0 && indexAfter.Cmp(indexMid) > 0 {
 			return MutationResult{}, nil, ErrRankedInvariant
 		}
 	} else {
@@ -699,12 +699,8 @@ func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time
 // neutral reports whether two ranked indexes are equal within a relative
 // floating-point tolerance. Chain-linked segment ratios cannot be compared with
 // exact equality.
-func neutral(before, after float64) bool {
-	if !isFinite(before) || !isFinite(after) {
-		return false
-	}
-	scale := math.Max(1, math.Abs(before))
-	return math.Abs(before-after) <= 1e-9*scale
+func neutral(before, after money.IndexValue) bool {
+	return money.QuantizeIndex(before).EqualIndex(money.QuantizeIndex(after))
 }
 
 // isIncomeKind reports whether a return-bearing mutation adds value (income) as
@@ -724,18 +720,14 @@ func isIncomeKind(req MutationRequest) bool {
 // in the economically correct direction: income never lowers it, fees and
 // write-offs never raise it. A tiny tolerance permits an exactly-zero income/fee
 // (already rejected earlier) and floating-point noise.
-func assertReturnDirection(kind MutationKind, before, after float64) error {
-	if !isFinite(before) || !isFinite(after) {
-		return ErrRankedInvariant
-	}
-	tol := 1e-9 * math.Max(1, math.Abs(before))
+func assertReturnDirection(kind MutationKind, before, after money.IndexValue) error {
 	switch kind {
 	case MutationIncome, MutationReinvestedDividend, MutationReturnOfCapital:
-		if after < before-tol {
+		if after.Cmp(before) < 0 {
 			return ErrRankedInvariant
 		}
 	case MutationFee, MutationWriteOff:
-		if after > before+tol {
+		if after.Cmp(before) > 0 {
 			return ErrRankedInvariant
 		}
 	}
@@ -795,7 +787,7 @@ type mutationPlan struct {
 	// returnValueBase), then a return-bearing one on to value_after. This makes
 	// an automatically-funded purchase ranked-neutral while its fee lowers the
 	// ranked index exactly once.
-	returnValueBase float64
+	returnValueBase money.Amount
 	// buyCashUsed / buyFunding are reported for previews and diagnostics.
 	buyCashUsed float64
 	buyFunding  float64
@@ -867,7 +859,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		executionPrice := req.Buy.ExecutionPrice
 		priceSource := PriceSourceUserRecorded
 		if executionPrice.IsZero() {
-			executionPrice = money.PriceFromFloat64(quote.Price)
+			executionPrice = quote.Price
 			priceSource = PriceSourceProviderEstimate
 		}
 		if executionPrice.Sign() <= 0 {
@@ -876,7 +868,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		// validateLiveExecutionPrice still takes float64 (it also compares
 		// against quote.Price, which stays float64 in this pass); .Float64()
 		// is a documented boundary conversion, not further decimal math.
-		if err := validateLiveExecutionPrice(req.Buy.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price); err != nil {
+		if err := validateLiveExecutionPrice(req.Buy.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
 			return mutationPlan{}, err
 		}
 		fee := req.Buy.Fee
@@ -1060,7 +1052,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			},
 			resultPosition: result, resultPositionID: result.ID, activity: activity,
 			extraActivities: extraActivities,
-			returnValueBase: -fee.Float64() * val.rates[quote.Currency],
+			returnValueBase: fee.Convert(val.rates[quote.Currency]).Neg(),
 			buyCashUsed:     cashUsed, buyFunding: funding,
 		}, nil
 
@@ -1086,10 +1078,10 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		executionPrice := req.Sell.ExecutionPrice
 		priceSource := PriceSourceUserRecorded
 		if executionPrice.IsZero() {
-			executionPrice = money.PriceFromFloat64(quote.Price)
+			executionPrice = quote.Price
 			priceSource = PriceSourceProviderEstimate
 		}
-		if err := validateLiveExecutionPrice(req.Sell.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price); err != nil {
+		if err := validateLiveExecutionPrice(req.Sell.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
 			return mutationPlan{}, err
 		}
 		fee := req.Sell.Fee
@@ -1113,9 +1105,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		// conversions back into decimal at the point they're persisted.
 		basisRate := val.rates[existing.Currency]
 		saleRate := val.rates[quote.Currency]
-		realizedBaseF := netProceeds.Float64()*saleRate - allocatedBasis.Float64()*basisRate
-		realizedBase := money.AmountFromFloat64(realizedBaseF)
-		basisBaseF := allocatedBasis.Float64() * basisRate
+		realizedBase := netProceeds.Convert(saleRate).Sub(allocatedBasis.Convert(basisRate))
+		realizedBaseF := realizedBase.Float64()
+		basisBaseF := allocatedBasis.Convert(basisRate).Float64()
 		realizedPct := 0.0
 		if basisBaseF > 0 {
 			realizedPct = realizedBaseF / basisBaseF * 100
@@ -1167,7 +1159,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			})
 		}
 		effect := PerformanceEffectNeutral
-		if fee.Sign() > 0 || !neutral(executionPrice.Float64(), quote.Price) {
+		if fee.Sign() > 0 || executionPrice.Cmp(quote.Price) != 0 {
 			effect = PerformanceEffectReturn
 		}
 		// Automatic closure detection: exact-zero-after-quantization, not a
@@ -1238,8 +1230,8 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			Symbol:          req.Input.Symbol,
 			AssetType:       req.Input.AssetType,
 			Quantity:        req.Input.Quantity,
-			AverageBuyPrice: money.PriceFromFloat64(quote.Price), // baseline locked at the observed price
-			Currency:        quote.Currency,                      // quote currency of the baseline
+			AverageBuyPrice: quote.Price,    // baseline locked at the observed price
+			Currency:        quote.Currency, // quote currency of the baseline
 			Status:          PositionStatusOpen,
 			CreatedAt:       now,
 			UpdatedAt:       now,
@@ -1291,7 +1283,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		targetCashBase := 0.0
 		for _, w := range req.Weights {
 			if w.AssetType == AssetTypeCash {
-				targetCashBase += totalValue * (w.WeightPercentage / 100)
+				targetCashBase += totalValue.Float64() * (w.WeightPercentage / 100)
 				continue
 			}
 			quote, ok := val.Quote(w.Symbol)
@@ -1302,7 +1294,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			if !ok {
 				return mutationPlan{}, ErrUnsupportedCurrency
 			}
-			quantity := totalValue * (w.WeightPercentage / 100) / (quote.Price * rate)
+			quantity := totalValue.Float64() * (w.WeightPercentage / 100) / (quote.Price.Float64() * rate.Float64())
 			if !finitePositive(quantity) {
 				return mutationPlan{}, ErrInvalidWeights
 			}
@@ -1313,7 +1305,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				Symbol:          w.Symbol,
 				AssetType:       w.AssetType,
 				Quantity:        money.QuantizeQuantity(money.QuantityFromFloat64(quantity)),
-				AverageBuyPrice: money.PriceFromFloat64(quote.Price),
+				AverageBuyPrice: quote.Price,
 				Currency:        quote.Currency,
 				Status:          PositionStatusOpen,
 				CreatedAt:       now,
@@ -1495,7 +1487,7 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 	}
 	// Reinvestment price hierarchy: an explicit broker/DRIP execution price when
 	// supplied, otherwise the current tracked market price (estimated).
-	priceAmt := money.PriceFromFloat64(quote.Price)
+	priceAmt := quote.Price
 	method := "market_close_on_payment_date"
 	if req.Income.ReinvestPrice.Sign() > 0 {
 		priceAmt = req.Income.ReinvestPrice
@@ -1781,9 +1773,9 @@ func (c *MutationCoordinator) planWriteOff(req MutationRequest, pf *Portfolio, o
 	now := val.ObservedAt
 	basisRate := val.rates[existing.Currency]
 	allocatedBasis := existing.Quantity.MulPrice(existing.AverageBuyPrice)
-	realizedBaseF := -allocatedBasis.Float64() * basisRate // full loss
-	realizedBase := money.AmountFromFloat64(realizedBaseF)
-	basisBaseF := allocatedBasis.Float64() * basisRate
+	realizedBase := allocatedBasis.Convert(basisRate).Neg() // full loss
+	realizedBaseF := realizedBase.Float64()
+	basisBaseF := allocatedBasis.Convert(basisRate).Float64()
 	closed := *existing
 	zero := 0.0
 	closed.Status = PositionStatusClosed

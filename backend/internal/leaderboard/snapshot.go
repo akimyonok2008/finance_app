@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // SnapshotStore reads the canonical ranked-performance history used by
@@ -21,12 +23,12 @@ type SnapshotStore interface {
 	// cutoff — without it, a big gap in recorded history (a missed snapshot
 	// window, a paused-then-resumed account) would silently stretch what's
 	// labeled e.g. "1W" into a much longer real span.
-	IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (index float64, capturedAt time.Time, found bool, err error)
+	IndexAtOrBefore(ctx context.Context, userID string, cutoff, notBefore time.Time) (index money.IndexValue, capturedAt time.Time, found bool, err error)
 }
 
 type indexPoint struct {
 	at    time.Time
-	index float64
+	index money.IndexValue
 }
 
 // InMemorySnapshotStore keeps per-user index time-series in memory. Used by the
@@ -40,7 +42,7 @@ func NewInMemorySnapshotStore() *InMemorySnapshotStore {
 	return &InMemorySnapshotStore{byUserID: make(map[string][]indexPoint)}
 }
 
-func (s *InMemorySnapshotStore) Record(_ context.Context, userID string, index float64, at time.Time) error {
+func (s *InMemorySnapshotStore) Record(_ context.Context, userID string, index money.IndexValue, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pts := append(s.byUserID[userID], indexPoint{at: at.UTC(), index: index})
@@ -50,7 +52,7 @@ func (s *InMemorySnapshotStore) Record(_ context.Context, userID string, index f
 	return nil
 }
 
-func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string, cutoff, notBefore time.Time) (float64, time.Time, bool, error) {
+func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string, cutoff, notBefore time.Time) (money.IndexValue, time.Time, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	pts := s.byUserID[userID]
@@ -63,9 +65,9 @@ func (s *InMemorySnapshotStore) IndexAtOrBefore(_ context.Context, userID string
 			continue
 		}
 		if hasFloor && pts[i].at.Before(notBefore) {
-			return 0, time.Time{}, false, nil // only pre-epoch history remains: ignore it
+			return money.ZeroIndexValue(), time.Time{}, false, nil // only pre-epoch history remains: ignore it
 		}
 		return pts[i].index, pts[i].at, true, nil
 	}
-	return 0, time.Time{}, false, nil
+	return money.ZeroIndexValue(), time.Time{}, false, nil
 }

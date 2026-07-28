@@ -3,7 +3,6 @@ package competitions
 import (
 	"context"
 	"errors"
-	"math"
 	"sort"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/clock"
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -45,8 +45,6 @@ type Service struct {
 func NewService(repo CompetitionRepository, users UserProvider, positions PositionProvider, priceProvider prices.PriceProvider, fxp fx.FXProvider, clk clock.Clock) *Service {
 	return &Service{repo: repo, users: users, positions: positions, prices: priceProvider, fx: fxp, clock: clk}
 }
-
-func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
 // CurrentCompetitionID returns the id of the sprint active right now.
 func (s *Service) CurrentCompetitionID(_ context.Context) string {
@@ -93,11 +91,16 @@ func (s *Service) RefreshCache(ctx context.Context, competitionID string) (int, 
 	skipped := 0
 	for _, e := range entries {
 		currentBase, ok := s.snapshotCurrentValueBase(ctx, e.Snapshots)
-		if !ok || e.StartingValue <= 0 {
+		if !ok || e.StartingValue.Cmp(money.ZeroAmount()) <= 0 {
 			skipped++
 			continue
 		}
-		score := round2((currentBase - e.StartingValue) / e.StartingValue * 100)
+		factor, err := currentBase.Sub(e.StartingValue).DivExact(e.StartingValue, 36)
+		if err != nil {
+			skipped++
+			continue
+		}
+		score := money.QuantizeRatio(factor.Mul(money.MustRatio("100")), 2)
 		if err := s.cache.UpsertCompetitionScore(ctx, competitionID, e.UserID, score); err != nil {
 			return skipped, err
 		}
@@ -173,34 +176,35 @@ func (s *Service) JoinCompetition(ctx context.Context, competitionID, userID str
 
 	entryID := uuid.NewString()
 	snapshots := make([]CompetitionEntrySnapshotPosition, 0, len(positions))
-	var startingValueBase float64
+	startingValueBase := money.ZeroAmount()
 	for _, pos := range positions {
 		price, err := s.prices.GetLatestPrice(ctx, pos.Symbol)
 		if err != nil {
 			return nil, ErrJoinSnapshot
 		}
-		// pos.Quantity.Float64() is a documented boundary conversion:
-		// internal/competitions is out of scope for this section's decimal
-		// migration.
-		valueLocal := pos.Quantity.Float64() * price.Price
-		valueBase, err := s.fx.Convert(ctx, valueLocal, price.Currency, fx.BaseCurrency)
+		exactPrice := money.PriceFromFloat64(price.Price)
+		valueLocal := pos.Quantity.MulPrice(exactPrice)
+		// Market-price and FX providers expose float64 today. Convert only at
+		// those provider boundaries; all competition state and math stay exact.
+		converted, err := s.fx.Convert(ctx, valueLocal.Float64(), price.Currency, fx.BaseCurrency)
 		if err != nil {
 			return nil, ErrJoinSnapshot
 		}
-		startingValueBase += valueBase
+		valueBase := money.AmountFromFloat64(converted)
+		startingValueBase = startingValueBase.Add(valueBase)
 		snapshots = append(snapshots, CompetitionEntrySnapshotPosition{
 			ID:                    uuid.NewString(),
 			CompetitionEntryID:    entryID,
 			Symbol:                pos.Symbol,
 			AssetType:             pos.AssetType,
-			Quantity:              pos.Quantity.Float64(),
+			Quantity:              pos.Quantity,
 			Currency:              pos.Currency,
-			StartingPrice:         price.Price,
+			StartingPrice:         exactPrice,
 			StartingPriceCurrency: price.Currency,
 			StartingValueBase:     valueBase,
 		})
 	}
-	if startingValueBase <= 0 {
+	if startingValueBase.Cmp(money.ZeroAmount()) <= 0 {
 		return nil, ErrEmptyPortfolio
 	}
 
@@ -209,14 +213,14 @@ func (s *Service) JoinCompetition(ctx context.Context, competitionID, userID str
 		CompetitionID: competitionID,
 		UserID:        userID,
 		StartingValue: startingValueBase,
-		StartingIndex: 100,
+		StartingIndex: money.MustIndexValue("100"),
 		JoinedAt:      time.Now().UTC(),
 		Snapshots:     snapshots,
 	}
 	if err := s.repo.CreateEntry(ctx, entry); err != nil {
 		return nil, err
 	}
-	return &JoinCompetitionResponse{CompetitionID: competitionID, Joined: true, StartingIndex: 100}, nil
+	return &JoinCompetitionResponse{CompetitionID: competitionID, Joined: true, StartingIndex: money.MustIndexValue("100")}, nil
 }
 
 // MyStatus returns the requesting user's own sprint status.
@@ -227,7 +231,7 @@ func (s *Service) MyStatus(ctx context.Context, competitionID, userID string) (*
 
 	if _, err := s.repo.GetEntry(ctx, competitionID, userID); err != nil {
 		if errors.Is(err, ErrEntryNotFound) {
-			return &MyCompetitionStatusResponse{CompetitionID: competitionID, Joined: false, SprintIndex: 100}, nil
+			return &MyCompetitionStatusResponse{CompetitionID: competitionID, Joined: false, SprintIndex: money.MustIndexValue("100")}, nil
 		}
 		return nil, err
 	}
@@ -236,7 +240,7 @@ func (s *Service) MyStatus(ctx context.Context, competitionID, userID string) (*
 	if err != nil {
 		return nil, err
 	}
-	resp := &MyCompetitionStatusResponse{CompetitionID: competitionID, Joined: true, SprintIndex: 100}
+	resp := &MyCompetitionStatusResponse{CompetitionID: competitionID, Joined: true, SprintIndex: money.MustIndexValue("100")}
 	for _, r := range ranked {
 		if r.userID == userID {
 			resp.CurrentRank = r.rank
@@ -293,9 +297,9 @@ func (s *Service) leaderboardFromCache(ctx context.Context, competitionID string
 			Rank:                   len(out) + 1,
 			DisplayName:            user.DisplayName,
 			AvatarKey:              user.AvatarKey,
-			SprintReturnPercentage: sc.Score,
+			SprintReturnPercentage: money.RatioFromFloat64(sc.Score),
 			// sprint_index = 100 + return% holds exactly for our formulas.
-			SprintIndex: round2(100 + sc.Score),
+			SprintIndex: money.MustIndexValue("100").AddRatio(money.RatioFromFloat64(sc.Score)),
 		})
 	}
 	return out, len(out) > 0
@@ -319,8 +323,8 @@ type rankedRow struct {
 	userID      string
 	displayName string
 	avatarKey   string
-	returnPct   float64
-	index       float64
+	returnPct   money.Ratio
+	index       money.IndexValue
 	rank        int
 }
 
@@ -339,23 +343,27 @@ func (s *Service) rankedEntries(ctx context.Context, competitionID string) ([]ra
 			continue
 		}
 		currentBase, ok := s.snapshotCurrentValueBase(ctx, e.Snapshots)
-		if !ok || e.StartingValue <= 0 {
+		if !ok || e.StartingValue.Cmp(money.ZeroAmount()) <= 0 {
 			continue
 		}
-		returnPct := (currentBase - e.StartingValue) / e.StartingValue * 100
-		index := 100 * currentBase / e.StartingValue
+		factor, err := currentBase.DivExact(e.StartingValue, 36)
+		if err != nil {
+			continue
+		}
+		returnPct := money.QuantizeRatio(factor.Sub(money.MustRatio("1")).Mul(money.MustRatio("100")), 2)
+		index := money.QuantizeIndex(money.MustIndexValue("100").MulRatio(factor))
 		rows = append(rows, rankedRow{
 			userID:      e.UserID,
 			displayName: user.DisplayName,
 			avatarKey:   user.AvatarKey,
-			returnPct:   round2(returnPct),
-			index:       round2(index),
+			returnPct:   returnPct,
+			index:       index,
 		})
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].returnPct != rows[j].returnPct {
-			return rows[i].returnPct > rows[j].returnPct
+		if comparison := rows[i].returnPct.Cmp(rows[j].returnPct); comparison != 0 {
+			return comparison > 0
 		}
 		return rows[i].displayName < rows[j].displayName
 	})
@@ -368,19 +376,19 @@ func (s *Service) rankedEntries(ctx context.Context, competitionID string) ([]ra
 // snapshotCurrentValueBase reprices the snapshot positions at current prices and
 // sums their base-currency value. ok=false if any position can't be priced or
 // converted (the user is then skipped from the board).
-func (s *Service) snapshotCurrentValueBase(ctx context.Context, snapshots []CompetitionEntrySnapshotPosition) (float64, bool) {
-	var total float64
+func (s *Service) snapshotCurrentValueBase(ctx context.Context, snapshots []CompetitionEntrySnapshotPosition) (money.Amount, bool) {
+	total := money.ZeroAmount()
 	for _, snap := range snapshots {
 		price, err := s.prices.GetLatestPrice(ctx, snap.Symbol)
 		if err != nil {
-			return 0, false
+			return money.ZeroAmount(), false
 		}
-		valueLocal := snap.Quantity * price.Price
-		valueBase, err := s.fx.Convert(ctx, valueLocal, price.Currency, fx.BaseCurrency)
+		valueLocal := snap.Quantity.MulPrice(money.PriceFromFloat64(price.Price))
+		converted, err := s.fx.Convert(ctx, valueLocal.Float64(), price.Currency, fx.BaseCurrency)
 		if err != nil {
-			return 0, false
+			return money.ZeroAmount(), false
 		}
-		total += valueBase
+		total = total.Add(money.AmountFromFloat64(converted))
 	}
 	return total, true
 }

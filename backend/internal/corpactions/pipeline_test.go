@@ -72,7 +72,7 @@ func rankedIndex(t *testing.T, svc *portfolio.Service, repo *portfolio.InMemoryR
 	perf.SetValuator(svc)
 	rp, err := perf.CurrentRankedPerformance(context.Background(), userID)
 	require.NoError(t, err)
-	return rp.RankedIndex
+	return rp.RankedIndex.Float64()
 }
 
 func fptr(f float64) *float64 { return &f }

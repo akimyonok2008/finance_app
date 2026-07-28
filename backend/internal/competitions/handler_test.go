@@ -107,7 +107,7 @@ func TestJoin_Succeeds(t *testing.T) {
 	var resp competitions.JoinCompetitionResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.True(t, resp.Joined)
-	assert.Equal(t, 100.0, resp.StartingIndex)
+	assert.Equal(t, "100", resp.StartingIndex.String())
 }
 
 func TestJoin_NonExistingCompetition(t *testing.T) {

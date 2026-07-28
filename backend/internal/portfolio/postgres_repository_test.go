@@ -102,7 +102,7 @@ func TestPG_MutationCommitsPositionAndRankedStateTogether(t *testing.T) {
 
 	err = repo.WithLockedPortfolio(ctx, userID, func(ctx context.Context, tx AggregateTx) error {
 		require.NoError(t, tx.CreatePosition(ctx, pos))
-		st := performance.ActivateState(pf.ID, userID, 1800, true, time.Now().UTC())
+		st := performance.ActivateState(pf.ID, userID, testAmount("1800"), true, time.Now().UTC())
 		require.NoError(t, tx.PutRankedState(ctx, st, true, 0))
 		return tx.SetPortfolioVersion(ctx, pf.Version+1)
 	})
@@ -114,7 +114,7 @@ func TestPG_MutationCommitsPositionAndRankedStateTogether(t *testing.T) {
 
 	state, err := performance.NewPostgresStateReader(pool).GetByPortfolio(ctx, pf.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 100.0, state.CheckpointIndex)
+	assertIndexEqual(t, "100.0", state.CheckpointIndex)
 
 	after, err := repo.GetPortfolioByUser(ctx, userID)
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestPG_RollbackLeavesNoPartialState(t *testing.T) {
 	sentinel := assert.AnError
 	err = repo.WithLockedPortfolio(ctx, userID, func(ctx context.Context, tx AggregateTx) error {
 		require.NoError(t, tx.CreatePosition(ctx, pos))
-		st := performance.ActivateState(pf.ID, userID, 1800, true, time.Now().UTC())
+		st := performance.ActivateState(pf.ID, userID, testAmount("1800"), true, time.Now().UTC())
 		require.NoError(t, tx.PutRankedState(ctx, st, true, 0))
 		return sentinel
 	})
@@ -206,7 +206,7 @@ func TestPG_CashActivityIsAtomicIdempotentAndConstrained(t *testing.T) {
 		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter)
 
 	retry, err := svc.DepositCash(context.Background(), userID, "pg-deposit", CashFlowInput{
 		Currency: "USD", Amount: testAmount("1000"),
@@ -218,7 +218,7 @@ func TestPG_CashActivityIsAtomicIdempotentAndConstrained(t *testing.T) {
 		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("5"),
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, buy.RankedIndexBefore, buy.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, buy.RankedIndexBefore, buy.RankedIndexAfter)
 
 	balances, err := repo.ListCashBalances(context.Background(), userID)
 	require.NoError(t, err)
@@ -331,7 +331,7 @@ func TestPG_OutboxClaimingSkipsLockedRows(t *testing.T) {
 		return tx.AppendOutbox(ctx, OutboxEvent{
 			ID: uuid.NewString(), EventType: EventPortfolioMutated,
 			AggregateType: "portfolio", AggregateID: pf.ID, AggregateVersion: 1,
-			UserID: userID, RankedIndex: 100, RankingStatus: "active",
+			UserID: userID, RankedIndex: testIndex("100"), RankingStatus: "active",
 			TrackingStartedAt: time.Now().UTC().Add(-time.Hour),
 			ValuationAsOf:     time.Now().UTC(),
 			DataQualityStatus: "complete",

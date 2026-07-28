@@ -53,7 +53,7 @@ func TestWriteOffUnpriceablePosition_SucceedsAndRealizesFullBasisAsLoss(t *testi
 
 	// Ranked index drops by exactly the known cost basis — never a fabricated
 	// market move, since no market price for this symbol ever existed.
-	assert.Less(t, res.RankedIndexAfter, rankedBefore)
+	assert.Less(t, res.RankedIndexAfter.Cmp(rankedBefore), 0)
 
 	open, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)

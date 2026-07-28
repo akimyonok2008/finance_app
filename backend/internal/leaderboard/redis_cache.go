@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 const globalKey = "leaderboard:global"
@@ -26,7 +28,7 @@ func NewRedisLeaderboardCache(client *redis.Client) *RedisLeaderboardCache {
 	return &RedisLeaderboardCache{client: client}
 }
 
-func (c *RedisLeaderboardCache) UpsertGlobalScore(ctx context.Context, userID string, score float64) error {
+func (c *RedisLeaderboardCache) UpsertGlobalScore(ctx context.Context, userID string, score money.Ratio) error {
 	return c.upsert(ctx, globalKey, userID, score)
 }
 
@@ -40,12 +42,14 @@ func (c *RedisLeaderboardCache) RemoveGlobalScore(ctx context.Context, userID st
 	return nil
 }
 
-func (c *RedisLeaderboardCache) UpsertCompetitionScore(ctx context.Context, competitionID, userID string, score float64) error {
+func (c *RedisLeaderboardCache) UpsertCompetitionScore(ctx context.Context, competitionID, userID string, score money.Ratio) error {
 	return c.upsert(ctx, competitionKey(competitionID), userID, score)
 }
 
-func (c *RedisLeaderboardCache) upsert(ctx context.Context, key, userID string, score float64) error {
-	if err := c.client.ZAdd(ctx, key, redis.Z{Score: score, Member: userID}).Err(); err != nil {
+func (c *RedisLeaderboardCache) upsert(ctx context.Context, key, userID string, score money.Ratio) error {
+	// Redis sorted-set scores are IEEE-754 doubles. Keep the ranking input exact
+	// through the domain/cache interface and convert only at this required boundary.
+	if err := c.client.ZAdd(ctx, key, redis.Z{Score: score.Float64(), Member: userID}).Err(); err != nil {
 		return fmt.Errorf("leaderboard cache: upsert %s: %w", key, err)
 	}
 	return nil

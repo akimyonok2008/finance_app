@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
@@ -20,10 +21,10 @@ import (
 // and whether any active positions exist. An error means the portfolio cannot be
 // valued consistently (missing prices/FX); the ranked engine then refuses to
 // report rather than using zeros.
-func (s *Service) PortfolioValueBase(ctx context.Context, userID string) (string, float64, bool, error) {
+func (s *Service) PortfolioValueBase(ctx context.Context, userID string) (string, money.Amount, bool, error) {
 	observation, err := s.PortfolioValueObservation(ctx, userID)
 	if err != nil {
-		return "", 0, false, err
+		return "", money.ZeroAmount(), false, err
 	}
 	return observation.PortfolioID, observation.ValueBase, observation.HasActive, nil
 }
@@ -60,28 +61,29 @@ func (s *Service) PortfolioValueObservation(ctx context.Context, userID string) 
 		// balance.Amount.Float64() is a documented boundary conversion: value
 		// and rate stay float64 because they feed internal/performance and
 		// internal/fx, out of scope for this section.
-		value += balance.Amount.Float64() * rate
+		value = value.Add(balance.Amount.Convert(money.QuantizeFX(money.FXRateFromFloat64(rate))))
 		hasActive = true
 	}
 	return performance.ValuationObservation{
-		PortfolioID: pf.ID, ValueBase: value, HasActive: hasActive,
+		PortfolioID: pf.ID, ValueBase: money.QuantizeValue(value), HasActive: hasActive,
 		ValuationAsOf: asOf, DataQualityStatus: quality,
 	}, nil
 }
 
 type observedQuote struct {
-	price    float64
+	price    money.Price
 	currency string
 }
 
 // valueOpenObserved prices each distinct symbol once and reports the oldest
 // observation time plus whether any quote was stale.
-func (s *Service) valueOpenObserved(ctx context.Context, positions []*Position) (value float64, hasActive bool, quality string, asOf time.Time, err error) {
+func (s *Service) valueOpenObserved(ctx context.Context, positions []*Position) (value money.Amount, hasActive bool, quality string, asOf time.Time, err error) {
+	value = money.ZeroAmount()
 	quality = "complete"
 	asOf = time.Now().UTC()
 
 	quotes := map[string]observedQuote{}
-	rates := map[string]float64{}
+	rates := map[string]money.FXRate{}
 
 	for _, pos := range positions {
 		if positionStatus(pos) != PositionStatusOpen {
@@ -92,7 +94,7 @@ func (s *Service) valueOpenObserved(ctx context.Context, positions []*Position) 
 		if !ok {
 			price, perr := s.provider.GetLatestPrice(ctx, pos.Symbol)
 			if perr != nil || price == nil || !finitePositive(price.Price) {
-				return 0, false, "", time.Time{}, ErrPriceProvider
+				return money.ZeroAmount(), false, "", time.Time{}, ErrPriceProvider
 			}
 			if price.IsStale {
 				quality = "stale"
@@ -104,26 +106,24 @@ func (s *Service) valueOpenObserved(ctx context.Context, positions []*Position) 
 			if !observed.IsZero() && observed.UTC().Before(asOf) {
 				asOf = observed.UTC()
 			}
-			q = observedQuote{price: price.Price, currency: price.Currency}
+			q = observedQuote{price: money.QuantizePrice(money.PriceFromFloat64(price.Price)), currency: price.Currency}
 			quotes[pos.Symbol] = q
 		}
 		rate, ok := rates[q.currency]
 		if !ok {
 			r, ferr := s.fx.GetRate(ctx, q.currency, fx.BaseCurrency)
 			if ferr != nil || !finitePositive(r) {
-				return 0, false, "", time.Time{}, ErrUnsupportedCurrency
+				return money.ZeroAmount(), false, "", time.Time{}, ErrUnsupportedCurrency
 			}
-			rate = r
-			rates[q.currency] = r
+			rate = money.QuantizeFX(money.FXRateFromFloat64(r))
+			rates[q.currency] = rate
 		}
-		// pos.Quantity.Float64() is a documented boundary conversion: this
-		// running valuation stays float64 (out of scope for this section).
-		value += pos.Quantity.Float64() * q.price * rate
+		value = value.Add(pos.Quantity.MulPrice(q.price).Convert(rate))
 	}
-	if !isFinite(value) || value < 0 {
-		return 0, false, "", time.Time{}, ErrPriceProvider
+	if value.Sign() < 0 {
+		return money.ZeroAmount(), false, "", time.Time{}, ErrPriceProvider
 	}
-	return value, hasActive, quality, asOf, nil
+	return money.QuantizeValue(value), hasActive, quality, asOf, nil
 }
 
 // --- pure set helpers used by the mutation coordinator ------------------------

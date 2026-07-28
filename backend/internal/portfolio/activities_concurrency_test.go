@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"math"
 	"sync"
 	"testing"
 
@@ -30,8 +29,7 @@ func assertReturnConsistent(t *testing.T, repo *InMemoryRepository, svc *Service
 	}
 	rp, err := perf.CurrentRankedPerformance(context.Background(), userID)
 	require.NoError(t, err)
-	assert.False(t, math.IsNaN(rp.RankedIndex))
-	assert.Greater(t, rp.RankedIndex, 0.0)
+	assert.Greater(t, rp.RankedIndex.Sign(), 0)
 }
 
 // TestConcurrent_FeeAndWithdrawalContendForCash runs a fee and a withdrawal that

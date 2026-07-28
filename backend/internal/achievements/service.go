@@ -168,11 +168,10 @@ func (s *Service) benchmarkReturn(
 
 func rankedReturn(window performancehistory.Window) (float64, error) {
 	start, end := window.StartSnapshot.RankedIndex, window.EndSnapshot.RankedIndex
-	if start <= 0 || end <= 0 || math.IsNaN(start) || math.IsNaN(end) ||
-		math.IsInf(start, 0) || math.IsInf(end, 0) {
+	if start.Sign() <= 0 || end.Sign() <= 0 {
 		return 0, performancehistory.ErrInvalidSnapshot
 	}
-	return (end/start - 1) * 100, nil
+	return performancehistory.TimeframeReturnPercent(start, end)
 }
 
 func (s *Service) progress(
@@ -380,8 +379,8 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 		evidence.EvaluationModel = "ranked_snapshot_v1"
 		evidence.EvidenceVersion = 2
 		evidence.TrackingEpoch = window.StartSnapshot.TrackingStartedAt.Format(time.RFC3339Nano)
-		evidence.StartRankedIndex = window.StartSnapshot.RankedIndex
-		evidence.EndRankedIndex = window.EndSnapshot.RankedIndex
+		evidence.StartRankedIndex = window.StartSnapshot.RankedIndex.Float64()
+		evidence.EndRankedIndex = window.EndSnapshot.RankedIndex.Float64()
 		evidence.StartSnapshotAt = window.StartSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.EndSnapshotAt = window.EndSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.ActiveCoveragePct = round(window.ActiveCoverage * 100)
