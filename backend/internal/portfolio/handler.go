@@ -211,8 +211,8 @@ func toPositionView(p *Position) positionView {
 		Symbol:            p.Symbol,
 		InstrumentID:      p.InstrumentID,
 		AssetType:         p.AssetType,
-		Quantity:          p.Quantity,
-		BaselinePrice:     p.AverageBuyPrice,
+		Quantity:          p.Quantity.Float64(),
+		BaselinePrice:     p.AverageBuyPrice.Float64(),
 		Currency:          p.Currency,
 		Status:            positionStatus(p),
 		PositionEpisodeID: p.ID,
@@ -224,7 +224,7 @@ func (r positionRequest) toInput() PositionInput {
 	return PositionInput{
 		Symbol:    r.Symbol,
 		AssetType: r.AssetType,
-		Quantity:  r.Quantity,
+		Quantity:  money.QuantityFromFloat64(r.Quantity),
 	}
 }
 
@@ -454,9 +454,9 @@ func (h *Handler) BuyPosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.BuyPosition(r.Context(), uid, requestID, BuyInput{
-		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
+		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: money.QuantityFromFloat64(req.Quantity),
 		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -484,8 +484,8 @@ func (h *Handler) SellPosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.SellPosition(r.Context(), uid, requestID, SellInput{
-		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: money.QuantityFromFloat64(req.Quantity),
+		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -512,9 +512,9 @@ func (h *Handler) PreviewBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview, err := h.svc.PreviewBuy(r.Context(), uid, BuyInput{
-		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
+		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: money.QuantityFromFloat64(req.Quantity),
 		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -538,8 +538,8 @@ func (h *Handler) PreviewSell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview, err := h.svc.PreviewSell(r.Context(), uid, SellInput{
-		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: sellEffectiveAt,
+		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: money.QuantityFromFloat64(req.Quantity),
+		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: sellEffectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -562,7 +562,7 @@ func mutationView(res MutationResult) activityMutationView {
 			ID: res.Activity.ID, Type: res.Activity.Type, Symbol: res.Activity.Symbol, InstrumentID: res.Activity.InstrumentID,
 			AssetType: res.Activity.AssetType, Currency: res.Activity.Currency,
 			Quantity: res.Activity.Quantity, UnitPrice: res.Activity.UnitPrice,
-			GrossAmount:                round2(res.Activity.GrossAmount),
+			GrossAmount:                res.Activity.GrossAmount,
 			CostBasisAllocated:         res.Activity.CostBasisAllocated,
 			RealizedGainLossBase:       res.Activity.RealizedGainLossBase,
 			RealizedGainLossPercentage: res.Activity.RealizedGainLossPercentage,

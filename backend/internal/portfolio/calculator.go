@@ -27,8 +27,12 @@ func round4(v float64) float64 {
 // Percentage performance is calculated from base-currency values. This keeps
 // each position consistent with the mixed-currency portfolio total.
 func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceCurrency string, costBasisBase, currentValueBase float64, baseCurrency string) PositionSummary {
-	costBasis := pos.Quantity * pos.AverageBuyPrice
-	currentValue := pos.Quantity * currentPrice
+	// pos.Quantity/AverageBuyPrice are exact decimal; costBasis is computed
+	// with exact MulPrice and only converted to float64 (documented boundary)
+	// for this display-only local-currency figure. currentPrice stays float64
+	// (a live quote, not yet part of this section's scope).
+	costBasis := pos.Quantity.MulPrice(pos.AverageBuyPrice).Float64()
+	currentValue := pos.Quantity.Float64() * currentPrice
 	gainLoss := currentValue - costBasis
 	gainLossBase := currentValueBase - costBasisBase
 
@@ -41,8 +45,8 @@ func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceC
 		PositionID:           pos.ID,
 		Symbol:               pos.Symbol,
 		AssetType:            pos.AssetType,
-		Quantity:             pos.Quantity,
-		AverageBuyPrice:      pos.AverageBuyPrice,
+		Quantity:             pos.Quantity.Float64(),
+		AverageBuyPrice:      pos.AverageBuyPrice.Float64(),
 		CurrentPrice:         currentPrice,
 		CurrentPriceCurrency: currentPriceCurrency,
 		CostBasis:            round2(costBasis),

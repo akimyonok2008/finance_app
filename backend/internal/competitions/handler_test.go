@@ -16,6 +16,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/clock"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -46,7 +47,7 @@ func newEnv(t *testing.T) (http.Handler, *auth.TokenManager) {
 	tm := auth.NewTokenManager("test-secret", time.Hour)
 	repo := competitions.NewInMemoryCompetitionRepository()
 	users := stubUsers{m: map[string]*auth.User{"u1": {ID: "u1", DisplayName: "AlphaWolf_91", AvatarKey: "fox", Email: "a@e.com"}}}
-	positions := stubPositions{m: map[string][]portfolio.Position{"u1": {{Symbol: "AAPL", AssetType: "stock", Quantity: 10, AverageBuyPrice: 180, Currency: "USD"}}}}
+	positions := stubPositions{m: map[string][]portfolio.Position{"u1": {{Symbol: "AAPL", AssetType: "stock", Quantity: money.QuantityFromFloat64(10), AverageBuyPrice: money.PriceFromFloat64(180), Currency: "USD"}}}}
 	svc := competitions.NewService(repo, users, positions, prices.NewMockPriceProvider(), fx.NewMockFXProvider(), &clock.FixedClock{Time: fixedTime})
 	h := competitions.NewHandler(svc, nil)
 

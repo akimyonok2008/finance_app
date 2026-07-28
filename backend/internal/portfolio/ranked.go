@@ -116,7 +116,9 @@ func (s *Service) valueOpenObserved(ctx context.Context, positions []*Position) 
 			rate = r
 			rates[q.currency] = r
 		}
-		value += pos.Quantity * q.price * rate
+		// pos.Quantity.Float64() is a documented boundary conversion: this
+		// running valuation stays float64 (out of scope for this section).
+		value += pos.Quantity.Float64() * q.price * rate
 	}
 	if !isFinite(value) || value < 0 {
 		return 0, false, "", time.Time{}, ErrPriceProvider

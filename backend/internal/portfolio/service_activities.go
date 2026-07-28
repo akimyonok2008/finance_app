@@ -114,11 +114,11 @@ func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, sy
 		switch a.Type {
 		case ActivityBuy, ActivityOpeningBalance, ActivityReinvestedDividend:
 			if a.Quantity != nil {
-				qty += *a.Quantity
+				qty += a.Quantity.Float64()
 			}
 		case ActivitySell:
 			if a.Quantity != nil {
-				qty -= *a.Quantity
+				qty -= a.Quantity.Float64()
 			}
 		case ActivityStockSplit, ActivityStockDividend:
 			if f := ratioFactor(a); f > 0 {

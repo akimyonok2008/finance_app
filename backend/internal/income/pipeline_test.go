@@ -138,7 +138,7 @@ func (h *harness) fund(t *testing.T, user string, qty float64) {
 	t.Helper()
 	_, err := h.svc.DepositCash(context.Background(), user, "dep-"+user, portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(100000)})
 	require.NoError(t, err)
-	_, err = h.svc.BuyPosition(context.Background(), user, "buy-"+user, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: qty})
+	_, err = h.svc.BuyPosition(context.Background(), user, "buy-"+user, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: money.QuantityFromFloat64(qty)})
 	require.NoError(t, err)
 }
 
@@ -217,7 +217,7 @@ func TestEligibility_UsesHistoricalHoldingsNotCurrentQuantity(t *testing.T) {
 	// based on the 100 held on the ex-date.
 	sellAt := h.now.AddDate(0, 0, -2)
 	_, err := h.svc.SellPosition(context.Background(), "u1", "sell-1", portfolio.SellInput{
-		Symbol: "AAPL", Quantity: 60, ExecutionPrice: 195, EffectiveAt: &sellAt,
+		Symbol: "AAPL", Quantity: money.QuantityFromFloat64(60), ExecutionPrice: money.PriceFromFloat64(195), EffectiveAt: &sellAt,
 	})
 	require.NoError(t, err)
 
@@ -238,7 +238,7 @@ func TestEligibility_FullySoldAfterExDateStillReceivesDividend(t *testing.T) {
 	h.fund(t, "u1", 100)
 	sellAt := h.now.AddDate(0, 0, -2)
 	_, err := h.svc.SellPosition(context.Background(), "u1", "sell-all", portfolio.SellInput{
-		Symbol: "AAPL", Quantity: 100, ExecutionPrice: 195, EffectiveAt: &sellAt,
+		Symbol: "AAPL", Quantity: money.QuantityFromFloat64(100), ExecutionPrice: money.PriceFromFloat64(195), EffectiveAt: &sellAt,
 	})
 	require.NoError(t, err)
 	cashBefore := h.cashUSD(t, "u1")
@@ -258,8 +258,8 @@ func TestEligibility_BuyAfterExDateReceivesNothing(t *testing.T) {
 	require.NoError(t, err)
 	buyAt := h.now.AddDate(0, 0, -2)
 	_, err = h.svc.BuyPosition(context.Background(), "u1", "late-buy", portfolio.BuyInput{
-		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 100,
-		ExecutionPrice: 190, EffectiveAt: &buyAt,
+		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: money.QuantityFromFloat64(100),
+		ExecutionPrice: money.PriceFromFloat64(190), EffectiveAt: &buyAt,
 	})
 	require.NoError(t, err)
 	cashBefore := h.cashUSD(t, "u1")
@@ -297,8 +297,8 @@ func TestProcessedNoEntitlement_ReevaluatesAfterBackdatedBuy(t *testing.T) {
 	require.NoError(t, err)
 	buyAt := h.now.AddDate(0, 0, -10)
 	_, err = h.svc.BuyPosition(context.Background(), "u1", "backdated-buy", portfolio.BuyInput{
-		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 25,
-		ExecutionPrice: 180, EffectiveAt: &buyAt,
+		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: money.QuantityFromFloat64(25),
+		ExecutionPrice: money.PriceFromFloat64(180), EffectiveAt: &buyAt,
 	})
 	require.NoError(t, err)
 	cashBefore := h.cashUSD(t, "u1")
@@ -385,7 +385,7 @@ func TestReinvestment_IncomeCountedOnceAndSharesAdded(t *testing.T) {
 	var qty float64
 	for _, p := range positions {
 		if p.Symbol == "AAPL" {
-			qty = p.Quantity
+			qty = p.Quantity.Float64()
 		}
 	}
 	// 100 + 100/195 ≈ 100.512 shares.
@@ -410,7 +410,7 @@ func TestReturnOfCapital_ReducesBasisNotOrdinaryIncome(t *testing.T) {
 	var basis float64
 	for _, p := range positions {
 		if p.Symbol == "AAPL" {
-			basis = p.AverageBuyPrice
+			basis = p.AverageBuyPrice.Float64()
 		}
 	}
 	assert.Less(t, basis, 195.0) // baseline reduced by $1/share
@@ -434,7 +434,7 @@ func TestStockDividend_NoCashNoRankedJump(t *testing.T) {
 	require.NoError(t, err)
 	for _, p := range positions {
 		if p.Symbol == "AAPL" {
-			assert.InDelta(t, 110.0, p.Quantity, 0.001) // +10%
+			assert.InDelta(t, 110.0, p.Quantity.Float64(), 0.001) // +10%
 		}
 	}
 }

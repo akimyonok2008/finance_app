@@ -16,6 +16,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/clock"
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -53,7 +54,7 @@ func (f fakePositions) ListPositions(_ context.Context, userID string) ([]portfo
 }
 
 func pos(symbol string, qty, avg float64, cur string) portfolio.Position {
-	return portfolio.Position{Symbol: symbol, AssetType: "stock", Quantity: qty, AverageBuyPrice: avg, Currency: cur}
+	return portfolio.Position{Symbol: symbol, AssetType: "stock", Quantity: money.QuantityFromFloat64(qty), AverageBuyPrice: money.PriceFromFloat64(avg), Currency: cur}
 }
 
 type harness struct {

@@ -54,6 +54,40 @@ func (a Amount) Float64() float64 {
 	return f
 }
 
+// QuantityFromFloat64 / Float64: same documented boundary-conversion
+// contract as AmountFromFloat64/Amount.Float64, for security/unit
+// quantities.
+func QuantityFromFloat64(f float64) Quantity {
+	return Quantity{Decimal{d: decimal.NewFromFloat(f)}}
+}
+
+func (q Quantity) Float64() float64 {
+	f, _ := q.Decimal.d.Float64()
+	return f
+}
+
+// PriceFromFloat64 / Float64: same documented boundary-conversion contract,
+// for per-unit prices.
+func PriceFromFloat64(f float64) Price {
+	return Price{Decimal{d: decimal.NewFromFloat(f)}}
+}
+
+func (p Price) Float64() float64 {
+	f, _ := p.Decimal.d.Float64()
+	return f
+}
+
+// RatioFromFloat64 / Float64: same documented boundary-conversion contract,
+// for dimensionless ratios/factors.
+func RatioFromFloat64(f float64) Ratio {
+	return Ratio{Decimal{d: decimal.NewFromFloat(f)}}
+}
+
+func (r Ratio) Float64() float64 {
+	f, _ := r.Decimal.d.Float64()
+	return f
+}
+
 func mustNew(s string) Decimal {
 	d, err := newDecimal(s)
 	if err != nil {
@@ -166,6 +200,13 @@ func (a Amount) DivExact(b Amount, places int32) (Ratio, error) {
 
 // ---- Quantity arithmetic ----
 
+// Cmp compares two Quantities: -1, 0, 1. Exact decimal comparison, no
+// epsilon.
+func (q Quantity) Cmp(o Quantity) int { return q.Decimal.Cmp(o.Decimal) }
+
+// EqualQuantity reports exact equality between two Quantities (no epsilon).
+func (q Quantity) EqualQuantity(o Quantity) bool { return q.Decimal.Equal(o.Decimal) }
+
 func (q Quantity) Add(o Quantity) Quantity { return Quantity{q.Decimal.add(o.Decimal)} }
 func (q Quantity) Sub(o Quantity) Quantity { return Quantity{q.Decimal.sub(o.Decimal)} }
 func (q Quantity) Neg() Quantity           { return Quantity{Decimal{d: q.Decimal.d.Neg()}} }
@@ -173,6 +214,10 @@ func (q Quantity) Neg() Quantity           { return Quantity{Decimal{d: q.Decima
 // MulPrice computes quantity * price -> cash Amount (full precision, no
 // implicit rounding; caller quantizes at the posting boundary).
 func (q Quantity) MulPrice(p Price) Amount { return Amount{q.Decimal.mul(p.Decimal)} }
+
+// MulRatio scales a quantity by a dimensionless ratio/factor (e.g. a split
+// or stock-dividend factor), keeping full precision.
+func (q Quantity) MulRatio(r Ratio) Quantity { return Quantity{q.Decimal.mul(r.Decimal)} }
 
 // DivExact divides one quantity by another producing a dimensionless Ratio
 // (e.g. fractional fill ratio), at the given precision.
@@ -186,11 +231,49 @@ func (q Quantity) DivExact(o Quantity, places int32) (Ratio, error) {
 
 // ---- Price / FXRate ----
 
+// Cmp compares two Prices: -1, 0, 1. Exact decimal comparison, no epsilon.
+func (p Price) Cmp(o Price) int { return p.Decimal.Cmp(o.Decimal) }
+
 // Convert applies an FX rate to a price/amount pairing: price * rate ->
 // Price in the destination currency.
 func (p Price) Convert(rate FXRate) Price { return Price{p.Decimal.mul(rate.Decimal)} }
 
+// DivRatio divides a Price by a dimensionless ratio/factor (e.g. undoing a
+// split or stock-dividend factor on the per-share baseline), at the given
+// explicit precision.
+func (p Price) DivRatio(r Ratio, places int32) (Price, error) {
+	d, err := p.Decimal.divPrecise(r.Decimal, places)
+	if err != nil {
+		return Price{}, err
+	}
+	return Price{d}, nil
+}
+
 func (a Amount) Convert(rate FXRate) Amount { return Amount{a.Decimal.mul(rate.Decimal)} }
+
+// DivByQuantity divides an Amount by a Quantity to produce a per-unit
+// Price (e.g. weighted-average cost basis / total quantity), at the given
+// explicit precision. This is the one place cost-basis Amounts become a
+// Price; callers quantize with QuantizePrice only at the posting boundary.
+func (a Amount) DivByQuantity(q Quantity, places int32) (Price, error) {
+	d, err := a.Decimal.divPrecise(q.Decimal, places)
+	if err != nil {
+		return Price{}, err
+	}
+	return Price{d}, nil
+}
+
+// DivByPrice divides an Amount by a Price to produce a Quantity (e.g. a
+// reinvested cash amount at a per-share price -> reinvested share count),
+// at the given explicit precision. Callers quantize with QuantizeQuantity
+// only at the posting boundary.
+func (a Amount) DivByPrice(p Price, places int32) (Quantity, error) {
+	d, err := a.Decimal.divPrecise(p.Decimal, places)
+	if err != nil {
+		return Quantity{}, err
+	}
+	return Quantity{d}, nil
+}
 
 // ---- IndexValue / Ratio ----
 

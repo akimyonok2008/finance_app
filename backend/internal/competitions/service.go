@@ -179,7 +179,10 @@ func (s *Service) JoinCompetition(ctx context.Context, competitionID, userID str
 		if err != nil {
 			return nil, ErrJoinSnapshot
 		}
-		valueLocal := pos.Quantity * price.Price
+		// pos.Quantity.Float64() is a documented boundary conversion:
+		// internal/competitions is out of scope for this section's decimal
+		// migration.
+		valueLocal := pos.Quantity.Float64() * price.Price
 		valueBase, err := s.fx.Convert(ctx, valueLocal, price.Currency, fx.BaseCurrency)
 		if err != nil {
 			return nil, ErrJoinSnapshot
@@ -190,7 +193,7 @@ func (s *Service) JoinCompetition(ctx context.Context, competitionID, userID str
 			CompetitionEntryID:    entryID,
 			Symbol:                pos.Symbol,
 			AssetType:             pos.AssetType,
-			Quantity:              pos.Quantity,
+			Quantity:              pos.Quantity.Float64(),
 			Currency:              pos.Currency,
 			StartingPrice:         price.Price,
 			StartingPriceCurrency: price.Currency,

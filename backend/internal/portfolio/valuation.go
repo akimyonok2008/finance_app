@@ -103,10 +103,15 @@ func (v *Valuation) ValueOpen(positions []*Position) (float64, bool, error) {
 		if !ok {
 			return 0, false, ErrPriceProvider
 		}
-		if !finitePositive(pos.Quantity) {
+		// Exact decimal sign check: quantity must never be negative or zero
+		// here (no epsilon needed).
+		if pos.Quantity.Sign() <= 0 {
 			return 0, false, ErrInvalidQuantity
 		}
-		total += pos.Quantity * q.Price * rate
+		// pos.Quantity.Float64() is a documented boundary conversion: the
+		// running valuation total, quote price and FX rate stay float64
+		// (out of scope for this section).
+		total += pos.Quantity.Float64() * q.Price * rate
 	}
 	if !isFinite(total) || total < 0 {
 		return 0, false, ErrPriceProvider

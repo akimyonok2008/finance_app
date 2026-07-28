@@ -62,11 +62,11 @@ type Activity struct {
 	InstrumentID               string
 	AssetType                  string
 	Currency                   string
-	Quantity                   *float64
-	UnitPrice                  *float64
-	GrossAmount                float64
-	CostBasisAllocated         *float64
-	RealizedGainLossBase       *float64
+	Quantity                   *money.Quantity
+	UnitPrice                  *money.Price
+	GrossAmount                money.Amount
+	CostBasisAllocated         *money.Amount
+	RealizedGainLossBase       *money.Amount
 	RealizedGainLossPercentage *float64
 	OccurredAt                 time.Time
 	PortfolioVersion           int64
@@ -76,31 +76,31 @@ type Activity struct {
 	Status                     string
 	GroupID                    string
 	PositionEpisodeID          string
-	FeeAmount                  float64
-	NetAmount                  float64
+	FeeAmount                  money.Amount
+	NetAmount                  money.Amount
 }
 
 type ActivityView struct {
-	ID                         string       `json:"id"`
-	Type                       ActivityType `json:"activity_type"`
-	Symbol                     string       `json:"symbol,omitempty"`
-	InstrumentID               string       `json:"instrument_id,omitempty"`
-	AssetType                  string       `json:"asset_type,omitempty"`
-	Currency                   string       `json:"currency"`
-	Quantity                   *float64     `json:"quantity,omitempty"`
-	UnitPrice                  *float64     `json:"unit_price,omitempty"`
-	GrossAmount                float64      `json:"gross_amount"`
-	CostBasisAllocated         *float64     `json:"cost_basis_allocated,omitempty"`
-	RealizedGainLossBase       *float64     `json:"realized_gain_loss_base,omitempty"`
-	RealizedGainLossPercentage *float64     `json:"realized_gain_loss_percentage,omitempty"`
-	OccurredAt                 string       `json:"occurred_at"`
-	PortfolioVersion           int64        `json:"portfolio_version"`
-	Origin                     string       `json:"origin"`
-	Status                     string       `json:"status"`
-	GroupID                    string       `json:"group_id,omitempty"`
-	PositionEpisodeID          string       `json:"position_episode_id,omitempty"`
-	FeeAmount                  float64      `json:"fee_amount,omitempty"`
-	NetAmount                  float64      `json:"net_amount,omitempty"`
+	ID                         string          `json:"id"`
+	Type                       ActivityType    `json:"activity_type"`
+	Symbol                     string          `json:"symbol,omitempty"`
+	InstrumentID               string          `json:"instrument_id,omitempty"`
+	AssetType                  string          `json:"asset_type,omitempty"`
+	Currency                   string          `json:"currency"`
+	Quantity                   *money.Quantity `json:"quantity,omitempty"`
+	UnitPrice                  *money.Price    `json:"unit_price,omitempty"`
+	GrossAmount                money.Amount    `json:"gross_amount"`
+	CostBasisAllocated         *money.Amount   `json:"cost_basis_allocated,omitempty"`
+	RealizedGainLossBase       *money.Amount   `json:"realized_gain_loss_base,omitempty"`
+	RealizedGainLossPercentage *float64        `json:"realized_gain_loss_percentage,omitempty"`
+	OccurredAt                 string          `json:"occurred_at"`
+	PortfolioVersion           int64           `json:"portfolio_version"`
+	Origin                     string          `json:"origin"`
+	Status                     string          `json:"status"`
+	GroupID                    string          `json:"group_id,omitempty"`
+	PositionEpisodeID          string          `json:"position_episode_id,omitempty"`
+	FeeAmount                  money.Amount    `json:"fee_amount,omitempty"`
+	NetAmount                  money.Amount    `json:"net_amount,omitempty"`
 }
 
 const (
@@ -147,9 +147,9 @@ type Position struct {
 	Symbol                     string
 	InstrumentID               string
 	AssetType                  string
-	Quantity                   float64
-	AverageBuyPrice            float64 // locked baseline price (today's price at add)
-	Currency                   string  // quote currency of the locked baseline price
+	Quantity                   money.Quantity
+	AverageBuyPrice            money.Price // locked baseline price (today's price at add)
+	Currency                   string      // quote currency of the locked baseline price
 	Status                     string
 	ClosedAt                   *time.Time
 	ClosePrice                 *float64
@@ -166,7 +166,7 @@ type Position struct {
 type PositionInput struct {
 	Symbol    string
 	AssetType string
-	Quantity  float64
+	Quantity  money.Quantity
 }
 
 type CashFlowInput struct {
@@ -233,9 +233,9 @@ type BuyInput struct {
 	MIC             string
 	IdentityQuality string
 	AssetType       string
-	Quantity        float64
-	ExecutionPrice  float64
-	Fee             float64
+	Quantity        money.Quantity
+	ExecutionPrice  money.Price
+	Fee             money.Amount
 	EffectiveAt     *time.Time
 }
 
@@ -269,9 +269,9 @@ type BuyPreview struct {
 type SellInput struct {
 	PositionID     string
 	Symbol         string
-	Quantity       float64
-	ExecutionPrice float64
-	Fee            float64
+	Quantity       money.Quantity
+	ExecutionPrice money.Price
+	Fee            money.Amount
 	EffectiveAt    *time.Time
 }
 
