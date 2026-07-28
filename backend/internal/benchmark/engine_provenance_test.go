@@ -3,8 +3,11 @@ package benchmark
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // fakeSeriesProvider returns a deterministic adjusted series per symbol and lets
@@ -36,7 +39,12 @@ func (f *fakeSeriesProvider) GetAdjustedCloseSeries(_ context.Context, symbol st
 		if len(dates) > 1 {
 			t = float64(i) / float64(len(dates)-1)
 		}
-		out = append(out, PricePoint{Date: toDateKey(d), AdjustedClose: 100 * (1 + (ret/100)*t)})
+		price := 100 * (1 + (ret/100)*t)
+		adjustedClose, err := money.ParsePrice(strconv.FormatFloat(price, 'f', -1, 64))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PricePoint{Date: toDateKey(d), AdjustedClose: adjustedClose})
 	}
 	return out, nil
 }
@@ -79,7 +87,7 @@ func TestCalculateReturn_ReturnsProvenance(t *testing.T) {
 	if res.Fingerprint == "" {
 		t.Fatal("fingerprint must be set")
 	}
-	if res.ReturnPercentage == 0 {
+	if res.ReturnPercentage.IsZero() {
 		t.Fatal("expected a non-zero benchmark return")
 	}
 }
@@ -146,9 +154,9 @@ func TestCircularRecipeReferenceRejected(t *testing.T) {
 	// A -> B -> A cycle must be detected, not recursed into forever.
 	store, err := NewVersionedRecipeStore([]BenchmarkRecipeVersion{
 		{RecipeID: "A", VersionID: "A_v1", PubliclyKnownAt: epoch, EffectiveFrom: epoch,
-			Components: []AssetAllocation{{RecipeRef: "B", Weight: 1}}, SourceType: "static_model"},
+			Components: []AssetAllocation{{RecipeRef: "B", Weight: money.MustWeight("1")}}, SourceType: "static_model"},
 		{RecipeID: "B", VersionID: "B_v1", PubliclyKnownAt: epoch, EffectiveFrom: epoch,
-			Components: []AssetAllocation{{RecipeRef: "A", Weight: 1}}, SourceType: "static_model"},
+			Components: []AssetAllocation{{RecipeRef: "A", Weight: money.MustWeight("1")}}, SourceType: "static_model"},
 	})
 	if err != nil {
 		t.Fatalf("store: %v", err)
@@ -165,7 +173,7 @@ func TestCircularRecipeReferenceRejected(t *testing.T) {
 func TestDuplicateSymbolsMerged(t *testing.T) {
 	store, err := NewVersionedRecipeStore([]BenchmarkRecipeVersion{
 		{RecipeID: "DUP", VersionID: "DUP_v1", PubliclyKnownAt: epoch, EffectiveFrom: epoch,
-			Components: []AssetAllocation{{Symbol: "SPY", Weight: 0.5}, {Symbol: "SPY", Weight: 0.5}},
+			Components: []AssetAllocation{{Symbol: "SPY", Weight: money.MustWeight("0.5")}, {Symbol: "SPY", Weight: money.MustWeight("0.5")}},
 			SourceType: "static_model"},
 	})
 	if err != nil {

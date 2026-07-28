@@ -5,6 +5,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // dateLayout is the canonical YYYY-MM-DD key used across the engine.
@@ -40,35 +42,45 @@ func SubtractPeriod(end time.Time, period PeriodCode) (time.Time, error) {
 // CalculateIndexReturnPct returns the total percentage return of an index
 // series (last/first - 1) * 100, rounded to 4 decimals. It sorts defensively by
 // date and requires at least two points.
-func CalculateIndexReturnPct(points []IndexPoint) (float64, error) {
+func CalculateIndexReturnPct(points []IndexPoint) (money.Ratio, error) {
 	if len(points) < 2 {
-		return 0, fmt.Errorf("need at least two index points, got %d", len(points))
+		return money.Ratio{}, fmt.Errorf("need at least two index points, got %d", len(points))
 	}
 	sorted := append([]IndexPoint(nil), points...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Date < sorted[j].Date })
 
 	first := sorted[0]
 	last := sorted[len(sorted)-1]
-	if first.Index == 0 {
-		return 0, fmt.Errorf("first index value is zero")
+	if first.Index.IsZero() {
+		return money.Ratio{}, fmt.Errorf("first index value is zero")
 	}
-	return round((last.Index/first.Index-1)*100, 4), nil
+	ratio, err := last.Index.DivExact(first.Index, intermediatePrecision)
+	if err != nil {
+		return money.Ratio{}, err
+	}
+	return ratio.Sub(money.MustRatio("1")).Mul(money.MustRatio("100")), nil
 }
 
 // validateWeights asserts a recipe's components form a valid, fully-invested
 // allocation: weights sum to 1, each is positive, and each leg names exactly one
 // of symbol or recipeRef.
 func validateWeights(components []AssetAllocation) error {
-	total := 0.0
+	total := money.ZeroWeight()
 	for _, c := range components {
-		total += c.Weight
+		total = total.Add(c.Weight)
 	}
-	if math.Abs(total-1) >= 0.0001 {
-		return fmt.Errorf("recipe weights must sum to 1, got %.6f", total)
+	tolerance := money.MustWeight("0.0001")
+	one := money.MustWeight("1")
+	deviation := total.Sub(one)
+	if deviation.Sign() < 0 {
+		deviation = money.ZeroWeight().Sub(deviation)
+	}
+	if deviation.Cmp(tolerance.Decimal) >= 0 {
+		return fmt.Errorf("recipe weights must sum to 1, got %s", total.String())
 	}
 	for _, c := range components {
-		if c.Weight <= 0 {
-			return fmt.Errorf("component weight must be positive, got %.6f", c.Weight)
+		if c.Weight.Sign() <= 0 {
+			return fmt.Errorf("component weight must be positive, got %s", c.Weight.String())
 		}
 		hasSymbol := c.Symbol != ""
 		hasRecipe := c.RecipeRef != ""

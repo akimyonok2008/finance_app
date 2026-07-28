@@ -2,7 +2,10 @@ package benchmark
 
 import (
 	"context"
+	"strconv"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // MockHistoricalPriceProvider synthesizes a smooth adjusted-close series from a
@@ -29,16 +32,30 @@ func (m *MockHistoricalPriceProvider) GetAdjustedCloseSeries(_ context.Context, 
 	dates := dailyDates(start, end)
 	totalReturnPct := m.totalReturnsPct[symbol]
 
-	const startPrice = 100.0
-	endPrice := startPrice * (1 + totalReturnPct/100)
+	// totalReturnsPct is a fixed, code-defined demo/seed table (never
+	// persisted or derived from authoritative state), so parsing it through
+	// its exact decimal string representation here is sufficient to keep the
+	// synthetic price path itself free of float64 arithmetic.
+	totalReturnRatio, err := money.ParseRatio(strconv.FormatFloat(totalReturnPct/100, 'f', -1, 64))
+	if err != nil {
+		return nil, err
+	}
+	startPrice := money.MustPrice("100")
+	endPrice := startPrice.MulRatio(money.MustRatio("1").Add(totalReturnRatio))
+	delta := endPrice.Sub(startPrice)
 
 	out := make([]PricePoint, 0, len(dates))
+	n := len(dates)
 	for i, d := range dates {
-		t := 1.0
-		if len(dates) > 1 {
-			t = float64(i) / float64(len(dates)-1)
+		t := money.MustRatio("1")
+		if n > 1 {
+			var err error
+			t, err = money.MustRatio(strconv.Itoa(i)).DivExact(money.MustRatio(strconv.Itoa(n-1)), intermediatePrecision)
+			if err != nil {
+				return nil, err
+			}
 		}
-		price := startPrice + (endPrice-startPrice)*t
+		price := money.QuantizePrice(startPrice.Add(delta.MulRatio(t)))
 		out = append(out, PricePoint{Date: toDateKey(d), AdjustedClose: price})
 	}
 	return out, nil

@@ -3,6 +3,8 @@ package benchmark
 import (
 	"context"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // SnapshotRecipeResolver is the legacy single-snapshot resolver for dynamic
@@ -47,16 +49,16 @@ func DefaultRecipeSnapshots() map[string]BenchmarkRecipe {
 			"Berkshire 13F Equity Basket (legacy approximate)",
 			"Legacy approximate Berkshire basket; superseded by versioned SEC 13F baskets.",
 			[]AssetAllocation{
-				{Symbol: "AAPL", Weight: 26},
-				{Symbol: "AXP", Weight: 16},
-				{Symbol: "BAC", Weight: 11},
-				{Symbol: "KO", Weight: 10},
-				{Symbol: "CVX", Weight: 6},
-				{Symbol: "OXY", Weight: 5},
-				{Symbol: "MCO", Weight: 4},
-				{Symbol: "KHC", Weight: 4},
-				{Symbol: "CB", Weight: 3},
-				{Symbol: "DVA", Weight: 2},
+				{Symbol: "AAPL", Weight: money.MustWeight("26")},
+				{Symbol: "AXP", Weight: money.MustWeight("16")},
+				{Symbol: "BAC", Weight: money.MustWeight("11")},
+				{Symbol: "KO", Weight: money.MustWeight("10")},
+				{Symbol: "CVX", Weight: money.MustWeight("6")},
+				{Symbol: "OXY", Weight: money.MustWeight("5")},
+				{Symbol: "MCO", Weight: money.MustWeight("4")},
+				{Symbol: "KHC", Weight: money.MustWeight("4")},
+				{Symbol: "CB", Weight: money.MustWeight("3")},
+				{Symbol: "DVA", Weight: money.MustWeight("2")},
 			},
 		),
 	}
@@ -65,22 +67,26 @@ func DefaultRecipeSnapshots() map[string]BenchmarkRecipe {
 // normalizedRecipe builds a benchmark recipe whose component weights are
 // rescaled to sum to exactly 1, so the engine's weight validation always passes.
 func normalizedRecipe(id, name, description string, raw []AssetAllocation) BenchmarkRecipe {
-	total := 0.0
+	total := money.ZeroWeight()
 	for _, c := range raw {
-		if c.Weight > 0 {
-			total += c.Weight
+		if c.Weight.Sign() > 0 {
+			total = total.Add(c.Weight)
 		}
 	}
 	components := make([]AssetAllocation, 0, len(raw))
-	if total > 0 {
+	if total.Sign() > 0 {
 		for _, c := range raw {
-			if c.Weight <= 0 {
+			if c.Weight.Sign() <= 0 {
+				continue
+			}
+			normalized, err := c.Weight.DivExact(total, intermediatePrecision)
+			if err != nil {
 				continue
 			}
 			components = append(components, AssetAllocation{
 				Symbol:    c.Symbol,
 				RecipeRef: c.RecipeRef,
-				Weight:    c.Weight / total,
+				Weight:    normalized,
 			})
 		}
 	}

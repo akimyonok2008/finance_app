@@ -6,10 +6,18 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
+
+// intermediatePrecision is the explicit division precision used for
+// intermediate (non-persisted) ratio math in the return-construction loop —
+// comfortably above the >=18dp policy floor for NAV/index values so daily
+// compounding across a long window does not accumulate visible rounding
+// error before the final quantization at the persistence boundary.
+const intermediatePrecision = int32(30)
 
 // CalculateReturn evaluates a benchmark over [start, end] and returns the number
 // together with full provenance: the recipe version used (selected by
@@ -34,7 +42,7 @@ func (s *BenchmarkConstructionService) CalculateReturn(ctx context.Context, reci
 	if err != nil {
 		return BenchmarkReturnResult{}, err
 	}
-	flattened, err := s.flattenVersion(recipeID, start, 1, map[string]bool{})
+	flattened, err := s.flattenVersion(recipeID, start, money.MustWeight("1"), map[string]bool{})
 	if err != nil {
 		return BenchmarkReturnResult{}, err
 	}
@@ -103,30 +111,43 @@ func (s *BenchmarkConstructionService) CalculateReturn(ctx context.Context, reci
 	if len(alignedDates) < 2 {
 		return BenchmarkReturnResult{}, fmt.Errorf("%w: not enough common dates", ErrIncompleteSeries)
 	}
-	priceMaps := make(map[string]map[string]float64, len(pricesBySymbol))
+	priceMaps := make(map[string]map[string]money.Price, len(pricesBySymbol))
 	for sym, series := range pricesBySymbol {
 		priceMaps[sym] = toPriceMap(series)
 	}
-	index := 100.0
+	one := money.MustRatio("1")
+	index := money.MustIndexValue("100")
 	for i := 1; i < len(alignedDates); i++ {
 		prevDate, currDate := alignedDates[i-1], alignedDates[i]
-		weightedDailyReturn := 0.0
+		weightedDailyReturn := money.ZeroRatio()
 		for _, component := range flattened {
 			pm := priceMaps[component.Symbol]
 			prev, okPrev := pm[prevDate]
 			curr, okCurr := pm[currDate]
-			if !okPrev || !okCurr || prev == 0 {
+			if !okPrev || !okCurr || prev.IsZero() {
 				return BenchmarkReturnResult{}, fmt.Errorf("%w: missing aligned price for %s", ErrIncompleteSeries, component.Symbol)
 			}
-			weightedDailyReturn += component.Weight * (curr/prev - 1)
+			// componentReturn = curr/prev - 1, computed exactly at explicit
+			// precision (no float64 intermediate).
+			ratio, err := curr.DivExact(prev, intermediatePrecision)
+			if err != nil {
+				return BenchmarkReturnResult{}, fmt.Errorf("%w: %s", ErrIncompleteSeries, component.Symbol)
+			}
+			componentReturn := ratio.Sub(one)
+			weightedDailyReturn = weightedDailyReturn.Add(component.Weight.MulRatio(componentReturn))
 		}
-		index *= 1 + weightedDailyReturn
+		index = index.MulRatio(one.Add(weightedDailyReturn))
 	}
+
+	// Quantize the NAV/index only at this persistence boundary (>=18dp per
+	// policy); the return percentage derives exactly from the quantized index
+	// against the 100 base, so it is never itself rounded a second time.
+	index = money.QuantizeIndex(index)
 
 	effStart, _ := time.Parse(dateLayout, alignedDates[0])
 	effEnd, _ := time.Parse(dateLayout, alignedDates[len(alignedDates)-1])
 	result := BenchmarkReturnResult{
-		ReturnPercentage: round(index-100, 4),
+		ReturnPercentage: index.Sub(money.MustIndexValue("100")),
 		EffectiveStart:   effStart,
 		EffectiveEnd:     effEnd,
 		RecipeVersion:    rootVersion.Metadata(),
@@ -139,7 +160,7 @@ func (s *BenchmarkConstructionService) CalculateReturn(ctx context.Context, reci
 // flattenVersion selects the version valid at start for recipeID and expands
 // nested recipeRef legs into flat symbol legs, scaling weights by the parent and
 // merging duplicate symbols. visited detects circular references.
-func (s *BenchmarkConstructionService) flattenVersion(recipeID string, start time.Time, parentWeight float64, visited map[string]bool) ([]AssetAllocation, error) {
+func (s *BenchmarkConstructionService) flattenVersion(recipeID string, start time.Time, parentWeight money.Weight, visited map[string]bool) ([]AssetAllocation, error) {
 	if visited[recipeID] {
 		return nil, fmt.Errorf("%w: %s", ErrCircularRecipe, recipeID)
 	}
@@ -152,7 +173,7 @@ func (s *BenchmarkConstructionService) flattenVersion(recipeID string, start tim
 	}
 	var result []AssetAllocation
 	for _, component := range version.Components {
-		effectiveWeight := parentWeight * component.Weight
+		effectiveWeight := parentWeight.Mul(component.Weight)
 		switch {
 		case component.Symbol != "":
 			result = append(result, AssetAllocation{Symbol: component.Symbol, Weight: effectiveWeight})
@@ -183,7 +204,10 @@ func computeFingerprint(r BenchmarkReturnResult, flattened []AssetAllocation, se
 	legs := append([]AssetAllocation(nil), flattened...)
 	sort.Slice(legs, func(i, j int) bool { return legs[i].Symbol < legs[j].Symbol })
 	for _, leg := range legs {
-		b.WriteString(leg.Symbol + "=" + strconv.FormatFloat(round(leg.Weight, 8), 'f', 8, 64) + "\n")
+		// leg.Weight.String() is the canonical decimal form (money.Decimal):
+		// no exponent notation, no leading/trailing zero noise, so
+		// mathematically equal weights always fingerprint identically.
+		b.WriteString(leg.Symbol + "=" + leg.Weight.String() + "\n")
 		ser := series[leg.Symbol]
 		b.WriteString(string(ser.Metadata.PriceType) + "|" + ser.Metadata.Provider + "|" + seriesPointsHash(ser.Points) + "\n")
 	}
@@ -196,10 +220,10 @@ func seriesPointsHash(points []PricePoint) string {
 	var b strings.Builder
 	for _, p := range points {
 		value := p.AdjustedClose
-		if value == 0 {
+		if value.IsZero() {
 			value = p.RawClose
 		}
-		b.WriteString(p.Date + ":" + strconv.FormatFloat(round(value, 8), 'f', 8, 64) + ";")
+		b.WriteString(p.Date + ":" + value.String() + ";")
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
