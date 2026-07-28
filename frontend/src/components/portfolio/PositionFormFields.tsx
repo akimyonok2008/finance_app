@@ -100,10 +100,8 @@ export function PositionFormFields({
           <Input
             id={id("quantity")}
             name="quantity"
-            type="number"
+            type="text"
             inputMode="decimal"
-            step="any"
-            min="0"
             placeholder="10"
             value={state.quantity}
             disabled={disabled}

@@ -16,6 +16,7 @@ import { AssetTypeBadge } from "@/components/portfolio/AssetTypeBadge";
 import { useUpdatePosition } from "@/hooks/usePositions";
 import type { Position } from "@/types/portfolio";
 import { formatMoney } from "@/utils/formatMoney";
+import { compareDecimal, isValidDecimalString } from "@/utils/decimal";
 
 type Props = {
   position: Position | null;
@@ -48,19 +49,19 @@ function EditPositionForm({
     e.preventDefault();
     setBackendError(null);
 
-    const value = Number(quantity);
-    if (quantity.trim() === "" || Number.isNaN(value)) {
-      setError("Enter a quantity.");
+    const trimmed = quantity.trim();
+    if (trimmed === "" || !isValidDecimalString(trimmed)) {
+      setError("Enter a valid quantity.");
       return;
     }
-    if (value <= 0) {
+    if (compareDecimal(trimmed, "0") <= 0) {
       setError("Quantity must be greater than 0.");
       return;
     }
     setError(null);
 
     updatePosition.mutate(
-      { id: position.id, input: { quantity: value } },
+      { id: position.id, input: { quantity: trimmed } },
       {
         onSuccess: () => onClose(),
         onError: (err: Error) => setBackendError(err.message),
@@ -103,10 +104,8 @@ function EditPositionForm({
         <Input
           id="edit-quantity"
           name="quantity"
-          type="number"
+          type="text"
           inputMode="decimal"
-          step="any"
-          min="0"
           value={quantity}
           disabled={pending}
           aria-invalid={!!error}

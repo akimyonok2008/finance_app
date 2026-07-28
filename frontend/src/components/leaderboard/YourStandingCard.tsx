@@ -4,6 +4,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { LeaderboardStanding } from "@/types/leaderboard";
 import { cn } from "@/utils/cn";
 import { formatPercent } from "@/utils/formatPercent";
+import { compareDecimal, decimalToChartNumber } from "@/utils/decimal";
 
 type YourStandingCardProps = {
   standing: LeaderboardStanding | undefined;
@@ -23,8 +24,9 @@ function topShare(standing: LeaderboardStanding): string {
   return `${((standing.rank / standing.participant_count) * 100).toFixed(1)}%`;
 }
 
-function gapLabel(value: number): string {
-  return `${Math.max(value, 0).toFixed(2)}%`;
+function gapLabel(value: string): string {
+  const n = decimalToChartNumber(value);
+  return `${Math.max(n ?? 0, 0).toFixed(2)}%`;
 }
 
 export function YourStandingCard({
@@ -111,11 +113,11 @@ export function YourStandingCard({
           </p>
           <div className="pb-1 text-right text-xs text-zinc-500">
             <p>
-              Index <span className="font-mono text-zinc-300">{standing.ranked_index.toFixed(2)}</span>
+              Index <span className="font-mono text-zinc-300">{decimalToChartNumber(standing.ranked_index)?.toFixed(2) ?? "—"}</span>
             </p>
             <p className="mt-1">
               Return{" "}
-              <span className={cn("font-mono", standing.ranked_return_percentage >= 0 ? "text-emerald-300" : "text-rose-300")}>
+              <span className={cn("font-mono", compareDecimal(standing.ranked_return_percentage, "0") >= 0 ? "text-emerald-300" : "text-rose-300")}>
                 {formatPercent(standing.ranked_return_percentage)}
               </span>
             </p>

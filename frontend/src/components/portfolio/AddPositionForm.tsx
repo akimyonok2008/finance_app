@@ -21,6 +21,7 @@ import { useCreatePosition, useCashBalances } from "@/hooks/usePositions";
 import { useQuotes } from "@/hooks/useQuotes";
 import { cn } from "@/utils/cn";
 import { formatMoney } from "@/utils/formatMoney";
+import { decimalToChartNumber } from "@/utils/decimal";
 
 export type AddPositionFormProps = {
   /** Called after a successful add (e.g. to close the mobile drawer). */
@@ -65,10 +66,15 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
   const feeValue =
     state.fee.trim() !== "" && Number.isFinite(enteredFee) && enteredFee >= 0 ? enteredFee : 0;
 
+  // This is a pre-submit UI estimate only — the backend recomputes the
+  // authoritative buy preview/result. Converting the decimal-string cash
+  // balance to a number here is the sanctioned display-boundary use.
   const grossCost = executionPrice !== null ? quantityValue * executionPrice : null;
   const totalCost = grossCost !== null ? grossCost + feeValue : null;
   const availableCash = quote
-    ? cash.data?.cash_balances.find((b) => b.currency === quote.currency)?.amount ?? 0
+    ? decimalToChartNumber(
+        cash.data?.cash_balances.find((b) => b.currency === quote.currency)?.amount,
+      ) ?? 0
     : null;
   // Automatic funding is the default: a shortfall is funded, not rejected, so it
   // is surfaced as information and never blocks the submit button.

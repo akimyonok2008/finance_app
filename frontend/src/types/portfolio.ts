@@ -1,3 +1,5 @@
+import type { DecimalString } from "@/utils/decimal";
+
 export type AssetType = "stock" | "etf" | "crypto";
 
 /** Supported demo/mock currencies (backend rejects others with 400). */
@@ -12,8 +14,8 @@ export type Position = {
   id: string;
   symbol: string;
   asset_type: AssetType;
-  quantity: number;
-  baseline_price: number;
+  quantity: DecimalString;
+  baseline_price: DecimalString;
   currency: string;
   status?: "open" | "closed";
   position_episode_id: string;
@@ -24,15 +26,16 @@ export type ClosedPosition = {
   id: string;
   symbol: string;
   asset_type: AssetType;
-  quantity: number;
-  baseline_price: number;
+  quantity: DecimalString;
+  baseline_price: DecimalString;
   baseline_currency: string;
-  close_price: number;
+  close_price: DecimalString;
   close_price_currency: string;
   closed_at: string;
-  realized_gain_loss_base: number;
+  realized_gain_loss_base: DecimalString;
+  /** presentation-only float64, not part of the money contract */
   realized_gain_loss_percentage: number;
-  closed_cost_basis_base?: number;
+  closed_cost_basis_base?: DecimalString;
   base_currency: string;
 };
 
@@ -46,16 +49,17 @@ export type PositionSummary = {
   id?: string;
   symbol: string;
   asset_type: AssetType;
-  quantity: number;
-  baseline_price: number;
-  current_price?: number;
+  quantity: DecimalString;
+  baseline_price: DecimalString;
+  current_price?: DecimalString;
   current_price_currency?: string;
-  cost_basis?: number;
-  current_value?: number;
-  cost_basis_base?: number;
-  current_value_base?: number;
-  gain_loss?: number;
-  gain_loss_base?: number;
+  cost_basis?: DecimalString;
+  current_value?: DecimalString;
+  cost_basis_base?: DecimalString;
+  current_value_base?: DecimalString;
+  gain_loss?: DecimalString;
+  gain_loss_base?: DecimalString;
+  /** presentation-only float64, not part of the money contract */
   gain_loss_percentage?: number;
   currency: string;
   base_currency?: string;
@@ -156,13 +160,15 @@ export type PortfolioSummary = {
 
 export type CashBalance = {
   currency: CurrencyCode;
-  amount: number;
-  value_base: number;
+  amount: DecimalString;
+  value_base: DecimalString;
+  /** presentation-only float64, not part of the money contract */
   weight_percentage: number;
 };
 
 export type CashResponse = {
   cash_balances: CashBalance[];
+  /** still a float64 aggregate on PortfolioSummary; kept as number here too for symmetry with the summary DTO */
   total_cash_value_base: number;
   base_currency: string;
 };
@@ -179,11 +185,19 @@ export type PortfolioActivity = {
   symbol?: string;
   asset_type?: AssetType;
   currency: CurrencyCode;
-  quantity?: number;
-  unit_price?: number;
-  gross_amount: number;
-  cost_basis_allocated?: number;
-  realized_gain_loss_base?: number;
+  /**
+   * Verified against internal/portfolio/model.go `ActivityView`: Quantity,
+   * UnitPrice, GrossAmount, CostBasisAllocated, RealizedGainLossBase,
+   * FeeAmount, NetAmount are all `money.*` types (decimal strings) on the
+   * wire. Only RealizedGainLossPercentage stays float64. This struct is not
+   * explicitly listed in the handoff summary but was verified directly.
+   */
+  quantity?: DecimalString;
+  unit_price?: DecimalString;
+  gross_amount: DecimalString;
+  cost_basis_allocated?: DecimalString;
+  realized_gain_loss_base?: DecimalString;
+  /** presentation-only float64, not part of the money contract */
   realized_gain_loss_percentage?: number;
   occurred_at: string;
   portfolio_version: number;
@@ -191,37 +205,38 @@ export type PortfolioActivity = {
   status: "completed" | "pending" | "processing" | "corrected" | "reversed" | "failed";
   group_id?: string;
   position_episode_id?: string;
-  fee_amount?: number;
-  net_amount?: number;
+  fee_amount?: DecimalString;
+  net_amount?: DecimalString;
 };
 
 export type ActivityMutationResponse = {
   position?: Position;
   activity?: PortfolioActivity;
   portfolio_version: number;
-  ranked_index: number;
+  /** verified: handler.go declares this `money.IndexValue` (decimal string). */
+  ranked_index: DecimalString;
   ranking_status: "active" | "paused";
 };
 
-export type CashFlowInput = { currency: CurrencyCode; amount: number };
+export type CashFlowInput = { currency: CurrencyCode; amount: DecimalString };
 export type BuyPreview = {
   symbol: string;
   asset_type: AssetType;
-  quantity: number;
-  execution_price: number;
+  quantity: DecimalString;
+  execution_price: DecimalString;
   execution_price_source: PriceSource;
-  fee: number;
+  fee: DecimalString;
   fee_source: FeeSource;
-  gross_purchase_amount: number;
-  total_cash_required: number;
-  available_cash: number;
-  cash_used: number;
-  automatic_funding_amount: number;
-  remaining_cash: number;
+  gross_purchase_amount: DecimalString;
+  total_cash_required: DecimalString;
+  available_cash: DecimalString;
+  cash_used: DecimalString;
+  automatic_funding_amount: DecimalString;
+  remaining_cash: DecimalString;
   creates_new_episode: boolean;
   position_episode_id?: string;
-  resulting_quantity: number;
-  resulting_average_cost: number;
+  resulting_quantity: DecimalString;
+  resulting_average_cost: DecimalString;
   effective_at: string;
   currency: string;
   base_currency: string;
@@ -230,9 +245,9 @@ export type BuyPreview = {
 
 export type SellPositionInput = {
   position_id: string;
-  quantity: number;
-  execution_price?: number;
-  fee?: number;
+  quantity: DecimalString;
+  execution_price?: DecimalString;
+  fee?: DecimalString;
   effective_at?: string;
 };
 
@@ -240,19 +255,19 @@ export type SellPreview = {
   position_id: string;
   position_episode_id: string;
   symbol: string;
-  available_quantity: number;
-  sold_quantity: number;
-  remaining_quantity: number;
-  execution_price: number;
+  available_quantity: DecimalString;
+  sold_quantity: DecimalString;
+  remaining_quantity: DecimalString;
+  execution_price: DecimalString;
   execution_price_source: PriceSource;
   fee_source: FeeSource;
   effective_at: string;
   calculation_status: string;
-  gross_proceeds: number;
-  fee: number;
-  net_proceeds: number;
-  allocated_basis: number;
-  estimated_realized_pnl: number;
+  gross_proceeds: DecimalString;
+  fee: DecimalString;
+  net_proceeds: DecimalString;
+  allocated_basis: DecimalString;
+  estimated_realized_pnl: DecimalString;
   will_close_position: boolean;
   proceeds_currency: string;
   base_currency: string;
@@ -303,11 +318,11 @@ export type PortfolioArchives = {
 export type CreatePositionInput = {
   symbol: string;
   asset_type: AssetType;
-  quantity: number;
+  quantity: DecimalString;
   /** Real per-unit price paid. Omitted → estimated from the latest quote. */
-  execution_price?: number;
+  execution_price?: DecimalString;
   /** Transaction fee actually charged. Omitted → zero. */
-  fee?: number;
+  fee?: DecimalString;
   /** When the trade really happened (RFC3339). Omitted → now. */
   effective_at?: string;
 };
@@ -318,7 +333,7 @@ export type FeeSource = "user_recorded" | "default_zero" | "legacy_unknown";
 
 /** Only the quantity is editable; the locked baseline price is immutable. */
 export type UpdatePositionInput = {
-  quantity: number;
+  quantity: DecimalString;
 };
 
 export const PORTFOLIO_ARCHIVE_TIMEFRAMES: PortfolioArchiveTimeframe[] = [

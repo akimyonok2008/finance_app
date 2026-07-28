@@ -25,6 +25,7 @@ import type { DashboardPortfolioSummary } from "@/types/dashboard";
 import { formatMoney } from "@/utils/formatMoney";
 import { formatPercent } from "@/utils/formatPercent";
 import { cn } from "@/utils/cn";
+import { decimalToChartNumber } from "@/utils/decimal";
 
 const PALETTE = {
   positive: {
@@ -91,13 +92,19 @@ export function PerformanceChartCard({
   const tone = getPerformanceTone(rankedReturn);
   const palette = PALETTE[tone];
   const history = usePerformanceHistory("1M");
-  const series = (history.data?.points ?? []).map((point) => ({
-    label: new Date(point.captured_at).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    }),
-    index: point.ranked_index,
-  }));
+  // ranked_index is an authoritative decimal string; decimalToChartNumber is
+  // the only sanctioned conversion to a JS number, applied here at the chart
+  // boundary. Points that fail to convert (non-finite) are dropped instead of
+  // rendering a corrupted/zeroed data point.
+  const series = (history.data?.points ?? [])
+    .map((point) => ({
+      label: new Date(point.captured_at).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      }),
+      index: decimalToChartNumber(point.ranked_index),
+    }))
+    .filter((point): point is { label: string; index: number } => point.index !== null);
   const currency = summary?.base_currency ?? "USD";
   const isEmpty = !summary || summary.valuation.current_portfolio_value_base === 0;
   const holdingsPnl = summary?.open_holdings.unrealized_pnl_base;

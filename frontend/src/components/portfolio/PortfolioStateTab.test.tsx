@@ -18,7 +18,7 @@ const state = {
         positions: Array<{
           symbol: string;
           asset_type: string;
-          current_value_base: number;
+          current_value_base: string;
         }>;
       }
     | undefined,
@@ -82,13 +82,13 @@ function closedPosition(id: string, symbol: string): ClosedPosition {
     id,
     symbol,
     asset_type: "stock",
-    quantity: 5,
-    baseline_price: 100,
+    quantity: "5",
+    baseline_price: "100",
     baseline_currency: "USD",
-    close_price: 120,
+    close_price: "120",
     close_price_currency: "USD",
     closed_at: "2026-05-01T00:00:00Z",
-    realized_gain_loss_base: 100,
+    realized_gain_loss_base: "100",
     realized_gain_loss_percentage: 20,
     base_currency: "USD",
   };
@@ -121,8 +121,8 @@ beforeEach(() => {
   state.summary = {
     base_currency: "USD",
     positions: [
-      { symbol: "AAPL", asset_type: "stock", current_value_base: 7500 },
-      { symbol: "MSFT", asset_type: "stock", current_value_base: 2500 },
+      { symbol: "AAPL", asset_type: "stock", current_value_base: "7500" },
+      { symbol: "MSFT", asset_type: "stock", current_value_base: "2500" },
     ],
   };
 });

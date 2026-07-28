@@ -10,6 +10,7 @@ import {
 } from "@/hooks/usePositions";
 import { CURRENCIES, type CurrencyCode } from "@/types/portfolio";
 import { formatMoney } from "@/utils/formatMoney";
+import { compareDecimal, formatQuantity, isValidDecimalString } from "@/utils/decimal";
 
 export function CashActivityPanel() {
   const cash = useCashBalances();
@@ -19,13 +20,17 @@ export function CashActivityPanel() {
   const [currency, setCurrency] = useState<CurrencyCode>("USD");
   const [amount, setAmount] = useState("");
 
-  const numericAmount = Number(amount);
+  const trimmedAmount = amount.trim();
+  const validAmount =
+    trimmedAmount !== "" &&
+    isValidDecimalString(trimmedAmount) &&
+    compareDecimal(trimmedAmount, "0") > 0;
   const pending = deposit.isPending || withdrawal.isPending;
   const submit = (kind: "deposit" | "withdrawal") => {
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) return;
+    if (!validAmount) return;
     const mutation = kind === "deposit" ? deposit : withdrawal;
     mutation.mutate(
-      { currency, amount: numericAmount },
+      { currency, amount: trimmedAmount },
       { onSuccess: () => setAmount("") },
     );
   };
@@ -48,7 +53,7 @@ export function CashActivityPanel() {
             <div key={balance.currency} className="flex items-center justify-between rounded-lg bg-zinc-950/45 px-3 py-2 text-sm">
               <span className="font-semibold text-zinc-200">{balance.currency}</span>
               <span className="text-zinc-400">
-                {balance.amount.toLocaleString()} · {balance.weight_percentage.toFixed(1)}%
+                {formatQuantity(balance.amount)} · {balance.weight_percentage.toFixed(1)}%
               </span>
             </div>
           ))}
@@ -67,9 +72,8 @@ export function CashActivityPanel() {
           </select>
           <input
             aria-label="Cash amount"
-            type="number"
-            min="0"
-            step="any"
+            type="text"
+            inputMode="decimal"
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
             placeholder="Amount"
@@ -77,10 +81,10 @@ export function CashActivityPanel() {
           />
         </div>
         <div className="mt-2 grid grid-cols-2 gap-2">
-          <Button disabled={pending || numericAmount <= 0} onClick={() => submit("deposit")}>
+          <Button disabled={pending || !validAmount} onClick={() => submit("deposit")}>
             Record deposit
           </Button>
-          <Button disabled={pending || numericAmount <= 0} variant="outline" onClick={() => submit("withdrawal")}>
+          <Button disabled={pending || !validAmount} variant="outline" onClick={() => submit("withdrawal")}>
             Record withdrawal
           </Button>
         </div>

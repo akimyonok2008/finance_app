@@ -1,4 +1,5 @@
 import type { PortfolioArchives } from "@/types/portfolio";
+import type { DecimalString } from "@/utils/decimal";
 
 /** Timeframes accepted by the canonical ranked-history endpoint. */
 export type PerformanceTimeframe = "1W" | "1M" | "3M" | "6M" | "1Y" | "ALL";
@@ -18,8 +19,8 @@ export const PERFORMANCE_TIMEFRAMES: PerformanceTimeframe[] = [
  */
 export type RankedHistoryPoint = {
   captured_at: string;
-  ranked_index: number;
-  /** `index_t / starting_index - 1`, in percent, computed by the backend. */
+  ranked_index: DecimalString;
+  /** `index_t / starting_index - 1`, in percent, computed by the backend (float64 presentation, not authoritative decimal state). */
   return_percentage: number;
   /** `index_t / running_peak_t - 1`, in percent (non-positive). */
   drawdown_percentage: number;
@@ -40,8 +41,8 @@ export type RankedPerformanceHistory = {
   available: boolean;
   reason?: string;
   points: RankedHistoryPoint[];
-  starting_index?: number;
-  ending_index?: number;
+  starting_index?: DecimalString;
+  ending_index?: DecimalString;
   timeframe_return_percentage?: number;
   max_drawdown_percentage?: number;
   risk: RiskConsistency;

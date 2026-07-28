@@ -1,6 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { useCashBalances } from "@/hooks/usePositions";
 import { formatMoney } from "@/utils/formatMoney";
+import { formatQuantity } from "@/utils/decimal";
 
 export function CashBalancesCard() {
   const cash = useCashBalances();
@@ -34,7 +35,7 @@ export function CashBalancesCard() {
           >
             <span className="font-semibold text-zinc-200">{balance.currency}</span>
             <span className="text-right font-mono tabular-nums text-zinc-400">
-              {balance.amount.toLocaleString()}
+              {formatQuantity(balance.amount)}
             </span>
             <span className="text-right font-mono tabular-nums text-zinc-400">
               {formatMoney(balance.value_base, cash.data?.base_currency)} · {balance.weight_percentage.toFixed(1)}%

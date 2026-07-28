@@ -1,4 +1,5 @@
 import type { ProfileBadge } from "@/types/profile";
+import type { DecimalString } from "@/utils/decimal";
 
 // Public ranking projections only. Never add quantities, values, cost basis,
 // prices, emails, user ids, or portfolio ids to this contract.
@@ -25,8 +26,8 @@ export type LeaderboardEntry = {
   handle?: string;
   avatar_key?: string;
   strategy_tag?: string;
-  ranked_index: number;
-  ranked_return_percentage: number;
+  ranked_index: DecimalString;
+  ranked_return_percentage: DecimalString;
   public_weights: PublicWeight[];
   badges: ProfileBadge[];
   is_me?: boolean;
@@ -45,7 +46,7 @@ export type LeaderboardMilestone = {
   label: string;
   target_rank: number;
   rank_gap: number;
-  return_gap_percentage: number;
+  return_gap_percentage: DecimalString;
 };
 
 /** GET /leaderboard/me — the caller's own standing for a timeframe. */
@@ -59,8 +60,8 @@ export type LeaderboardStanding = {
   participant_count: number;
   total_participants: number;
   percentile: number;
-  ranked_return_percentage: number;
-  ranked_index: number;
+  ranked_return_percentage: DecimalString;
+  ranked_index: DecimalString;
   /** True when the portfolio is empty: ranked tracking is paused, index preserved. */
   paused: boolean;
   next_milestone: LeaderboardMilestone | null;

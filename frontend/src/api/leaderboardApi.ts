@@ -8,10 +8,23 @@ import type {
   PublicAssetType,
   PublicWeight,
 } from "@/types/leaderboard";
+import { isValidDecimalString, type DecimalString } from "@/utils/decimal";
 
 function numberValue(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Preserves an authoritative decimal-string field exactly as sent by the
+ * backend (ranked_index, ranked_return_percentage, return_gap_percentage).
+ * Falls back to "0" only for a genuinely missing/malformed value — never
+ * silently rounds through `Number`.
+ */
+function decimalValue(value: unknown): DecimalString {
+  if (typeof value === "string" && isValidDecimalString(value)) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "0";
 }
 
 function publicWeights(value: unknown): PublicWeight[] {
@@ -21,7 +34,7 @@ function publicWeights(value: unknown): PublicWeight[] {
     .map((item) => ({
       symbol: String(item.symbol ?? "").toUpperCase(),
       asset_type: String(item.asset_type ?? "other") as PublicAssetType,
-      weight_percentage: numberValue(item.weight_percentage),
+      weight_percentage: numberValue(item.weight_percentage), // presentation float64, not part of the money contract
     }))
     .filter((item) => item.symbol.length > 0);
 }
@@ -46,8 +59,8 @@ function normalizeEntry(raw: Record<string, unknown>): LeaderboardEntry {
     handle: raw.handle ? String(raw.handle) : undefined,
     avatar_key: raw.avatar_key ? String(raw.avatar_key) : undefined,
     strategy_tag: raw.strategy_tag ? String(raw.strategy_tag) : undefined,
-    ranked_index: numberValue(raw.ranked_index ?? raw.portfolio_index ?? 100),
-    ranked_return_percentage: numberValue(
+    ranked_index: decimalValue(raw.ranked_index ?? raw.portfolio_index ?? "100"),
+    ranked_return_percentage: decimalValue(
       raw.ranked_return_percentage ?? raw.gain_loss_percentage,
     ),
     public_weights: publicWeights(raw.public_weights),
@@ -103,8 +116,8 @@ export async function getLeaderboardStanding(
     participant_count: numberValue(raw.participant_count ?? raw.total_participants),
     total_participants: numberValue(raw.total_participants ?? raw.participant_count),
     percentile: numberValue(raw.percentile),
-    ranked_return_percentage: numberValue(raw.ranked_return_percentage),
-    ranked_index: numberValue(raw.ranked_index),
+    ranked_return_percentage: decimalValue(raw.ranked_return_percentage),
+    ranked_index: decimalValue(raw.ranked_index),
     paused: Boolean(raw.paused),
     next_milestone:
       raw.next_milestone && typeof raw.next_milestone === "object"
@@ -116,7 +129,7 @@ export async function getLeaderboardStanding(
             rank_gap: numberValue(
               (raw.next_milestone as Record<string, unknown>).rank_gap,
             ),
-            return_gap_percentage: numberValue(
+            return_gap_percentage: decimalValue(
               (raw.next_milestone as Record<string, unknown>).return_gap_percentage,
             ),
           }

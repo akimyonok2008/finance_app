@@ -15,6 +15,7 @@ import { PreviewRow } from "@/components/portfolio/PreviewRow";
 import { useClosePosition, useSalePreview } from "@/hooks/usePositions";
 import type { Position } from "@/types/portfolio";
 import { formatMoney } from "@/utils/formatMoney";
+import { compareDecimal, isValidDecimalString } from "@/utils/decimal";
 
 type Props = {
   position: Position | null;
@@ -35,29 +36,31 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
 
   // Optional execution details. Blank values are simply omitted, so the backend
   // estimates the price from the latest quote, assumes no fee, and uses now.
-  const parsedPrice = Number(executionPrice);
+  const trimmedPrice = executionPrice.trim();
   const hasEnteredPrice =
-    executionPrice.trim() !== "" && Number.isFinite(parsedPrice) && parsedPrice > 0;
-  const parsedFee = Number(fee);
-  const hasEnteredFee = fee.trim() !== "" && Number.isFinite(parsedFee) && parsedFee >= 0;
+    trimmedPrice !== "" && isValidDecimalString(trimmedPrice) && compareDecimal(trimmedPrice, "0") > 0;
+  const trimmedFee = fee.trim();
+  const hasEnteredFee =
+    trimmedFee !== "" && isValidDecimalString(trimmedFee) && compareDecimal(trimmedFee, "0") >= 0;
   const parsedDate = effectiveAt.trim() === "" ? null : new Date(effectiveAt);
   const hasValidDate = parsedDate !== null && !Number.isNaN(parsedDate.getTime());
   const executionDetails = {
-    ...(hasEnteredPrice ? { execution_price: parsedPrice } : {}),
-    ...(hasEnteredFee && parsedFee > 0 ? { fee: parsedFee } : {}),
+    ...(hasEnteredPrice ? { execution_price: trimmedPrice } : {}),
+    ...(hasEnteredFee && compareDecimal(trimmedFee, "0") > 0 ? { fee: trimmedFee } : {}),
     ...(hasValidDate ? { effective_at: parsedDate.toISOString() } : {}),
   };
 
-  const numericQuantity = quantity === "" ? 0 : Number(quantity);
+  const trimmedQuantity = quantity.trim();
   const validQuantity =
     position !== null &&
-    Number.isFinite(numericQuantity) &&
-    numericQuantity > 0 &&
-    numericQuantity <= position.quantity;
+    trimmedQuantity !== "" &&
+    isValidDecimalString(trimmedQuantity) &&
+    compareDecimal(trimmedQuantity, "0") > 0 &&
+    compareDecimal(trimmedQuantity, position.quantity) <= 0;
 
   const preview = useSalePreview(
     position && validQuantity
-      ? { position_id: position.id, quantity: numericQuantity, ...executionDetails }
+      ? { position_id: position.id, quantity: trimmedQuantity, ...executionDetails }
       : null,
   );
 
@@ -65,7 +68,7 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
     e.preventDefault();
     if (!position || !validQuantity) return;
     closePosition.mutate(
-      { position_id: position.id, quantity: numericQuantity, ...executionDetails },
+      { position_id: position.id, quantity: trimmedQuantity, ...executionDetails },
       { onSuccess: () => handleOpenChange(false) },
     );
   };
@@ -83,8 +86,17 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
 
   const applyShortcut = (fraction: number) => {
     if (!position) return;
-    const value = fraction === 1 ? position.quantity : position.quantity * fraction;
-    setQuantity(String(value));
+    // "Max" reuses the exact owned-quantity string to preserve full precision.
+    // The fractional shortcuts (25/50/75%) are a non-authoritative UI prefill
+    // only — the user can still edit the field, and the backend validates the
+    // final quantity against the real holding.
+    if (fraction === 1) {
+      setQuantity(position.quantity);
+      return;
+    }
+    const owned = Number(position.quantity);
+    if (!Number.isFinite(owned)) return;
+    setQuantity(String(owned * fraction));
   };
 
   const previewData = preview.data;
@@ -103,12 +115,10 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
             Quantity to sell (owned: {position?.quantity ?? 0})
             <input
               className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
-              type="number"
-              min="0"
-              max={position?.quantity}
-              step="any"
+              type="text"
+              inputMode="decimal"
               value={quantity}
-              placeholder={position ? String(position.quantity) : ""}
+              placeholder={position ? position.quantity : ""}
               onChange={(event) => setQuantity(event.target.value)}
             />
           </label>
@@ -146,9 +156,8 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
                   Execution price — leave blank to estimate from the latest quote
                   <input
                     className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
-                    type="number"
-                    min="0"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
                     value={executionPrice}
                     onChange={(event) => setExecutionPrice(event.target.value)}
                   />
@@ -157,9 +166,8 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
                   Transaction fee — leave blank for none
                   <input
                     className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
-                    type="number"
-                    min="0"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
                     value={fee}
                     placeholder="0"
                     onChange={(event) => setFee(event.target.value)}
@@ -213,7 +221,7 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
                   <PreviewRow
                     label="Estimated realized P&L"
                     value={formatMoney(previewData.estimated_realized_pnl, previewData.base_currency)}
-                    tone={previewData.estimated_realized_pnl >= 0 ? "positive" : "negative"}
+                    tone={compareDecimal(previewData.estimated_realized_pnl, "0") >= 0 ? "positive" : "negative"}
                   />
                   <PreviewRow label="Remaining after sale" value={`${previewData.remaining_quantity} shares`} />
                   {previewData.execution_price_source !== "user_recorded" && (

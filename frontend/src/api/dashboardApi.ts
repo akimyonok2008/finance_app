@@ -1,5 +1,6 @@
 import { apiRequest } from "@/api/client";
 import { getLeaderboardStanding } from "@/api/leaderboardApi";
+import { decimalToChartNumber } from "@/utils/decimal";
 import type {
   Achievement,
   Competition,
@@ -53,8 +54,10 @@ export async function getLeaderboardMe(
   return {
     rank: standing.rank,
     total_participants: standing.total_participants,
-    gain_loss_percentage: standing.ranked_return_percentage,
-    portfolio_index: standing.ranked_index,
+    // LeaderboardMe is a display-only aggregate DTO (not itself a backend
+    // response); converting here is the sanctioned chart/display boundary.
+    gain_loss_percentage: decimalToChartNumber(standing.ranked_return_percentage) ?? 0,
+    portfolio_index: decimalToChartNumber(standing.ranked_index) ?? 100,
     rank_delta: null,
   };
 }

@@ -1,4 +1,5 @@
 import type { AssetType, CreatePositionInput } from "@/types/portfolio";
+import { compareDecimal, isValidDecimalString } from "@/utils/decimal";
 
 /** Raw string-backed form state (inputs are strings until parsed/validated). */
 export type PositionFormState = {
@@ -50,32 +51,38 @@ export function validatePositionForm(
     errors.symbol = "Use only A–Z, 0–9, dot and dash.";
   }
 
-  const quantity = Number(state.quantity);
-  if (state.quantity.trim() === "" || Number.isNaN(quantity)) {
-    errors.quantity = "Enter a quantity.";
-  } else if (quantity <= 0) {
+  const quantityRaw = state.quantity.trim();
+  if (quantityRaw === "" || !isValidDecimalString(quantityRaw)) {
+    errors.quantity = "Enter a valid quantity.";
+  } else if (quantityRaw.length > 32) {
+    errors.quantity = "Quantity is too long.";
+  } else if (compareDecimal(quantityRaw, "0") <= 0) {
     errors.quantity = "Quantity must be greater than 0.";
   }
 
   // Optional execution details. Blank is always valid: the backend then uses the
   // latest quote / zero fee / now and labels the price as an estimate.
-  let executionPrice: number | undefined;
-  if (state.execution_price.trim() !== "") {
-    const parsed = Number(state.execution_price);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
+  let executionPrice: string | undefined;
+  const executionPriceRaw = state.execution_price.trim();
+  if (executionPriceRaw !== "") {
+    if (!isValidDecimalString(executionPriceRaw) || executionPriceRaw.length > 32) {
+      errors.execution_price = "Enter a valid execution price.";
+    } else if (compareDecimal(executionPriceRaw, "0") <= 0) {
       errors.execution_price = "Execution price must be greater than 0.";
     } else {
-      executionPrice = parsed;
+      executionPrice = executionPriceRaw;
     }
   }
 
-  let fee: number | undefined;
-  if (state.fee.trim() !== "") {
-    const parsed = Number(state.fee);
-    if (!Number.isFinite(parsed) || parsed < 0) {
+  let fee: string | undefined;
+  const feeRaw = state.fee.trim();
+  if (feeRaw !== "") {
+    if (!isValidDecimalString(feeRaw) || feeRaw.length > 32) {
+      errors.fee = "Enter a valid fee.";
+    } else if (compareDecimal(feeRaw, "0") < 0) {
       errors.fee = "Fee cannot be negative.";
-    } else if (parsed > 0) {
-      fee = parsed;
+    } else if (compareDecimal(feeRaw, "0") > 0) {
+      fee = feeRaw;
     }
   }
 
@@ -100,7 +107,7 @@ export function validatePositionForm(
     value: {
       symbol,
       asset_type: state.asset_type,
-      quantity,
+      quantity: quantityRaw,
       ...(executionPrice !== undefined ? { execution_price: executionPrice } : {}),
       ...(fee !== undefined ? { fee } : {}),
       ...(effectiveAt !== undefined ? { effective_at: effectiveAt } : {}),

@@ -25,6 +25,7 @@ import {
   type CurrencyCode,
 } from "@/types/portfolio";
 import { cn } from "@/utils/cn";
+import { compareDecimal, isValidDecimalString } from "@/utils/decimal";
 
 const FILTERS: Array<{ value: ActivityCategory; label: string }> = [
   { value: "all", label: "All" },
@@ -177,12 +178,16 @@ function CashFlowRecorder() {
   const withdrawal = useWithdrawCash();
   const [currency, setCurrency] = useState<CurrencyCode>("USD");
   const [amount, setAmount] = useState("");
-  const value = Number(amount);
+  const trimmedAmount = amount.trim();
+  const validAmount =
+    trimmedAmount !== "" &&
+    isValidDecimalString(trimmedAmount) &&
+    compareDecimal(trimmedAmount, "0") > 0;
   const pending = deposit.isPending || withdrawal.isPending;
   const record = (kind: "deposit" | "withdrawal") => {
-    if (!Number.isFinite(value) || value <= 0) return;
+    if (!validAmount) return;
     (kind === "deposit" ? deposit : withdrawal).mutate(
-      { currency, amount: value },
+      { currency, amount: trimmedAmount },
       { onSuccess: () => setAmount("") },
     );
   };
@@ -207,16 +212,15 @@ function CashFlowRecorder() {
         </select>
         <input
           aria-label="Cash flow amount"
-          type="number"
-          min="0"
-          step="any"
+          type="text"
+          inputMode="decimal"
           value={amount}
           onChange={(event) => setAmount(event.target.value)}
           placeholder="Amount"
           className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
         />
-        <Button disabled={pending || value <= 0} onClick={() => record("deposit")}>Record deposit</Button>
-        <Button disabled={pending || value <= 0} variant="outline" onClick={() => record("withdrawal")}>Record withdrawal</Button>
+        <Button disabled={pending || !validAmount} onClick={() => record("deposit")}>Record deposit</Button>
+        <Button disabled={pending || !validAmount} variant="outline" onClick={() => record("withdrawal")}>Record withdrawal</Button>
       </div>
     </Card>
   );
