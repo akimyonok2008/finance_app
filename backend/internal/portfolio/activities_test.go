@@ -28,9 +28,9 @@ func readRankedIndex(t *testing.T, svc *Service, userID string) float64 {
 // with a known value. Returns the buy result.
 func fundedPortfolio(t *testing.T, svc *Service, userID string) MutationResult {
 	t.Helper()
-	_, err := svc.DepositCash(ctx(), userID, "seed-deposit", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx(), userID, "seed-deposit", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	buy, err := svc.BuyPosition(ctx(), userID, "seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	buy, err := svc.BuyPosition(ctx(), userID, "seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 	require.NotNil(t, buy.Position)
 	return buy
@@ -62,13 +62,13 @@ func TestCashDividend_IncreasesCashAndRankedReturn(t *testing.T) {
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "USD" {
 			usd = c.Amount
 		}
 	}
-	assert.InDelta(t, 8150, usd, 1e-9) // 8050 leftover (10000-1950) + 100 dividend
+	assertAmountEqual(t, "8150", usd) // 8050 leftover (10000-1950) + 100 dividend
 }
 
 func TestDividend_DoesNotResetCheckpoint(t *testing.T) {
@@ -111,13 +111,13 @@ func TestForeignCurrencyDividend_StaysInDeclaredCurrency(t *testing.T) {
 	require.NoError(t, err)
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var eur float64
+	eur := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "EUR" {
 			eur = c.Amount
 		}
 	}
-	assert.InDelta(t, 30, eur, 1e-9) // not converted to base
+	assertAmountEqual(t, "30", eur) // not converted to base
 }
 
 func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
@@ -135,7 +135,7 @@ func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
 	require.NotNil(t, res.Position)
 
 	// Quantity increases by income/price = 400/200 = 2 shares.
-	assert.InDelta(t, startQty+2, res.Position.Quantity, 1e-9)
+	assert.True(t, startQty.Add(testQuantity("2")).EqualQuantity(res.Position.Quantity))
 
 	// The income is reflected once: index rises, but only by the dividend amount,
 	// not by dividend + a spurious buy return.
@@ -206,7 +206,7 @@ func TestFee_NeverCreatesNegativeCash(t *testing.T) {
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
 	for _, c := range cash {
-		assert.GreaterOrEqual(t, c.Amount, 0.0)
+		assert.GreaterOrEqual(t, c.Amount.Cmp(testAmount("0")), 0)
 	}
 }
 
@@ -226,7 +226,7 @@ func TestStockSplit_PreservesValueBasisAndIndex(t *testing.T) {
 	svc, _, _, quotes := newTxTestService()
 	buy := fundedPortfolio(t, svc, "u1")
 	beforeIdx := readRankedIndex(t, svc, "u1")
-	beforeBasis := buy.Position.Quantity * buy.Position.AverageBuyPrice
+	beforeBasis := buy.Position.Quantity.MulPrice(buy.Position.AverageBuyPrice)
 
 	res, err := svc.RecordCorporateAction(ctx(), "u1", "split-1", CorpActionInput{
 		Subtype: CorpStockSplit, Symbol: "AAPL", RatioNumerator: 2, RatioDenominator: 1,
@@ -234,15 +234,17 @@ func TestStockSplit_PreservesValueBasisAndIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
 
-	assert.InDelta(t, buy.Position.Quantity*2, res.Position.Quantity, 1e-9)
-	assert.InDelta(t, buy.Position.AverageBuyPrice/2, res.Position.AverageBuyPrice, 1e-9)
+	assert.True(t, buy.Position.Quantity.MulRatio(testRatio("2")).EqualQuantity(res.Position.Quantity))
+	expectedPrice, err := buy.Position.AverageBuyPrice.DivRatio(testRatio("2"), 18)
+	require.NoError(t, err)
+	assert.Equal(t, 0, expectedPrice.Cmp(res.Position.AverageBuyPrice))
 	// Total basis unchanged.
-	assert.InDelta(t, beforeBasis, res.Position.Quantity*res.Position.AverageBuyPrice, 1e-6)
+	assertAmountValuesEqual(t, beforeBasis, res.Position.Quantity.MulPrice(res.Position.AverageBuyPrice))
 	// Ranked index unchanged AT THE ACTION (value-invariant transformation).
 	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
 	// A real split-adjusted feed halves the quote; simulate that, then confirm the
 	// index is still unchanged (no phantom gain from the doubled share count).
-	quotes.Set("AAPL", buy.Position.AverageBuyPrice/2, "USD")
+	quotes.Set("AAPL", expectedPrice.Float64(), "USD")
 	afterIdx := readRankedIndex(t, svc, "u1")
 	assert.InDelta(t, beforeIdx, afterIdx, 1e-6)
 }
@@ -250,13 +252,14 @@ func TestStockSplit_PreservesValueBasisAndIndex(t *testing.T) {
 func TestReverseSplit_PreservesValueAndIndex(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy := fundedPortfolio(t, svc, "u1")
-	beforeBasis := buy.Position.Quantity * buy.Position.AverageBuyPrice
+	beforeBasis := buy.Position.Quantity.MulPrice(buy.Position.AverageBuyPrice)
 	res, err := svc.RecordCorporateAction(ctx(), "u1", "rsplit", CorpActionInput{
 		Subtype: CorpReverseSplit, Symbol: "AAPL", RatioNumerator: 1, RatioDenominator: 10,
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, buy.Position.Quantity/10, res.Position.Quantity, 1e-9)
-	assert.InDelta(t, beforeBasis, res.Position.Quantity*res.Position.AverageBuyPrice, 1e-6)
+	expectedQuantity := buy.Position.Quantity.MulRatio(testRatio("0.1"))
+	assert.True(t, expectedQuantity.EqualQuantity(res.Position.Quantity))
+	assertAmountValuesEqual(t, beforeBasis, res.Position.Quantity.MulPrice(res.Position.AverageBuyPrice))
 	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
 }
 
@@ -281,8 +284,8 @@ func TestSymbolChange_PreservesPositionAndIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
 	assert.Equal(t, "APLX", res.Position.Symbol)
-	assert.InDelta(t, buy.Position.Quantity, res.Position.Quantity, 1e-9)
-	assert.InDelta(t, buy.Position.AverageBuyPrice, res.Position.AverageBuyPrice, 1e-9)
+	assert.True(t, buy.Position.Quantity.EqualQuantity(res.Position.Quantity))
+	assert.Equal(t, 0, buy.Position.AverageBuyPrice.Cmp(res.Position.AverageBuyPrice))
 	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
 
 	// The immutable history retains the old symbol.

@@ -64,7 +64,7 @@ func TestRollback_FaultAtEveryStageLeavesNoPartialState(t *testing.T) {
 			svc, repo, _, _ := newTxTestService()
 			repo.SetFaults(faults)
 
-			_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+			_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 			require.ErrorIs(t, err, boom, "the mutation must fail at the %s stage", name)
 
 			positions, state := readAggregate(t, repo, svc, "u1")
@@ -80,7 +80,7 @@ func TestRollback_FaultOnSecondMutationPreservesFirst(t *testing.T) {
 	boom := errors.New("injected failure")
 	svc, repo, _, _ := newTxTestService()
 
-	first, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	first, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	_, stateBefore := readAggregate(t, repo, svc, "u1")
 	require.NotNil(t, stateBefore)
@@ -92,7 +92,7 @@ func TestRollback_FaultOnSecondMutationPreservesFirst(t *testing.T) {
 
 	positions, stateAfter := readAggregate(t, repo, svc, "u1")
 	require.Len(t, positions, 1)
-	assert.Equal(t, 1.0, positions[0].Quantity, "quantity must be unchanged after rollback")
+	assertQuantityEqual(t, "1", positions[0].Quantity, "quantity must be unchanged after rollback")
 	require.NotNil(t, stateAfter)
 	assert.Equal(t, stateBefore.Version, stateAfter.Version, "ranked version must not advance")
 	assert.Equal(t, *stateBefore.SegmentStartValueBase, *stateAfter.SegmentStartValueBase)
@@ -137,7 +137,7 @@ func TestConcurrent_SimultaneousAddsSerialize(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+			_, errs[i] = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 		}(i)
 	}
 	wg.Wait()
@@ -155,9 +155,9 @@ func TestConcurrent_SimultaneousAddsSerialize(t *testing.T) {
 
 func TestConcurrent_MixedMutationsRemainConsistent(t *testing.T) {
 	svc, repo, perf, _ := newTxTestService()
-	seed, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 5})
+	seed, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("5")})
 	require.NoError(t, err)
-	other, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "MSFT", AssetType: "stock", Quantity: 2})
+	other, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "MSFT", AssetType: "stock", Quantity: testQuantity("2")})
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -167,7 +167,7 @@ func TestConcurrent_MixedMutationsRemainConsistent(t *testing.T) {
 	}
 	// Add, resize, delete, close and a whole-portfolio replacement all racing.
 	run(func() {
-		_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: 3})
+		_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("3")})
 	})
 	run(func() { _, _ = svc.UpdatePosition(ctx(), "u1", seed.ID, 11) })
 	run(func() { _ = svc.DeletePosition(ctx(), "u1", other.ID) })
@@ -185,9 +185,9 @@ func TestConcurrent_MixedMutationsRemainConsistent(t *testing.T) {
 
 func TestConcurrent_DoubleCloseAndDoubleDeleteAreSafe(t *testing.T) {
 	svc, repo, perf, _ := newTxTestService()
-	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 4})
+	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("4")})
 	require.NoError(t, err)
-	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "MSFT", AssetType: "stock", Quantity: 1})
+	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "MSFT", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 
 	// Two concurrent closes of the SAME position: exactly one may succeed.
@@ -216,7 +216,7 @@ func TestConcurrent_DoubleCloseAndDoubleDeleteAreSafe(t *testing.T) {
 
 func TestConcurrent_LastDeleteAndAddRace(t *testing.T) {
 	svc, repo, perf, _ := newTxTestService()
-	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -224,7 +224,7 @@ func TestConcurrent_LastDeleteAndAddRace(t *testing.T) {
 	go func() { defer wg.Done(); _ = svc.DeletePosition(ctx(), "u1", pos.ID) }()
 	go func() {
 		defer wg.Done()
-		_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: 1})
+		_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("1")})
 	}()
 	wg.Wait()
 
@@ -264,7 +264,7 @@ func TestConcurrent_RankedStateInitializedExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+			_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 		}()
 	}
 	wg.Wait()
@@ -283,7 +283,7 @@ func TestIdempotency_RetriedAddAppliesOnce(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	req := MutationRequest{
 		Kind: MutationAdd, UserID: "u1", RequestID: "req-add-1",
-		Input: PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 3},
+		Input: PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("3")},
 	}
 	first, err := svc.Mutate(ctx(), req)
 	require.NoError(t, err)
@@ -303,9 +303,9 @@ func TestIdempotency_RetriedAddAppliesOnce(t *testing.T) {
 
 func TestIdempotency_RetriedCloseAndReplaceApplyOnce(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 2})
+	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("2")})
 	require.NoError(t, err)
-	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "MSFT", AssetType: "stock", Quantity: 1})
+	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "MSFT", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 
 	closeReq := MutationRequest{Kind: MutationClose, UserID: "u1", RequestID: "req-close-1", PositionID: pos.ID}
@@ -338,13 +338,13 @@ func TestIdempotency_RetriedCloseAndReplaceApplyOnce(t *testing.T) {
 
 func TestAudit_ProvesEveryMutationIsRankNeutral(t *testing.T) {
 	svc, repo, _, pp := newTxTestService()
-	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	pp.Set("AAPL", 300, "USD") // market move between mutations
 	_, err = svc.UpdatePosition(ctx(), "u1", pos.ID, 50)
 	require.NoError(t, err)
 	pp.Set("AAPL", 150, "USD")
-	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: 10})
+	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("10")})
 	require.NoError(t, err)
 	require.NoError(t, svc.DeletePosition(ctx(), "u1", pos.ID))
 
@@ -367,7 +367,7 @@ func TestContext_CancelledBeforeMutationDoesNothing(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := svc.AddPosition(cancelled, "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err := svc.AddPosition(cancelled, "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.Error(t, err, "a cancelled context must abort the mutation")
 
 	positions, _ := readAggregate(t, repo, svc, "u1")

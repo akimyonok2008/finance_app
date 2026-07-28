@@ -19,14 +19,14 @@ func TestSellFee_NotDoubleCountedInReconciliation(t *testing.T) {
 	pp.Set("AAPL", 100, "USD")
 	userID := "user-fee"
 
-	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	cashBefore, _, err := svc.CashBalances(ctx(), userID)
 	require.NoError(t, err)
-	usdBefore := 0.0
+	usdBefore := testAmount("0")
 	for _, c := range cashBefore {
 		if c.Currency == "USD" {
 			usdBefore = c.Amount
@@ -35,7 +35,7 @@ func TestSellFee_NotDoubleCountedInReconciliation(t *testing.T) {
 
 	pp.Set("AAPL", 120, "USD")
 	sellRes, err := svc.SellPosition(ctx(), userID, "sell", SellInput{
-		PositionID: buyRes.Position.ID, Symbol: "AAPL", Quantity: 10, ExecutionPrice: 120, Fee: 15,
+		PositionID: buyRes.Position.ID, Symbol: "AAPL", Quantity: testQuantity("10"), ExecutionPrice: testPrice("120"), Fee: testAmount("15"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, sellRes.Closed)
@@ -48,13 +48,13 @@ func TestSellFee_NotDoubleCountedInReconciliation(t *testing.T) {
 	// Cash increases by NET proceeds exactly once.
 	cashAfter, _, err := svc.CashBalances(ctx(), userID)
 	require.NoError(t, err)
-	usdAfter := 0.0
+	usdAfter := testAmount("0")
 	for _, c := range cashAfter {
 		if c.Currency == "USD" {
 			usdAfter = c.Amount
 		}
 	}
-	assert.InDelta(t, netProceeds, usdAfter-usdBefore, 0.01, "cash must increase by net proceeds exactly once")
+	assertAmountEqual(t, "1185", usdAfter.Sub(usdBefore), "cash must increase by net proceeds exactly once")
 
 	// Realized P&L includes the sale fee exactly once.
 	assert.InDelta(t, wantRealized, sellRes.Closed.RealizedGainLossBase, 0.01)
@@ -92,25 +92,26 @@ func TestSellPreview_MatchesCommittedSell(t *testing.T) {
 	pp.Set("MSFT", 50, "USD")
 	userID := "user-preview"
 
-	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: 5000})
+	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("5000")})
 	require.NoError(t, err)
-	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 10})
+	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	pp.Set("MSFT", 60, "USD")
 	preview, err := svc.PreviewSell(ctx(), userID, SellInput{
-		PositionID: buyRes.Position.ID, Quantity: 4, ExecutionPrice: 60, Fee: 5,
+		PositionID: buyRes.Position.ID, Quantity: testQuantity("4"), ExecutionPrice: testPrice("60"), Fee: testAmount("5"),
 	})
 	require.NoError(t, err)
 
 	sellRes, err := svc.SellPosition(ctx(), userID, "sell", SellInput{
-		PositionID: buyRes.Position.ID, Symbol: "MSFT", Quantity: 4, ExecutionPrice: 60, Fee: 5,
+		PositionID: buyRes.Position.ID, Symbol: "MSFT", Quantity: testQuantity("4"), ExecutionPrice: testPrice("60"), Fee: testAmount("5"),
 	})
 	require.NoError(t, err)
 
 	assert.InDelta(t, preview.GrossProceeds, 4*60.0, 0.01)
 	assert.InDelta(t, preview.NetProceeds, 4*60.0-5, 0.01)
-	assert.InDelta(t, preview.EstimatedRealizedPnL, *sellRes.Activity.RealizedGainLossBase, 0.01)
+	assertAmountEqual(t, "35", *sellRes.Activity.RealizedGainLossBase)
+	assert.InDelta(t, 35.0, preview.EstimatedRealizedPnL, 0.01)
 	assert.False(t, preview.WillClosePosition)
 }
 
@@ -121,9 +122,9 @@ func TestReturnOfCapital_ExcludedFromOrdinaryIncomeTotal(t *testing.T) {
 	pp.Set("T", 40, "USD")
 	userID := "user-roc"
 
-	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: 1000})
+	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("1000")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "T", AssetType: AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "T", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	// An ordinary dividend DOES count as ordinary income.
@@ -154,22 +155,22 @@ func TestClosedPosition_AggregatesPartialAndFinalSales(t *testing.T) {
 	pp.Set("NFLX", 100, "USD")
 	userID := "user-episode"
 
-	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "NFLX", AssetType: AssetTypeStock, Quantity: 10})
+	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "NFLX", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 	episodeID := buyRes.Position.ID
 
 	pp.Set("NFLX", 110, "USD")
 	partial, err := svc.SellPosition(ctx(), userID, "sell1", SellInput{
-		PositionID: episodeID, Symbol: "NFLX", Quantity: 4, ExecutionPrice: 110,
+		PositionID: episodeID, Symbol: "NFLX", Quantity: testQuantity("4"), ExecutionPrice: testPrice("110"),
 	})
 	require.NoError(t, err)
 	require.Nil(t, partial.Closed, "a partial sale must not close the episode")
 
 	pp.Set("NFLX", 130, "USD")
 	final, err := svc.SellPosition(ctx(), userID, "sell2", SellInput{
-		PositionID: episodeID, Symbol: "NFLX", Quantity: 6, ExecutionPrice: 130,
+		PositionID: episodeID, Symbol: "NFLX", Quantity: testQuantity("6"), ExecutionPrice: testPrice("130"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, final.Closed)
@@ -202,20 +203,20 @@ func TestClosedPosition_RebuyAfterClosureCreatesNewEpisode(t *testing.T) {
 	pp.Set("GME", 20, "USD")
 	userID := "user-rebuy"
 
-	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	firstBuy, err := svc.BuyPosition(ctx(), userID, "buy1", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: 5})
+	firstBuy, err := svc.BuyPosition(ctx(), userID, "buy1", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: testQuantity("5")})
 	require.NoError(t, err)
 	firstEpisode := firstBuy.Position.ID
 
 	pp.Set("GME", 25, "USD")
 	closeRes, err := svc.SellPosition(ctx(), userID, "sellall", SellInput{
-		PositionID: firstEpisode, Symbol: "GME", Quantity: 5, ExecutionPrice: 25,
+		PositionID: firstEpisode, Symbol: "GME", Quantity: testQuantity("5"), ExecutionPrice: testPrice("25"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, closeRes.Closed)
 
-	secondBuy, err := svc.BuyPosition(ctx(), userID, "buy2", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: 3})
+	secondBuy, err := svc.BuyPosition(ctx(), userID, "buy2", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: testQuantity("3")})
 	require.NoError(t, err)
 	assert.NotEqual(t, firstEpisode, secondBuy.Position.ID, "rebuying the same symbol must create a NEW episode")
 
@@ -237,9 +238,9 @@ func TestClosedPosition_WriteOffClosesEpisode(t *testing.T) {
 	pp.Set("BBBY", 5, "USD")
 	userID := "user-writeoff"
 
-	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: 1000})
+	_, err := svc.DepositCash(ctx(), userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("1000")})
 	require.NoError(t, err)
-	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "BBBY", AssetType: AssetTypeStock, Quantity: 20})
+	buyRes, err := svc.BuyPosition(ctx(), userID, "buy", BuyInput{Symbol: "BBBY", AssetType: AssetTypeStock, Quantity: testQuantity("20")})
 	require.NoError(t, err)
 
 	_, err = svc.RecordCorporateAction(ctx(), userID, "wo", CorpActionInput{
@@ -267,7 +268,7 @@ func TestClosedPosition_LegacyFallback(t *testing.T) {
 	store := svc.repo.(AggregateStore)
 	legacyPos := &Position{
 		ID: "legacy-pos-1", UserID: userID, PortfolioID: pf.ID, Symbol: "LEGACY",
-		AssetType: AssetTypeStock, Quantity: 3, AverageBuyPrice: 10, Currency: "USD",
+		AssetType: AssetTypeStock, Quantity: testQuantity("3"), AverageBuyPrice: testPrice("10"), Currency: "USD",
 		Status: PositionStatusClosed, RealizedGainLossBase: 42, RealizedGainLossPercentage: 14,
 	}
 	require.NoError(t, store.WithLockedPortfolio(ctx(), userID, func(c context.Context, tx AggregateTx) error {

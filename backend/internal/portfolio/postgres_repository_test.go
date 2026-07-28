@@ -55,7 +55,7 @@ func newPGPosition(userID, portfolioID string) *Position {
 	now := time.Now().UTC()
 	return &Position{
 		ID: uuid.NewString(), UserID: userID, PortfolioID: portfolioID,
-		Symbol: "AAPL", AssetType: "stock", Quantity: 10, AverageBuyPrice: 180,
+		Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("10"), AverageBuyPrice: testPrice("180"),
 		Currency: "USD", Status: PositionStatusOpen, CreatedAt: now, UpdatedAt: now,
 	}
 }
@@ -203,19 +203,19 @@ func TestPG_CashActivityIsAtomicIdempotentAndConstrained(t *testing.T) {
 	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
 
 	deposit, err := svc.DepositCash(context.Background(), userID, "pg-deposit", CashFlowInput{
-		Currency: "USD", Amount: 1000,
+		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
 	assert.InDelta(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter, 1e-9)
 
 	retry, err := svc.DepositCash(context.Background(), userID, "pg-deposit", CashFlowInput{
-		Currency: "USD", Amount: 1000,
+		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
 
 	buy, err := svc.BuyPosition(context.Background(), userID, "pg-buy", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 5,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("5"),
 	})
 	require.NoError(t, err)
 	assert.InDelta(t, buy.RankedIndexBefore, buy.RankedIndexAfter, 1e-9)
@@ -250,7 +250,7 @@ func TestPG_ConcurrentBuysCannotOverspendCash(t *testing.T) {
 	userID := seedUser(t, pool)
 	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
 	_, err := svc.DepositCash(context.Background(), userID, "seed-cash", CashFlowInput{
-		Currency: "USD", Amount: 1000,
+		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
 
@@ -262,7 +262,7 @@ func TestPG_ConcurrentBuysCannotOverspendCash(t *testing.T) {
 			defer wg.Done()
 			_, errs[index] = svc.BuyPosition(context.Background(), userID,
 				fmt.Sprintf("concurrent-buy-%d", index), BuyInput{
-					Symbol: symbol, AssetType: AssetTypeStock, Quantity: 3,
+					Symbol: symbol, AssetType: AssetTypeStock, Quantity: testQuantity("3"),
 				})
 		}(i, symbol)
 	}

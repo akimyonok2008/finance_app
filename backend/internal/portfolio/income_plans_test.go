@@ -3,6 +3,7 @@ package portfolio
 import (
 	"testing"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +24,7 @@ func TestIncome_WithholdingReducesNetCash(t *testing.T) {
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "USD" {
 			usd = c.Amount
@@ -31,7 +32,7 @@ func TestIncome_WithholdingReducesNetCash(t *testing.T) {
 	}
 	// Seed cash = 10000 deposit - 1950 (10 AAPL @ 195) = 8050. Net dividend =
 	// 100 gross - 15 withholding = 85.
-	assert.InDelta(t, 8050+85, usd, 0.001)
+	assertAmountEqual(t, "8135", usd)
 }
 
 func TestReturnOfCapital_ReducesBasisAndIsReturnBearing(t *testing.T) {
@@ -50,17 +51,17 @@ func TestReturnOfCapital_ReducesBasisAndIsReturnBearing(t *testing.T) {
 	require.Len(t, positions, 1)
 	// 10 shares, baseline 195 → total basis 1950. RoC 50 reduces basis to 1900 →
 	// per-share 190.
-	assert.InDelta(t, 190.0, positions[0].AverageBuyPrice, 0.01)
+	assertPriceEqual(t, "190", positions[0].AverageBuyPrice)
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "USD" {
 			usd = c.Amount
 		}
 	}
-	assert.InDelta(t, 8050+50, usd, 0.001)
+	assertAmountEqual(t, "8100", usd)
 }
 
 func TestReturnOfCapital_BasisNeverBelowZero(t *testing.T) {
@@ -77,17 +78,17 @@ func TestReturnOfCapital_BasisNeverBelowZero(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 0.0, positions[0].AverageBuyPrice, 0.001) // basis exhausted, not negative
+	assertPriceEqual(t, "0", positions[0].AverageBuyPrice) // basis exhausted, not negative
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "USD" {
 			usd = c.Amount
 		}
 	}
-	assert.InDelta(t, 8050+3000, usd, 0.001) // full cash credited
+	assertAmountEqual(t, "11050", usd) // full cash credited
 }
 
 func TestStockDividend_PreservesBasisAndValueNeutral(t *testing.T) {
@@ -106,8 +107,8 @@ func TestStockDividend_PreservesBasisAndValueNeutral(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
 	// 10 → 11 shares; per-share basis 195 → 177.27; total basis preserved at 1950.
-	assert.InDelta(t, 11.0, positions[0].Quantity, 0.001)
-	assert.InDelta(t, 1950.0, positions[0].Quantity*positions[0].AverageBuyPrice, 0.01)
+	assertQuantityEqual(t, "11", positions[0].Quantity)
+	assertAmountEqual(t, "1950", money.QuantizeCostBasis(positions[0].Quantity.MulPrice(positions[0].AverageBuyPrice)))
 }
 
 func TestIncome_RejectsWithholdingExceedingGross(t *testing.T) {

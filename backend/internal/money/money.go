@@ -47,7 +47,7 @@ const (
 // unit (decimal) scale. Unknown currencies must fail validation rather than
 // silently guessing a scale.
 var currencyMinorUnits = map[string]int32{
-	"USD": 2, "EUR": 2, "GBP": 2, "CAD": 2, "AUD": 2, "CHF": 2,
+	"USD": 2, "EUR": 2, "GBP": 2, "TRY": 2, "CAD": 2, "AUD": 2, "CHF": 2,
 	"JPY": 0, "KRW": 0,
 	"KWD": 3, "BHD": 3, "OMR": 3, "TND": 3,
 }

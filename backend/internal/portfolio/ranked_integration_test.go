@@ -33,14 +33,14 @@ func rankedIndex(t *testing.T, perf *performance.Service, userID string) float64
 
 func TestRanked_FirstPositionStartsAt100(t *testing.T) {
 	svc, perf, _ := newRankedTestService()
-	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	require.Equal(t, 100.0, rankedIndex(t, perf, "u1"))
 }
 
 func TestRanked_MarketMovePropagates(t *testing.T) {
 	svc, perf, pp := newRankedTestService()
-	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	// AAPL 195 -> 214.5 (+10%).
 	pp.Set("AAPL", 214.5, "USD")
@@ -53,20 +53,20 @@ func TestRanked_MarketMovePropagates(t *testing.T) {
 func TestRanked_CapitalInjectionCannotDilute(t *testing.T) {
 	svc, perf, pp := newRankedTestService()
 	// Start: 1 AAPL @ 195 -> value 195, index 100.
-	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	// AAPL halves: value 97.5, index 50.
 	pp.Set("AAPL", 97.5, "USD")
 	require.Equal(t, 50.0, rankedIndex(t, perf, "u1"))
 	// Inject a large new position (SPY 540 x 100 = 54000). Index must stay 50.
-	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: 100})
+	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("100")})
 	require.NoError(t, err)
 	require.Equal(t, 50.0, rankedIndex(t, perf, "u1"))
 }
 
 func TestRanked_QuantityIncreaseNoRetroactiveGain(t *testing.T) {
 	svc, perf, pp := newRankedTestService()
-	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	pp.Set("AAPL", 214.5, "USD") // +10% -> index 110
 	require.Equal(t, 110.0, rankedIndex(t, perf, "u1"))
@@ -78,7 +78,7 @@ func TestRanked_QuantityIncreaseNoRetroactiveGain(t *testing.T) {
 
 func TestRanked_DeleteAndReAddDoesNotReset(t *testing.T) {
 	svc, perf, pp := newRankedTestService()
-	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	pp.Set("AAPL", 156.0, "USD") // -20% -> index 80
 	require.Equal(t, 80.0, rankedIndex(t, perf, "u1"))
@@ -89,14 +89,14 @@ func TestRanked_DeleteAndReAddDoesNotReset(t *testing.T) {
 	require.Equal(t, performance.StatusPaused, rp.Status)
 	require.Equal(t, 80.0, rp.RankedIndex)
 	// Re-add the same symbol at its (now lower) price: index stays 80, not reset.
-	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 5})
+	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("5")})
 	require.NoError(t, err)
 	require.Equal(t, 80.0, rankedIndex(t, perf, "u1"))
 }
 
 func TestRanked_StrategyReplaceDoesNotReset(t *testing.T) {
 	svc, perf, pp := newRankedTestService()
-	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	pp.Set("AAPL", 175.5, "USD") // -10% -> index 90
 	require.Equal(t, 90.0, rankedIndex(t, perf, "u1"))
@@ -112,7 +112,7 @@ func TestRanked_StrategyReplaceDoesNotReset(t *testing.T) {
 
 func TestRanked_PriceFailureAbortsMutationAndState(t *testing.T) {
 	svc, perf, pp := newRankedTestService()
-	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	require.Equal(t, 100.0, rankedIndex(t, perf, "u1"))
 
@@ -120,7 +120,7 @@ func TestRanked_PriceFailureAbortsMutationAndState(t *testing.T) {
 	// add must fail (cannot value the portfolio), leaving positions and ranked
 	// state unchanged.
 	pp.Unset("AAPL")
-	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: 1})
+	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("1")})
 	require.Error(t, err)
 
 	// Restore price; portfolio still has exactly the one original position and

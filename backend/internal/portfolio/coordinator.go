@@ -1685,11 +1685,15 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 	factorRatio := money.RatioFromFloat64(factor)
 	updated := *existing
 	updated.Quantity = money.QuantizeQuantity(existing.Quantity.MulRatio(factorRatio))
-	avgPrice, err := existing.AverageBuyPrice.DivRatio(factorRatio, money.ScalePrice) // total basis preserved
+	// Average cost can be a repeating decimal after a stock dividend. Carry
+	// enough guard digits for the authoritative total cost basis to round
+	// exactly at its 18dp persistence boundary; treating average cost as a
+	// 12dp market quote here would introduce basis drift.
+	avgPrice, err := existing.AverageBuyPrice.DivRatio(factorRatio, money.ScaleCostBasis+money.ScaleQuantity)
 	if err != nil {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
-	updated.AverageBuyPrice = money.QuantizePrice(avgPrice)
+	updated.AverageBuyPrice = avgPrice
 	updated.UpdatedAt = now
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
@@ -1818,11 +1822,13 @@ func (c *MutationCoordinator) planSplit(req MutationRequest, pf *Portfolio, oldO
 	ratioRatio := money.RatioFromFloat64(ratio)
 	updated := *existing
 	updated.Quantity = money.QuantizeQuantity(existing.Quantity.MulRatio(ratioRatio))
-	avgPrice, divErr := existing.AverageBuyPrice.DivRatio(ratioRatio, money.ScalePrice)
+	// Splits have the same repeating-decimal issue as stock dividends. Preserve
+	// guard digits so total cost basis remains exact at its 18dp boundary.
+	avgPrice, divErr := existing.AverageBuyPrice.DivRatio(ratioRatio, money.ScaleCostBasis+money.ScaleQuantity)
 	if divErr != nil {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
-	updated.AverageBuyPrice = money.QuantizePrice(avgPrice)
+	updated.AverageBuyPrice = avgPrice
 	updated.UpdatedAt = now
 	if updated.Quantity.Sign() <= 0 || updated.AverageBuyPrice.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidSplitRatio

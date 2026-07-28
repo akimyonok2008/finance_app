@@ -39,7 +39,7 @@ func TestBuyFlow_ReusesExistingAliasWithoutProviderCall(t *testing.T) {
 	svc.SetInstrumentResolver(resolver)
 
 	buy, err := svc.BuyPosition(ctx(), "u1", "alias-hit", BuyInput{
-		Symbol: "MSFT", ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, in.ID, buy.Position.InstrumentID)
@@ -58,11 +58,11 @@ func TestBuyFlow_SameTickerDifferentExchangesDoesNotMerge(t *testing.T) {
 	svc.SetInstrumentResolver(resolver)
 
 	first, err := svc.BuyPosition(ctx(), "u1", "nyse", BuyInput{
-		Symbol: "MSFT", ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	second, err := svc.BuyPosition(ctx(), "u1", "xetra", BuyInput{
-		Symbol: "MSFT", ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	assert.NotEqual(t, first.Position.InstrumentID, second.Position.InstrumentID)
@@ -76,11 +76,11 @@ func TestBuyFlow_UnresolvedScopedTickerDoesNotFallBackToTickerMerge(t *testing.T
 	svc.SetInstrumentResolver(instrument.NewResolver(instrument.NewInMemoryRepository(), nil))
 
 	first, err := svc.BuyPosition(ctx(), "u1", "unresolved-un", BuyInput{
-		Symbol: "MSFT", ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx(), "u1", "unresolved-gy", BuyInput{
-		Symbol: "MSFT", ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.ErrorIs(t, err, ErrInstrumentIdentityUnresolvedConflict)
 	assert.Empty(t, first.Position.InstrumentID)
@@ -109,15 +109,15 @@ func TestBuyFlow_AliasesAndRebuyPreserveStableInstrument(t *testing.T) {
 	svc.SetInstrumentResolver(instrument.NewResolver(identities, nil))
 
 	first, err := svc.BuyPosition(ctx(), "u1", "fb-buy", BuyInput{
-		Symbol: "FB", ExchangeCode: "UW", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "FB", ExchangeCode: "UW", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	_, err = svc.SellPosition(ctx(), "u1", "fb-close", SellInput{
-		PositionID: first.Position.ID, Quantity: 1, ExecutionPrice: 100,
+		PositionID: first.Position.ID, Quantity: testQuantity("1"), ExecutionPrice: testPrice("100"),
 	})
 	require.NoError(t, err)
 	second, err := svc.BuyPosition(ctx(), "u1", "meta-rebuy", BuyInput{
-		Symbol: "META", ExchangeCode: "UW", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "META", ExchangeCode: "UW", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	assert.NotEqual(t, first.Position.ID, second.Position.ID)
@@ -137,7 +137,7 @@ func TestBuyFlow_AmbiguousIdentityDoesNotSelectFirstCandidate(t *testing.T) {
 	svc.SetInstrumentResolver(resolver)
 
 	_, err := svc.BuyPosition(ctx(), "u1", "ambiguous-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.ErrorIs(t, err, ErrInstrumentIdentityAmbiguous)
 	positions, listErr := svc.ListPositions(ctx(), "u1")
@@ -149,7 +149,7 @@ func TestPositionSpecificIncomeKeepsInstrumentIdentityAndSymbolSnapshot(t *testi
 	svc, _, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "identity-income-buy", BuyInput{
 		Symbol: "MSFT", InstrumentID: "stable-income-instrument",
-		AssetType: AssetTypeStock, Quantity: 2,
+		AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
 

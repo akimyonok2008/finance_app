@@ -100,6 +100,18 @@ func TestQuantizeCashUnknownCurrency(t *testing.T) {
 	}
 }
 
+func TestCurrencyScaleSupportsPortfolioCurrencies(t *testing.T) {
+	for _, currency := range []string{"USD", "EUR", "GBP", "TRY"} {
+		scale, err := CurrencyScale(currency)
+		if err != nil {
+			t.Fatalf("CurrencyScale(%q): %v", currency, err)
+		}
+		if scale != 2 {
+			t.Errorf("CurrencyScale(%q) = %d, want 2", currency, scale)
+		}
+	}
+}
+
 func TestQuantityMulPrice(t *testing.T) {
 	q, _ := ParseQuantity("3")
 	p, _ := ParsePrice("10.333333333333")

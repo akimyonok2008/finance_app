@@ -20,7 +20,7 @@ func validInput() PositionInput {
 	return PositionInput{
 		Symbol:    "aapl",
 		AssetType: "stock",
-		Quantity:  10,
+		Quantity:  testQuantity("10"),
 	}
 }
 
@@ -63,31 +63,31 @@ func TestAddPosition_LocksBaselineAtCurrentPrice(t *testing.T) {
 	assert.Equal(t, "user-1", pos.UserID)
 	assert.NotEmpty(t, pos.PortfolioID)
 	// Baseline = today's mock quote (AAPL 195 USD); the client never sends it.
-	assert.Equal(t, 195.0, pos.AverageBuyPrice)
+	assertPriceEqual(t, "195", pos.AverageBuyPrice)
 	assert.Equal(t, "USD", pos.Currency)
 }
 
 func TestAddPosition_BaselineUsesQuoteCurrency(t *testing.T) {
 	svc, _ := newTestService()
-	in := PositionInput{Symbol: "thyao.is", AssetType: "stock", Quantity: 100}
+	in := PositionInput{Symbol: "thyao.is", AssetType: "stock", Quantity: testQuantity("100")}
 
 	pos, err := svc.AddPosition(ctx(), "user-1", in)
 
 	require.NoError(t, err)
 	assert.Equal(t, "THYAO.IS", pos.Symbol)
-	assert.Equal(t, 295.0, pos.AverageBuyPrice) // mock THYAO.IS quote
-	assert.Equal(t, "TRY", pos.Currency)        // quote currency, not user input
+	assertPriceEqual(t, "295", pos.AverageBuyPrice) // mock THYAO.IS quote
+	assert.Equal(t, "TRY", pos.Currency)            // quote currency, not user input
 }
 
 func TestAddPosition_ValidCrypto(t *testing.T) {
 	svc, _ := newTestService()
-	in := PositionInput{Symbol: "BTC-USD", AssetType: "crypto", Quantity: 0.1}
+	in := PositionInput{Symbol: "BTC-USD", AssetType: "crypto", Quantity: testQuantity("0.1")}
 
 	pos, err := svc.AddPosition(ctx(), "user-1", in)
 
 	require.NoError(t, err)
 	assert.Equal(t, "BTC-USD", pos.Symbol)
-	assert.Equal(t, 68000.0, pos.AverageBuyPrice)
+	assertPriceEqual(t, "68000", pos.AverageBuyPrice)
 }
 
 func TestAddPosition_FreshPositionStartsAtIndex100(t *testing.T) {
@@ -156,7 +156,7 @@ func TestAddPosition_RejectsInvalidAssetType(t *testing.T) {
 func TestAddPosition_RejectsNonPositiveQuantity(t *testing.T) {
 	svc, _ := newTestService()
 	in := validInput()
-	in.Quantity = 0
+	in.Quantity = testQuantity("0")
 	_, err := svc.AddPosition(ctx(), "user-1", in)
 	assert.ErrorIs(t, err, ErrInvalidQuantity)
 }
@@ -164,7 +164,7 @@ func TestAddPosition_RejectsNonPositiveQuantity(t *testing.T) {
 func TestAddPosition_RejectsUnsupportedQuoteCurrency(t *testing.T) {
 	svc, pp := newTestService()
 	pp.Set("TOKYO.T", 1500, "JPY") // priceable, but JPY is not in the mock FX
-	in := PositionInput{Symbol: "TOKYO.T", AssetType: "stock", Quantity: 1}
+	in := PositionInput{Symbol: "TOKYO.T", AssetType: "stock", Quantity: testQuantity("1")}
 	_, err := svc.AddPosition(ctx(), "user-1", in)
 	assert.ErrorIs(t, err, ErrUnsupportedCurrency)
 }
@@ -199,9 +199,9 @@ func TestUpdatePosition_QuantityOnly(t *testing.T) {
 
 	updated, err := svc.UpdatePosition(ctx(), "user-1", pos.ID, 12)
 	require.NoError(t, err)
-	assert.Equal(t, 12.0, updated.Quantity)
+	assertQuantityEqual(t, "12", updated.Quantity)
 	// Baseline price and symbol survive the edit untouched.
-	assert.Equal(t, 195.0, updated.AverageBuyPrice)
+	assertPriceEqual(t, "195", updated.AverageBuyPrice)
 	assert.Equal(t, "AAPL", updated.Symbol)
 }
 
@@ -214,7 +214,7 @@ func TestUpdatePosition_BaselineSurvivesPriceMoves(t *testing.T) {
 	updated, err := svc.UpdatePosition(ctx(), "user-1", pos.ID, 20)
 	require.NoError(t, err)
 	// Editing quantity must NOT re-lock the baseline at the new price.
-	assert.Equal(t, 195.0, updated.AverageBuyPrice)
+	assertPriceEqual(t, "195", updated.AverageBuyPrice)
 }
 
 func TestUpdatePosition_RejectsNonPositiveQuantity(t *testing.T) {
@@ -278,9 +278,9 @@ func TestSummary_GainComesOnlyFromPostAddMoves(t *testing.T) {
 func TestSummary_MixedCurrencyNormalizedToUSD(t *testing.T) {
 	svc, pp := newTestService()
 	// Baselines lock at AAPL 195 USD and THYAO.IS 295 TRY (TRY=0.031).
-	_, err := svc.AddPosition(ctx(), "user-1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 10})
+	_, err := svc.AddPosition(ctx(), "user-1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("10")})
 	require.NoError(t, err)
-	_, err = svc.AddPosition(ctx(), "user-1", PositionInput{Symbol: "THYAO.IS", AssetType: "stock", Quantity: 100})
+	_, err = svc.AddPosition(ctx(), "user-1", PositionInput{Symbol: "THYAO.IS", AssetType: "stock", Quantity: testQuantity("100")})
 	require.NoError(t, err)
 
 	pp.Set("AAPL", 214.5, "USD")     // +10%

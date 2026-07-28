@@ -26,7 +26,7 @@ func assertReturnConsistent(t *testing.T, repo *InMemoryRepository, svc *Service
 	cash, err := repo.ListCashBalances(context.Background(), userID)
 	require.NoError(t, err)
 	for _, c := range cash {
-		assert.GreaterOrEqual(t, c.Amount, 0.0, "cash must never go negative")
+		assert.GreaterOrEqual(t, c.Amount.Cmp(testAmount("0")), 0, "cash must never go negative")
 	}
 	rp, err := perf.CurrentRankedPerformance(context.Background(), userID)
 	require.NoError(t, err)
@@ -39,7 +39,7 @@ func assertReturnConsistent(t *testing.T, repo *InMemoryRepository, svc *Service
 // let exactly one succeed; cash may never go negative.
 func TestConcurrent_FeeAndWithdrawalContendForCash(t *testing.T) {
 	svc, repo, perf, _ := newTxTestService()
-	_, err := svc.DepositCash(ctx(), "u1", "seed", CashFlowInput{Currency: "USD", Amount: 100})
+	_, err := svc.DepositCash(ctx(), "u1", "seed", CashFlowInput{Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
 
 	// Each wants 80 of the 100 available; only one can win.
@@ -52,7 +52,7 @@ func TestConcurrent_FeeAndWithdrawalContendForCash(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		_, results[1] = svc.WithdrawCash(ctx(), "u1", "wd", CashFlowInput{Currency: "USD", Amount: 80})
+		_, results[1] = svc.WithdrawCash(ctx(), "u1", "wd", CashFlowInput{Currency: "USD", Amount: testAmount("80")})
 	}()
 	wg.Wait()
 
@@ -67,7 +67,7 @@ func TestConcurrent_FeeAndWithdrawalContendForCash(t *testing.T) {
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
 	for _, c := range cash {
-		assert.GreaterOrEqual(t, c.Amount, 0.0, "cash must never go negative")
+		assert.GreaterOrEqual(t, c.Amount.Cmp(testAmount("0")), 0, "cash must never go negative")
 	}
 	assertReturnConsistent(t, repo, svc, perf, "u1")
 }
@@ -89,7 +89,7 @@ func TestConcurrent_ReinvestmentAndWithdrawal(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = svc.WithdrawCash(ctx(), "u1", "wd", CashFlowInput{Currency: "USD", Amount: 1000})
+		_, _ = svc.WithdrawCash(ctx(), "u1", "wd", CashFlowInput{Currency: "USD", Amount: testAmount("1000")})
 	}()
 	wg.Wait()
 
@@ -111,11 +111,11 @@ func TestConcurrent_SellsCannotOversell(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, results[0] = svc.SellPosition(ctx(), "u1", "sell-a", SellInput{PositionID: positionID, Quantity: 7})
+		_, results[0] = svc.SellPosition(ctx(), "u1", "sell-a", SellInput{PositionID: positionID, Quantity: testQuantity("7")})
 	}()
 	go func() {
 		defer wg.Done()
-		_, results[1] = svc.SellPosition(ctx(), "u1", "sell-b", SellInput{PositionID: positionID, Quantity: 7})
+		_, results[1] = svc.SellPosition(ctx(), "u1", "sell-b", SellInput{PositionID: positionID, Quantity: testQuantity("7")})
 	}()
 	wg.Wait()
 
@@ -132,7 +132,7 @@ func TestConcurrent_SellsCannotOversell(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 3, positions[0].Quantity, 1e-9, "remaining quantity must reflect exactly one 7-share sale")
+	assertQuantityEqual(t, "3", positions[0].Quantity, "remaining quantity must reflect exactly one 7-share sale")
 
 	assertReturnConsistent(t, repo, svc, perf, "u1")
 }
@@ -146,11 +146,11 @@ func TestSell_DuplicateRequestIDIsIdempotent(t *testing.T) {
 	buy := fundedPortfolio(t, svc, "u1") // 10 AAPL shares
 	positionID := buy.Position.ID
 
-	first, err := svc.SellPosition(ctx(), "u1", "sell-dup", SellInput{PositionID: positionID, Quantity: 5})
+	first, err := svc.SellPosition(ctx(), "u1", "sell-dup", SellInput{PositionID: positionID, Quantity: testQuantity("5")})
 	require.NoError(t, err)
 	require.False(t, first.Duplicate)
 
-	second, err := svc.SellPosition(ctx(), "u1", "sell-dup", SellInput{PositionID: positionID, Quantity: 5})
+	second, err := svc.SellPosition(ctx(), "u1", "sell-dup", SellInput{PositionID: positionID, Quantity: testQuantity("5")})
 	require.NoError(t, err)
 	assert.True(t, second.Duplicate, "replay with the same request id must be recognized as a duplicate")
 	assert.Equal(t, first.Activity.ID, second.Activity.ID)
@@ -158,7 +158,7 @@ func TestSell_DuplicateRequestIDIsIdempotent(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 5, positions[0].Quantity, 1e-9, "quantity must be reduced exactly once")
+	assertQuantityEqual(t, "5", positions[0].Quantity, "quantity must be reduced exactly once")
 
 	activities, err := repo.ListActivities(ctx(), "u1", 1000)
 	require.NoError(t, err)
@@ -180,7 +180,7 @@ func TestRebuyAfterFullClosure_CreatesNewEpisode(t *testing.T) {
 	buy := fundedPortfolio(t, svc, "u1") // 10 AAPL shares
 	oldPositionID := buy.Position.ID
 
-	sell, err := svc.SellPosition(ctx(), "u1", "sell-all", SellInput{PositionID: oldPositionID, Quantity: 10})
+	sell, err := svc.SellPosition(ctx(), "u1", "sell-all", SellInput{PositionID: oldPositionID, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 	require.NotNil(t, sell.Closed)
 	assert.Equal(t, oldPositionID, sell.Activity.PositionEpisodeID)
@@ -190,7 +190,7 @@ func TestRebuyAfterFullClosure_CreatesNewEpisode(t *testing.T) {
 	require.Len(t, closedBefore, 1)
 	realizedBefore := closedBefore[0].RealizedGainLossBase
 
-	rebuy, err := svc.BuyPosition(ctx(), "u1", "rebuy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 4})
+	rebuy, err := svc.BuyPosition(ctx(), "u1", "rebuy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("4")})
 	require.NoError(t, err)
 	require.NotNil(t, rebuy.Position)
 	assert.NotEqual(t, oldPositionID, rebuy.Position.ID, "a rebuy after full closure must get a new episode identity")
@@ -206,7 +206,7 @@ func TestRebuyAfterFullClosure_CreatesNewEpisode(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, open, 1)
 	assert.Equal(t, rebuy.Position.ID, open[0].ID)
-	assert.InDelta(t, 4, open[0].Quantity, 1e-9)
+	assertQuantityEqual(t, "4", open[0].Quantity)
 }
 
 // TestConcurrent_DividendAndFeeSerialize runs an income event and a fee together

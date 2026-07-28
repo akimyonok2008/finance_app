@@ -24,9 +24,9 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "pg-seed-dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "pg-seed-dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "pg-seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx, userID, "pg-seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	// Cash dividend (return-bearing) raises the index.
