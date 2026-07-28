@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // BenchmarkConstructionService builds normalized virtual benchmark indexes
@@ -109,7 +112,15 @@ func (s *BenchmarkConstructionService) CalculateReturnPct(ctx context.Context, r
 	if err != nil {
 		return 0, err
 	}
-	return res.ReturnPercentage, nil
+	// External float64 boundary: callers outside this package (e.g. the
+	// achievements service) still consume plain percentages. The exact
+	// decimal computation happens entirely inside CalculateReturn; this is
+	// the single, explicit conversion point out of it.
+	pct, err := strconv.ParseFloat(res.ReturnPercentage.String(), 64)
+	if err != nil {
+		return 0, fmt.Errorf("benchmark: convert return percentage: %w", err)
+	}
+	return pct, nil
 }
 
 func (s *BenchmarkConstructionService) resolveRecipe(ctx context.Context, recipeID string, asOf time.Time) (BenchmarkRecipe, error) {
@@ -128,10 +139,10 @@ func (s *BenchmarkConstructionService) resolveRecipe(ctx context.Context, recipe
 
 // flattenRecipe expands nested recipeRef legs into a flat list of symbol legs,
 // scaling child weights by the parent weight and merging duplicate symbols.
-func (s *BenchmarkConstructionService) flattenRecipe(ctx context.Context, recipe BenchmarkRecipe, asOf time.Time, parentWeight float64) ([]AssetAllocation, error) {
+func (s *BenchmarkConstructionService) flattenRecipe(ctx context.Context, recipe BenchmarkRecipe, asOf time.Time, parentWeight money.Weight) ([]AssetAllocation, error) {
 	var result []AssetAllocation
 	for _, component := range recipe.Components {
-		effectiveWeight := parentWeight * component.Weight
+		effectiveWeight := parentWeight.Mul(component.Weight)
 		switch {
 		case component.Symbol != "":
 			result = append(result, AssetAllocation{Symbol: component.Symbol, Weight: effectiveWeight})
@@ -153,13 +164,14 @@ func (s *BenchmarkConstructionService) flattenRecipe(ctx context.Context, recipe
 }
 
 func mergeDuplicateSymbols(components []AssetAllocation) []AssetAllocation {
-	merged := make(map[string]float64, len(components))
+	merged := make(map[string]money.Weight, len(components))
 	order := make([]string, 0, len(components))
 	for _, c := range components {
 		if _, seen := merged[c.Symbol]; !seen {
 			order = append(order, c.Symbol)
+			merged[c.Symbol] = money.ZeroWeight()
 		}
-		merged[c.Symbol] += c.Weight
+		merged[c.Symbol] = merged[c.Symbol].Add(c.Weight)
 	}
 	out := make([]AssetAllocation, 0, len(order))
 	for _, symbol := range order {
@@ -195,10 +207,10 @@ func commonDates(pricesBySymbol map[string][]PricePoint) []string {
 	return out
 }
 
-func toPriceMap(series []PricePoint) map[string]float64 {
-	m := make(map[string]float64, len(series))
+func toPriceMap(series []PricePoint) map[string]money.Price {
+	m := make(map[string]money.Price, len(series))
 	for _, p := range series {
-		if p.AdjustedClose != 0 {
+		if !p.AdjustedClose.IsZero() {
 			m[p.Date] = p.AdjustedClose
 		} else {
 			m[p.Date] = p.RawClose

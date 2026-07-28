@@ -22,11 +22,11 @@ func TestRedisCache_GlobalUpsertAndTop(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()
 
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 8.1))
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", 12.4))
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u3", -3.0))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("8.1")))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", testRatio("12.4")))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u3", testRatio("-3.0")))
 	// Upsert overwrites the previous score.
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 9.9))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("9.9")))
 
 	top, err := c.GetGlobalTop(ctx, 10)
 	require.NoError(t, err)
@@ -41,8 +41,8 @@ func TestRedisCache_GlobalUpsertAndTop(t *testing.T) {
 func TestRedisCache_GlobalRemovalIsIdempotentAndIsolated(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 12))
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", 8))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("12")))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", testRatio("8")))
 
 	require.NoError(t, c.RemoveGlobalScore(ctx, "u1"))
 	require.NoError(t, c.RemoveGlobalScore(ctx, "u1"), "removing an absent member must succeed")
@@ -51,7 +51,7 @@ func TestRedisCache_GlobalRemovalIsIdempotentAndIsolated(t *testing.T) {
 	require.Len(t, top, 1)
 	assert.Equal(t, "u2", top[0].UserID)
 
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 15))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("15")))
 	top, err = c.GetGlobalTop(ctx, 0)
 	require.NoError(t, err)
 	require.Len(t, top, 2)
@@ -62,7 +62,7 @@ func TestRedisCache_GlobalTopRespectsLimit(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()
 	for _, u := range []string{"a", "b", "c", "d"} {
-		require.NoError(t, c.UpsertGlobalScore(ctx, u, 1))
+		require.NoError(t, c.UpsertGlobalScore(ctx, u, testRatio("1")))
 	}
 	top, err := c.GetGlobalTop(ctx, 2)
 	require.NoError(t, err)
@@ -80,9 +80,9 @@ func TestRedisCache_CompetitionScores(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()
 
-	require.NoError(t, c.UpsertCompetitionScore(ctx, "weekly_2026_24", "u1", 5.0))
-	require.NoError(t, c.UpsertCompetitionScore(ctx, "weekly_2026_24", "u2", 8.4))
-	require.NoError(t, c.UpsertCompetitionScore(ctx, "weekly_2026_25", "u3", 99)) // other sprint
+	require.NoError(t, c.UpsertCompetitionScore(ctx, "weekly_2026_24", "u1", testRatio("5.0")))
+	require.NoError(t, c.UpsertCompetitionScore(ctx, "weekly_2026_24", "u2", testRatio("8.4")))
+	require.NoError(t, c.UpsertCompetitionScore(ctx, "weekly_2026_25", "u3", testRatio("99"))) // other sprint
 
 	top, err := c.GetCompetitionTop(ctx, "weekly_2026_24", 10)
 	require.NoError(t, err)
@@ -93,9 +93,9 @@ func TestRedisCache_CompetitionScores(t *testing.T) {
 func TestRedisCache_Ranks(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 5))
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", 10))
-	require.NoError(t, c.UpsertCompetitionScore(ctx, "comp", "u1", 3))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("5")))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", testRatio("10")))
+	require.NoError(t, c.UpsertCompetitionScore(ctx, "comp", "u1", testRatio("3")))
 
 	rank, err := c.GetGlobalRank(ctx, "u2")
 	require.NoError(t, err)
@@ -117,7 +117,7 @@ func TestRedisCache_Ranks(t *testing.T) {
 func TestNoopCache_AlwaysEmpty(t *testing.T) {
 	c := NoopLeaderboardCache{}
 	ctx := context.Background()
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", 5))
+	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("5")))
 	top, err := c.GetGlobalTop(ctx, 10)
 	require.NoError(t, err)
 	assert.Empty(t, top)

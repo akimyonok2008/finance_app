@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
@@ -55,7 +56,7 @@ type OutboxEvent struct {
 	AggregateID       string // portfolio id
 	AggregateVersion  int64
 	UserID            string
-	RankedIndex       float64
+	RankedIndex       money.IndexValue
 	RankingStatus     string
 	TrackingStartedAt time.Time
 	ValuationAsOf     time.Time
@@ -79,8 +80,8 @@ type MutationAudit struct {
 	PortfolioVersionAfter    int64
 	PerformanceVersionBefore int64
 	PerformanceVersionAfter  int64
-	RankedIndexBefore        float64
-	RankedIndexAfter         float64
+	RankedIndexBefore        money.IndexValue
+	RankedIndexAfter         money.IndexValue
 	OccurredAt               time.Time
 	// ResultPositionID lets a duplicate request replay the original result
 	// without re-applying the mutation.

@@ -8,12 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
 // readRankedIndex computes the live ranked index for a user from committed
 // state, valuing positions and cash at current mock prices.
-func readRankedIndex(t *testing.T, svc *Service, userID string) float64 {
+func readRankedIndex(t *testing.T, svc *Service, userID string) money.IndexValue {
 	t.Helper()
 	sr, ok := svc.repo.(performance.StateReader)
 	require.True(t, ok)
@@ -28,9 +29,9 @@ func readRankedIndex(t *testing.T, svc *Service, userID string) float64 {
 // with a known value. Returns the buy result.
 func fundedPortfolio(t *testing.T, svc *Service, userID string) MutationResult {
 	t.Helper()
-	_, err := svc.DepositCash(ctx(), userID, "seed-deposit", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx(), userID, "seed-deposit", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	buy, err := svc.BuyPosition(ctx(), userID, "seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	buy, err := svc.BuyPosition(ctx(), userID, "seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 	require.NotNil(t, buy.Position)
 	return buy
@@ -46,36 +47,36 @@ func TestCashDividend_IncreasesCashAndRankedReturn(t *testing.T) {
 	require.NoError(t, err)
 
 	res, err := svc.RecordIncome(ctx(), "u1", "div-1", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 	// Return-bearing: the index must RISE (not be neutralized).
-	assert.Greater(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Greater(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 
 	after, err := perf.CurrentRankedPerformance(ctx(), "u1")
 	require.NoError(t, err)
-	assert.Greater(t, after.RankedIndex, before.RankedIndex)
+	assert.Greater(t, after.RankedIndex.Cmp(before.RankedIndex), 0)
 
 	// Portfolio value was 10000 (8050 position + 1950 cash). A 100 dividend is
 	// +1% → index ~ +1%.
-	assert.InDelta(t, before.RankedIndex*1.01, after.RankedIndex, before.RankedIndex*0.0005)
+	assertIndexValuesEqual(t, before.RankedIndex.MulRatio(testRatio("1.01")), after.RankedIndex)
 
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "USD" {
 			usd = c.Amount
 		}
 	}
-	assert.InDelta(t, 8150, usd, 1e-9) // 8050 leftover (10000-1950) + 100 dividend
+	assertAmountEqual(t, "8150", usd) // 8050 leftover (10000-1950) + 100 dividend
 }
 
 func TestDividend_DoesNotResetCheckpoint(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
 	_, err := svc.RecordIncome(ctx(), "u1", "div-1", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 
@@ -85,20 +86,20 @@ func TestDividend_DoesNotResetCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	// A return-bearing event must NOT re-baseline: the segment start stays 10000.
 	require.NotNil(t, state.SegmentStartValueBase)
-	assert.InDelta(t, 10000, *state.SegmentStartValueBase, 1e-6)
+	assertAmountEqual(t, "10000", *state.SegmentStartValueBase)
 }
 
 func TestETFDistributionAndInterest_AreReturnBearing(t *testing.T) {
 	for _, sub := range []IncomeSubtype{IncomeETFDistribution, IncomeInterest} {
 		svc, _, _, _ := newTxTestService()
 		fundedPortfolio(t, svc, "u1")
-		in := IncomeInput{Subtype: sub, Symbol: "AAPL", Currency: "USD", Amount: 50}
+		in := IncomeInput{Subtype: sub, Symbol: "AAPL", Currency: "USD", Amount: testAmount("50")}
 		if sub == IncomeInterest {
 			in.Symbol = "" // interest may be recorded without a symbol
 		}
 		res, err := svc.RecordIncome(ctx(), "u1", "inc-"+string(sub), in)
 		require.NoError(t, err)
-		assert.Greaterf(t, res.RankedIndexAfter, res.RankedIndexBefore, "%s must raise the index", sub)
+		assert.Greaterf(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0, "%s must raise the index", sub)
 	}
 }
 
@@ -106,18 +107,18 @@ func TestForeignCurrencyDividend_StaysInDeclaredCurrency(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
 	_, err := svc.RecordIncome(ctx(), "u1", "eur-div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "EUR", Amount: 30,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "EUR", Amount: testAmount("30"),
 	})
 	require.NoError(t, err)
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var eur float64
+	eur := testAmount("0")
 	for _, c := range cash {
 		if c.Currency == "EUR" {
 			eur = c.Amount
 		}
 	}
-	assert.InDelta(t, 30, eur, 1e-9) // not converted to base
+	assertAmountEqual(t, "30", eur) // not converted to base
 }
 
 func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
@@ -129,18 +130,18 @@ func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
 	quotes.Set("AAPL", 200, "USD") // reinvest at 200
 	res, err := svc.RecordIncome(ctx(), "u1", "reinv-1", IncomeInput{
 		Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock,
-		Currency: "USD", Amount: 400,
+		Currency: "USD", Amount: testAmount("400"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
 
 	// Quantity increases by income/price = 400/200 = 2 shares.
-	assert.InDelta(t, startQty+2, res.Position.Quantity, 1e-9)
+	assert.True(t, startQty.Add(testQuantity("2")).EqualQuantity(res.Position.Quantity))
 
 	// The income is reflected once: index rises, but only by the dividend amount,
 	// not by dividend + a spurious buy return.
 	after := readRankedIndex(t, svc, "u1")
-	assert.Greater(t, after, before)
+	assert.Greater(t, after.Cmp(before), 0)
 
 	// Two grouped activities were recorded: the income leg and the buy leg.
 	acts, err := repo.ListActivities(ctx(), "u1", 50)
@@ -161,9 +162,9 @@ func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
 func TestDividend_DuplicatePrevented(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	first, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100})
+	first, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
-	retry, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100})
+	retry, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
 	assert.Equal(t, first.PortfolioVersion, retry.PortfolioVersion)
@@ -172,9 +173,9 @@ func TestDividend_DuplicatePrevented(t *testing.T) {
 func TestIncome_RejectsInvalidAmountAndType(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordIncome(ctx(), "u1", "bad-amt", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 0})
+	_, err := svc.RecordIncome(ctx(), "u1", "bad-amt", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("0")})
 	require.ErrorIs(t, err, ErrInvalidIncomeAmount)
-	_, err = svc.RecordIncome(ctx(), "u1", "bad-cur", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "JPY", Amount: 10})
+	_, err = svc.RecordIncome(ctx(), "u1", "bad-cur", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "JPY", Amount: testAmount("10")})
 	require.ErrorIs(t, err, ErrUnsupportedCurrency)
 }
 
@@ -184,38 +185,38 @@ func TestManagementFee_ReducesCashAndRankedReturn(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
 	before := readRankedIndex(t, svc, "u1")
-	res, err := svc.RecordFee(ctx(), "u1", "fee-1", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 100})
+	res, err := svc.RecordFee(ctx(), "u1", "fee-1", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
-	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Less(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 	after := readRankedIndex(t, svc, "u1")
-	assert.Less(t, after, before)
+	assert.Less(t, after.Cmp(before), 0)
 }
 
 func TestFee_InsufficientCashRejected(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1") // 1950 USD cash left
-	_, err := svc.RecordFee(ctx(), "u1", "big-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 99999})
+	_, err := svc.RecordFee(ctx(), "u1", "big-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("99999")})
 	require.ErrorIs(t, err, ErrInsufficientCashForFee)
 }
 
 func TestFee_NeverCreatesNegativeCash(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordFee(ctx(), "u1", "f", FeeInput{Subtype: FeeCustody, Currency: "USD", Amount: 1950})
+	_, err := svc.RecordFee(ctx(), "u1", "f", FeeInput{Subtype: FeeCustody, Currency: "USD", Amount: testAmount("1950")})
 	require.NoError(t, err)
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
 	for _, c := range cash {
-		assert.GreaterOrEqual(t, c.Amount, 0.0)
+		assert.GreaterOrEqual(t, c.Amount.Cmp(testAmount("0")), 0)
 	}
 }
 
 func TestFee_DuplicatePrevented(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: 25})
+	_, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
-	retry, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: 25})
+	retry, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
 }
@@ -226,7 +227,7 @@ func TestStockSplit_PreservesValueBasisAndIndex(t *testing.T) {
 	svc, _, _, quotes := newTxTestService()
 	buy := fundedPortfolio(t, svc, "u1")
 	beforeIdx := readRankedIndex(t, svc, "u1")
-	beforeBasis := buy.Position.Quantity * buy.Position.AverageBuyPrice
+	beforeBasis := buy.Position.Quantity.MulPrice(buy.Position.AverageBuyPrice)
 
 	res, err := svc.RecordCorporateAction(ctx(), "u1", "split-1", CorpActionInput{
 		Subtype: CorpStockSplit, Symbol: "AAPL", RatioNumerator: 2, RatioDenominator: 1,
@@ -234,30 +235,33 @@ func TestStockSplit_PreservesValueBasisAndIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
 
-	assert.InDelta(t, buy.Position.Quantity*2, res.Position.Quantity, 1e-9)
-	assert.InDelta(t, buy.Position.AverageBuyPrice/2, res.Position.AverageBuyPrice, 1e-9)
+	assert.True(t, buy.Position.Quantity.MulRatio(testRatio("2")).EqualQuantity(res.Position.Quantity))
+	expectedPrice, err := buy.Position.AverageBuyPrice.DivRatio(testRatio("2"), 18)
+	require.NoError(t, err)
+	assert.Equal(t, 0, expectedPrice.Cmp(res.Position.AverageBuyPrice))
 	// Total basis unchanged.
-	assert.InDelta(t, beforeBasis, res.Position.Quantity*res.Position.AverageBuyPrice, 1e-6)
+	assertAmountValuesEqual(t, beforeBasis, res.Position.Quantity.MulPrice(res.Position.AverageBuyPrice))
 	// Ranked index unchanged AT THE ACTION (value-invariant transformation).
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 	// A real split-adjusted feed halves the quote; simulate that, then confirm the
 	// index is still unchanged (no phantom gain from the doubled share count).
-	quotes.Set("AAPL", buy.Position.AverageBuyPrice/2, "USD")
+	quotes.Set("AAPL", expectedPrice.Float64(), "USD")
 	afterIdx := readRankedIndex(t, svc, "u1")
-	assert.InDelta(t, beforeIdx, afterIdx, 1e-6)
+	assertIndexValuesEqual(t, beforeIdx, afterIdx)
 }
 
 func TestReverseSplit_PreservesValueAndIndex(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy := fundedPortfolio(t, svc, "u1")
-	beforeBasis := buy.Position.Quantity * buy.Position.AverageBuyPrice
+	beforeBasis := buy.Position.Quantity.MulPrice(buy.Position.AverageBuyPrice)
 	res, err := svc.RecordCorporateAction(ctx(), "u1", "rsplit", CorpActionInput{
 		Subtype: CorpReverseSplit, Symbol: "AAPL", RatioNumerator: 1, RatioDenominator: 10,
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, buy.Position.Quantity/10, res.Position.Quantity, 1e-9)
-	assert.InDelta(t, beforeBasis, res.Position.Quantity*res.Position.AverageBuyPrice, 1e-6)
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	expectedQuantity := buy.Position.Quantity.MulRatio(testRatio("0.1"))
+	assert.True(t, expectedQuantity.EqualQuantity(res.Position.Quantity))
+	assertAmountValuesEqual(t, beforeBasis, res.Position.Quantity.MulPrice(res.Position.AverageBuyPrice))
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 }
 
 func TestSplit_InvalidRatioRejected(t *testing.T) {
@@ -281,9 +285,9 @@ func TestSymbolChange_PreservesPositionAndIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
 	assert.Equal(t, "APLX", res.Position.Symbol)
-	assert.InDelta(t, buy.Position.Quantity, res.Position.Quantity, 1e-9)
-	assert.InDelta(t, buy.Position.AverageBuyPrice, res.Position.AverageBuyPrice, 1e-9)
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assert.True(t, buy.Position.Quantity.EqualQuantity(res.Position.Quantity))
+	assert.Equal(t, 0, buy.Position.AverageBuyPrice.Cmp(res.Position.AverageBuyPrice))
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 
 	// The immutable history retains the old symbol.
 	acts, err := repo.ListActivities(ctx(), "u1", 50)
@@ -318,9 +322,9 @@ func TestWriteOff_ProducesNegativeReturnAndClosesPosition(t *testing.T) {
 		Subtype: CorpWriteOff, Symbol: "AAPL",
 	})
 	require.NoError(t, err)
-	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Less(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 	after := readRankedIndex(t, svc, "u1")
-	assert.Less(t, after, before)
+	assert.Less(t, after.Cmp(before), 0)
 
 	// Position is closed; cash and any other holdings remain intact.
 	open, err := svc.ListPositions(ctx(), "u1")
@@ -348,7 +352,7 @@ func TestWriteOff_DuplicateRejected(t *testing.T) {
 func TestActivityMetadata_RecordsEffectAndProvenance(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordFee(ctx(), "u1", "fee-meta", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 10})
+	_, err := svc.RecordFee(ctx(), "u1", "fee-meta", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("10")})
 	require.NoError(t, err)
 	acts, err := repo.ListActivities(ctx(), "u1", 50)
 	require.NoError(t, err)

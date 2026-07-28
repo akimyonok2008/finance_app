@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // IncomeEventView is the OWNER-PRIVATE, read-only projection of an automatically
@@ -12,23 +14,23 @@ import (
 // achievements) — public ranked return may reflect income, but the amount stays
 // private.
 type IncomeEventView struct {
-	ID            string     `json:"id"`
-	EventType     string     `json:"event_type"`
-	Symbol        string     `json:"symbol"`
-	Currency      string     `json:"currency"`
-	GrossAmount   float64    `json:"gross_amount"`
-	Withholding   float64    `json:"withholding_amount"`
-	FeeAmount     float64    `json:"fee_amount"`
-	NetAmount     float64    `json:"net_amount"`
-	ReinvestedQty float64    `json:"reinvestment_quantity,omitempty"`
-	Estimated     bool       `json:"estimated"`
-	Status        string     `json:"status"`
-	Provider      string     `json:"provider"`
-	Explanation   string     `json:"explanation"`
-	Correctable   bool       `json:"correctable"`
-	PaymentDate   *time.Time `json:"payment_date,omitempty"`
-	AppliedAt     *time.Time `json:"applied_at,omitempty"`
-	System        bool       `json:"system_generated"`
+	ID            string         `json:"id"`
+	EventType     string         `json:"event_type"`
+	Symbol        string         `json:"symbol"`
+	Currency      string         `json:"currency"`
+	GrossAmount   money.Amount   `json:"gross_amount"`
+	Withholding   money.Amount   `json:"withholding_amount"`
+	FeeAmount     money.Amount   `json:"fee_amount"`
+	NetAmount     money.Amount   `json:"net_amount"`
+	ReinvestedQty money.Quantity `json:"reinvestment_quantity,omitempty"`
+	Estimated     bool           `json:"estimated"`
+	Status        string         `json:"status"`
+	Provider      string         `json:"provider"`
+	Explanation   string         `json:"explanation"`
+	Correctable   bool           `json:"correctable"`
+	PaymentDate   *time.Time     `json:"payment_date,omitempty"`
+	AppliedAt     *time.Time     `json:"applied_at,omitempty"`
+	System        bool           `json:"system_generated"`
 }
 
 // ListIncomeEventViews returns a user's automatic-income history and pending
@@ -77,10 +79,10 @@ func toView(ev IncomeEvent, app Application) IncomeEventView {
 		EventType:     string(ev.Type),
 		Symbol:        ev.Instrument.Symbol,
 		Currency:      app.CashCurrency,
-		GrossAmount:   round2(app.GrossAmount),
-		Withholding:   round2(app.WithholdingAmount),
-		FeeAmount:     round2(app.FeeAmount),
-		NetAmount:     round2(app.NetAmount),
+		GrossAmount:   app.GrossAmount,
+		Withholding:   app.WithholdingAmount,
+		FeeAmount:     app.FeeAmount,
+		NetAmount:     app.NetAmount,
 		ReinvestedQty: app.ReinvestmentQuantity,
 		Estimated:     app.Estimated,
 		Status:        userStatus(app.Status),

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/income"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -47,7 +48,7 @@ func (g incomeGateway) HistoricalHolders(ctx context.Context, instrumentID, symb
 	return out, nil
 }
 
-func (g incomeGateway) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error) {
+func (g incomeGateway) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error) {
 	return g.svc.EligibleQuantity(ctx, userID, instrumentID, symbol, asOf)
 }
 
@@ -105,7 +106,7 @@ func (g incomeGateway) ApplyIncomeEvent(ctx context.Context, userID, requestID s
 // fee. The original activity is preserved; ranked performance is adjusted once.
 func (g incomeGateway) ApplyCorrection(ctx context.Context, userID, requestID string, adj income.CorrectionAdjustment) error {
 	now := time.Now().UTC()
-	if adj.Delta >= 0 {
+	if adj.Delta.Sign() >= 0 {
 		_, err := g.svc.RecordIncome(ctx, userID, requestID, portfolio.IncomeInput{
 			Subtype: portfolio.IncomeOtherProvider, Symbol: adj.Symbol, Currency: adj.Currency,
 			Amount: adj.Delta, IncomeEventID: adj.IncomeEventID, OccurredAt: &now,
@@ -114,7 +115,7 @@ func (g incomeGateway) ApplyCorrection(ctx context.Context, userID, requestID st
 		return err
 	}
 	_, err := g.svc.RecordFee(ctx, userID, requestID, portfolio.FeeInput{
-		Subtype: portfolio.FeeOther, Currency: adj.Currency, Amount: -adj.Delta, Symbol: adj.Symbol,
+		Subtype: portfolio.FeeOther, Currency: adj.Currency, Amount: adj.Delta.Neg(), Symbol: adj.Symbol,
 		LinkedActivityID: adj.IncomeEventID, Description: "income correction: " + adj.Reason,
 		OccurredAt: &now, Provenance: portfolio.ProvenanceSystemGenerated,
 	})

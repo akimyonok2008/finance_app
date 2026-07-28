@@ -12,7 +12,11 @@
 // generate exactly zero ranked return at the moment they happen.
 package performance
 
-import "time"
+import (
+	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
+)
 
 // Status is the lifecycle of a portfolio's ranked tracking.
 type Status string
@@ -39,10 +43,10 @@ type State struct {
 	// CheckpointIndex is the ranked index captured at the start of the current
 	// segment. It always equals the current ranked index immediately after a
 	// mutation, so a mutation contributes zero return.
-	CheckpointIndex float64
+	CheckpointIndex money.IndexValue
 	// SegmentStartValueBase is the base-currency portfolio value at the start of
 	// the current segment. Nil when paused (empty portfolio), positive when active.
-	SegmentStartValueBase *float64
+	SegmentStartValueBase *money.Amount
 	Status                Status
 	// TrackingStartedAt is the ranking-epoch timestamp: when this portfolio first
 	// entered the (new) ranked-tracking model. Legacy snapshots recorded before
@@ -63,13 +67,13 @@ type State struct {
 // basis, or internal identifiers — only the index, the return percentage, the
 // status, and the ranking epoch.
 type RankedPerformance struct {
-	PortfolioID            string    `json:"-"`
-	RankedIndex            float64   `json:"ranked_index"`
-	RankedReturnPercentage float64   `json:"ranked_return_percentage"`
-	Status                 Status    `json:"ranking_status"`
-	TrackingStartedAt      time.Time `json:"tracking_started_at"`
-	ValuationAsOf          time.Time `json:"-"`
-	DataQualityStatus      string    `json:"-"`
+	PortfolioID            string           `json:"-"`
+	RankedIndex            money.IndexValue `json:"ranked_index"`
+	RankedReturnPercentage money.Ratio      `json:"ranked_return_percentage"`
+	Status                 Status           `json:"ranking_status"`
+	TrackingStartedAt      time.Time        `json:"tracking_started_at"`
+	ValuationAsOf          time.Time        `json:"-"`
+	DataQualityStatus      string           `json:"-"`
 }
 
 // ValuationObservation is the private valuation result used when persisting a
@@ -77,7 +81,7 @@ type RankedPerformance struct {
 // data.
 type ValuationObservation struct {
 	PortfolioID       string
-	ValueBase         float64
+	ValueBase         money.Amount
 	HasActive         bool
 	ValuationAsOf     time.Time
 	DataQualityStatus string
@@ -89,7 +93,7 @@ type TransitionSnapshot struct {
 	PortfolioID       string
 	UserID            string
 	TrackingStartedAt time.Time
-	RankedIndex       float64
+	RankedIndex       money.IndexValue
 	Status            Status
 	CapturedAt        time.Time
 	ValuationAsOf     time.Time
@@ -106,12 +110,12 @@ type CheckpointInput struct {
 	// ValueBeforeBase is the base-currency market value of the active positions
 	// BEFORE the mutation, at current prices. Ignored when the portfolio was empty
 	// (paused) before the mutation.
-	ValueBeforeBase float64
+	ValueBeforeBase money.Amount
 	HasActiveBefore bool
 	// ValueAfterBase is the base-currency market value of the active positions
 	// AFTER the mutation, at the same current prices. Ignored when the portfolio
 	// is empty after the mutation.
-	ValueAfterBase float64
+	ValueAfterBase money.Amount
 	HasActiveAfter bool
 	At             time.Time
 }

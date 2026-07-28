@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/instrument"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -169,19 +169,23 @@ func (s *Service) CorrectActivity(ctx context.Context, userID, requestID string,
 
 	switch original.Type {
 	case ActivityDeposit, ActivityWithdrawal:
-		if input.ActualAmount <= 0 {
+		if input.ActualAmount.Sign() <= 0 {
 			return MutationResult{}, ErrInvalidCashAmount
 		}
-		delta := input.ActualAmount - original.GrossAmount
-		if delta == 0 {
+		delta := input.ActualAmount.Sub(original.GrossAmount)
+		if delta.IsZero() {
 			return MutationResult{}, ErrNothingToCorrect
 		}
+		absDelta := delta
+		if delta.Sign() < 0 {
+			absDelta = delta.Neg()
+		}
 		cf := CashFlowInput{
-			Currency: original.Currency, Amount: math.Abs(delta),
+			Currency: original.Currency, Amount: absDelta,
 			CorrectionOf: original.ID, CorrectionReason: input.Reason,
 		}
-		depositDirection := (original.Type == ActivityDeposit && delta > 0) ||
-			(original.Type == ActivityWithdrawal && delta < 0)
+		depositDirection := (original.Type == ActivityDeposit && delta.Sign() > 0) ||
+			(original.Type == ActivityWithdrawal && delta.Sign() < 0)
 		if depositDirection {
 			return s.DepositCash(ctx, userID, requestID, cf)
 		}
@@ -218,13 +222,23 @@ func (s *Service) CashBalances(ctx context.Context, userID string) ([]CashBalanc
 	views := make([]CashBalanceView, 0, len(balances))
 	var total float64
 	for _, balance := range balances {
-		value, err := s.fx.Convert(ctx, balance.Amount, balance.Currency, fx.BaseCurrency)
+		// balance.Amount.Float64() is a documented boundary conversion: fx.Convert
+		// is not part of this section's scope and still takes/returns float64.
+		value, err := s.fx.Convert(ctx, balance.Amount.Float64(), balance.Currency, fx.BaseCurrency)
 		if err != nil {
 			return nil, 0, ErrUnsupportedCurrency
 		}
 		total += value
+		amountView, err := money.QuantizeCash(balance.Amount, balance.Currency)
+		if err != nil {
+			return nil, 0, err
+		}
+		valueView, err := money.QuantizeCash(money.AmountFromFloat64(value), fx.BaseCurrency)
+		if err != nil {
+			return nil, 0, err
+		}
 		views = append(views, CashBalanceView{
-			Currency: balance.Currency, Amount: round2(balance.Amount), ValueBase: round2(value),
+			Currency: balance.Currency, Amount: amountView, ValueBase: valueView,
 		})
 	}
 	return views, total, nil
@@ -318,7 +332,7 @@ func activityView(activity Activity) ActivityView {
 		ID: activity.ID, Type: activity.Type, Symbol: activity.Symbol, InstrumentID: activity.InstrumentID,
 		AssetType: activity.AssetType, Currency: activity.Currency,
 		Quantity: activity.Quantity, UnitPrice: activity.UnitPrice,
-		GrossAmount:                round2(activity.GrossAmount),
+		GrossAmount:                activity.GrossAmount,
 		CostBasisAllocated:         activity.CostBasisAllocated,
 		RealizedGainLossBase:       activity.RealizedGainLossBase,
 		RealizedGainLossPercentage: activity.RealizedGainLossPercentage,
@@ -328,8 +342,8 @@ func activityView(activity Activity) ActivityView {
 		Status:                     status,
 		GroupID:                    groupID,
 		PositionEpisodeID:          episodeID,
-		FeeAmount:                  round2(activity.FeeAmount),
-		NetAmount:                  round2(activity.NetAmount),
+		FeeAmount:                  activity.FeeAmount,
+		NetAmount:                  activity.NetAmount,
 	}
 }
 
@@ -386,14 +400,14 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 	if err != nil {
 		return BuyPreview{}, err
 	}
-	if input.ExecutionPrice != 0 && !finitePositive(input.ExecutionPrice) {
+	if !input.ExecutionPrice.IsZero() && input.ExecutionPrice.Sign() <= 0 {
 		return BuyPreview{}, ErrInvalidBuyPrice
 	}
 	if input.EffectiveAt != nil && input.EffectiveAt.UTC().Before(time.Now().UTC()) &&
-		input.ExecutionPrice == 0 {
+		input.ExecutionPrice.IsZero() {
 		return BuyPreview{}, ErrHistoricalExecutionPriceRequired
 	}
-	if !isFinite(input.Fee) || input.Fee < 0 {
+	if input.Fee.Sign() < 0 {
 		return BuyPreview{}, ErrInvalidBuyFee
 	}
 	identityQuality, err := s.resolveBuyIdentity(ctx, &input)
@@ -415,41 +429,49 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 	}
 	price := input.ExecutionPrice
 	priceSource := PriceSourceUserRecorded
-	if price == 0 {
-		price = quote.Price
+	if price.IsZero() {
+		price = money.PriceFromFloat64(quote.Price)
 		priceSource = PriceSourceProviderEstimate
 	}
-	if !finitePositive(price) {
+	if price.Sign() <= 0 {
 		return BuyPreview{}, ErrInvalidBuyPrice
 	}
 	feeSource := FeeSourceUserRecorded
-	if input.Fee == 0 {
+	if input.Fee.IsZero() {
 		feeSource = FeeSourceDefaultZero
 	}
 
-	gross := clean.Quantity * price
-	totalRequired := gross + input.Fee
+	// Mirrors the committed buy path's exact decimal arithmetic
+	// (coordinator.go plan(), MutationBuy case).
+	gross := clean.Quantity.MulPrice(price)
+	totalRequiredAmt := gross.Add(input.Fee)
 
 	balances, err := s.repo.ListCashBalances(ctx, userID)
 	if err != nil {
 		return BuyPreview{}, err
 	}
-	available := 0.0
+	availableAmt := money.ZeroAmount()
 	for _, balance := range balances {
 		if balance.Currency == currency {
-			available = balance.Amount
+			availableAmt = balance.Amount
 			break
 		}
 	}
-	funding := totalRequired - available
-	if funding < 1e-9 {
-		funding = 0
+	// funding = max(total_required - available, 0), no epsilon snapping
+	// needed with exact decimal arithmetic.
+	fundingAmt := totalRequiredAmt.Sub(availableAmt)
+	if fundingAmt.Sign() < 0 {
+		fundingAmt = money.ZeroAmount()
 	}
-	cashUsed := math.Min(available, totalRequired)
-	remaining := available + funding - totalRequired
-	if math.Abs(remaining) < 1e-9 {
-		remaining = 0
+	cashUsedAmt := totalRequiredAmt
+	if availableAmt.Cmp(totalRequiredAmt) < 0 {
+		cashUsedAmt = availableAmt
 	}
+	remainingAmt := availableAmt.Add(fundingAmt).Sub(totalRequiredAmt)
+	available := availableAmt.Float64()
+	funding := fundingAmt.Float64()
+	cashUsed := cashUsedAmt.Float64()
+	remaining := remainingAmt.Float64()
 
 	// Episode projection: an open episode in the same instrument/currency is
 	// extended; otherwise a new episode is created (including a rebuy after a
@@ -458,15 +480,19 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 	if err != nil {
 		return BuyPreview{}, err
 	}
+	resultingAvgCost, err := totalRequiredAmt.DivByQuantity(clean.Quantity, money.ScalePrice)
+	if err != nil {
+		return BuyPreview{}, err
+	}
 	preview := BuyPreview{
-		Symbol: clean.Symbol, InstrumentID: input.InstrumentID, AssetType: clean.AssetType, Quantity: clean.Quantity,
-		ExecutionPrice: price, ExecutionPriceSource: priceSource,
-		Fee: input.Fee, FeeSource: feeSource,
-		GrossPurchaseAmount: round2(gross), TotalCashRequired: round2(totalRequired),
+		Symbol: clean.Symbol, InstrumentID: input.InstrumentID, AssetType: clean.AssetType, Quantity: clean.Quantity.Float64(),
+		ExecutionPrice: price.Float64(), ExecutionPriceSource: priceSource,
+		Fee: input.Fee.Float64(), FeeSource: feeSource,
+		GrossPurchaseAmount: round2(gross.Float64()), TotalCashRequired: round2(totalRequiredAmt.Float64()),
 		AvailableCash: round2(available), CashUsed: round2(cashUsed),
 		AutomaticFunding: round2(funding), RemainingCash: round2(remaining),
-		CreatesNewEpisode: true, ResultingQuantity: clean.Quantity,
-		ResultingAverageCost: round2(totalRequired / clean.Quantity),
+		CreatesNewEpisode: true, ResultingQuantity: clean.Quantity.Float64(),
+		ResultingAverageCost: money.QuantizePrice(resultingAvgCost).Float64(),
 		Currency:             currency, BaseCurrency: fx.BaseCurrency,
 		CalculationStatus: "complete",
 	}
@@ -480,12 +506,16 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 			position.Symbol == clean.Symbol
 		if (sameInstrument || legacyMatch) && position.AssetType == clean.AssetType &&
 			position.Currency == currency {
-			total := position.Quantity + clean.Quantity
+			total := position.Quantity.Add(clean.Quantity)
+			existingBasis := position.Quantity.MulPrice(position.AverageBuyPrice)
+			mergedAvgCost, err := existingBasis.Add(totalRequiredAmt).DivByQuantity(total, money.ScalePrice)
+			if err != nil {
+				return BuyPreview{}, err
+			}
 			preview.CreatesNewEpisode = false
 			preview.PositionEpisodeID = position.ID
-			preview.ResultingQuantity = total
-			preview.ResultingAverageCost = round2(
-				(position.Quantity*position.AverageBuyPrice + totalRequired) / total)
+			preview.ResultingQuantity = total.Float64()
+			preview.ResultingAverageCost = money.QuantizePrice(mergedAvgCost).Float64()
 			break
 		}
 	}
@@ -546,7 +576,7 @@ func (s *Service) resolveSellPosition(ctx context.Context, userID string, input 
 
 func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInput) (SellPreview, error) {
 	if input.EffectiveAt != nil && input.EffectiveAt.UTC().Before(time.Now().UTC()) &&
-		input.ExecutionPrice == 0 {
+		input.ExecutionPrice.IsZero() {
 		return SellPreview{}, ErrHistoricalExecutionPriceRequired
 	}
 	position, err := s.resolveSellPosition(ctx, userID, input)
@@ -556,54 +586,55 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 	if positionStatus(position) != PositionStatusOpen {
 		return SellPreview{}, ErrPositionClosed
 	}
-	if !finitePositive(input.Quantity) || input.Quantity > position.Quantity+1e-9 {
+	// Exact decimal comparison: no epsilon tolerance for the sale-quantity
+	// bound, mirroring the committed sell path (coordinator.go MutationSell).
+	if input.Quantity.Sign() <= 0 || input.Quantity.Cmp(position.Quantity) > 0 {
 		return SellPreview{}, ErrInvalidSaleQuantity
 	}
 	price := input.ExecutionPrice
 	priceSource := PriceSourceUserRecorded
-	if price == 0 {
+	if price.IsZero() {
 		quote, quoteErr := s.provider.GetLatestPrice(ctx, position.Symbol)
 		if quoteErr != nil || quote == nil {
 			return SellPreview{}, ErrPriceProvider
 		}
-		price = quote.Price
+		price = money.PriceFromFloat64(quote.Price)
 		priceSource = PriceSourceProviderEstimate
 	}
 	feeSource := FeeSourceUserRecorded
-	if input.Fee == 0 {
+	if input.Fee.IsZero() {
 		feeSource = FeeSourceDefaultZero
 	}
 	effectiveAt := time.Now().UTC()
 	if input.EffectiveAt != nil {
 		effectiveAt = input.EffectiveAt.UTC()
 	}
-	if !finitePositive(price) {
+	if price.Sign() <= 0 {
 		return SellPreview{}, ErrInvalidSalePrice
 	}
-	gross := input.Quantity * price
-	if !isFinite(input.Fee) || input.Fee < 0 || input.Fee >= gross {
+	gross := input.Quantity.MulPrice(price)
+	if input.Fee.Sign() < 0 || input.Fee.Cmp(gross) >= 0 {
 		return SellPreview{}, ErrInvalidSaleFee
 	}
-	remaining := position.Quantity - input.Quantity
-	if remaining <= 1e-8 {
-		remaining = 0
-	}
-	allocatedBasis := input.Quantity * position.AverageBuyPrice
-	net := gross - input.Fee
-	realizedLocal := net - allocatedBasis
-	realizedBase, err := s.fx.Convert(ctx, realizedLocal, position.Currency, fx.BaseCurrency)
+	// Automatic closure detection: exact-zero-after-quantization (same
+	// pattern as the committed sell path), not a float epsilon band.
+	remaining := money.QuantizeQuantity(position.Quantity.Sub(input.Quantity))
+	allocatedBasis := input.Quantity.MulPrice(position.AverageBuyPrice)
+	net := gross.Sub(input.Fee)
+	realizedLocal := net.Sub(allocatedBasis)
+	realizedBase, err := s.fx.Convert(ctx, realizedLocal.Float64(), position.Currency, fx.BaseCurrency)
 	if err != nil {
 		return SellPreview{}, ErrUnsupportedCurrency
 	}
 	return SellPreview{
 		PositionID: position.ID, PositionEpisodeID: position.ID, Symbol: position.Symbol,
-		AvailableQuantity: round2(position.Quantity), SoldQuantity: round2(input.Quantity),
-		RemainingQuantity: round2(remaining), ExecutionPrice: round2(price),
+		AvailableQuantity: round2(position.Quantity.Float64()), SoldQuantity: round2(input.Quantity.Float64()),
+		RemainingQuantity: round2(remaining.Float64()), ExecutionPrice: round2(price.Float64()),
 		ExecutionPriceSource: priceSource, FeeSource: feeSource,
 		EffectiveAt: effectiveAt.Format(time.RFC3339), CalculationStatus: "complete",
-		GrossProceeds: round2(gross), Fee: round2(input.Fee), NetProceeds: round2(net),
-		AllocatedBasis: round2(allocatedBasis), EstimatedRealizedPnL: round2(realizedBase),
-		WillClosePosition: remaining == 0, ProceedsCurrency: position.Currency,
+		GrossProceeds: round2(gross.Float64()), Fee: round2(input.Fee.Float64()), NetProceeds: round2(net.Float64()),
+		AllocatedBasis: round2(allocatedBasis.Float64()), EstimatedRealizedPnL: round2(realizedBase),
+		WillClosePosition: remaining.IsZero(), ProceedsCurrency: position.Currency,
 		BaseCurrency: fx.BaseCurrency,
 	}, nil
 }
@@ -612,7 +643,7 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 // open status are verified INSIDE the transaction, against the locked position
 // set. The added or removed quantity enters at current prices, so resizing —
 // including scaling a winner — cannot create retroactive gains.
-func (s *Service) UpdatePosition(ctx context.Context, userID, positionID string, quantity float64) (*Position, error) {
+func (s *Service) UpdatePosition(ctx context.Context, userID, positionID string, quantity money.Quantity) (*Position, error) {
 	res, err := s.Mutate(ctx, MutationRequest{
 		Kind: MutationResize, UserID: userID, PositionID: positionID, Quantity: quantity,
 	})
@@ -753,8 +784,8 @@ func (s *Service) PublicWeightsSummary(ctx context.Context, userID string) (*Por
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
 		}
-		costLocal := pos.Quantity * pos.AverageBuyPrice
-		valueLocal := pos.Quantity * price.Price
+		costLocal := pos.Quantity.MulPrice(pos.AverageBuyPrice).Float64()
+		valueLocal := pos.Quantity.Float64() * price.Price
 		costBase, err := s.fx.Convert(ctx, costLocal, pos.Currency, fx.BaseCurrency)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
@@ -804,8 +835,8 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
 		}
 
-		costLocal := pos.Quantity * pos.AverageBuyPrice
-		valueLocal := pos.Quantity * price.Price
+		costLocal := pos.Quantity.MulPrice(pos.AverageBuyPrice).Float64()
+		valueLocal := pos.Quantity.Float64() * price.Price
 		costBase, err := s.fx.Convert(ctx, costLocal, pos.Currency, fx.BaseCurrency)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
@@ -860,7 +891,7 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 			return nil, rankedErr
 		}
 		ranked = RankedPerformanceView{
-			Index: round2(current.RankedIndex), ReturnPercentage: round2(current.RankedReturnPercentage),
+			Index: round2(current.RankedIndex.Float64()), ReturnPercentage: round2(current.RankedReturnPercentage.Float64()),
 			TrackingStatus: string(current.Status),
 		}
 	}
@@ -906,7 +937,7 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 	if summary.CurrentValue > 0 {
 		for i := range summary.CashBalances {
 			summary.CashBalances[i].WeightPercentage =
-				round2(summary.CashBalances[i].ValueBase / summary.CurrentValue * 100)
+				round2(summary.CashBalances[i].ValueBase.Float64() / summary.CurrentValue * 100)
 		}
 	}
 	summary.QuoteStatus = summarizeQuoteStatus(summaries)
@@ -953,7 +984,7 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 	var result ledgerMetrics
 	result.bySymbol = map[string]*InstrumentEconomics{}
 	for _, activity := range activities {
-		amountBase, err := s.fx.Convert(ctx, activity.GrossAmount, activity.Currency, fx.BaseCurrency)
+		amountBase, err := s.fx.Convert(ctx, activity.GrossAmount.Float64(), activity.Currency, fx.BaseCurrency)
 		if err != nil {
 			return ledgerMetrics{}, fmt.Errorf("%w: ledger %s: %v", ErrPriceProvider, activity.Type, err)
 		}
@@ -995,15 +1026,16 @@ func (s *Service) summarizeLedger(ctx context.Context, activities []Activity) (l
 				result.hasSelfReportedExecutionPrice = true
 			}
 			if activity.RealizedGainLossBase != nil {
-				result.realized += *activity.RealizedGainLossBase
+				realized := activity.RealizedGainLossBase.Float64()
+				result.realized += realized
 				if normalizeSymbol(activity.Symbol) == "" {
-					result.portfolioLevel += *activity.RealizedGainLossBase
+					result.portfolioLevel += realized
 				} else {
 					entry := result.instrument(activity.Symbol)
 					if entry.AssetType == "" {
 						entry.AssetType = activity.AssetType
 					}
-					entry.RealizedPnLBase += *activity.RealizedGainLossBase
+					entry.RealizedPnLBase += realized
 				}
 			}
 		case ActivityCashDividend, ActivityReinvestedDividend:
@@ -1189,10 +1221,10 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 		case ActivitySell, ActivityWriteOff:
 			haveClosingLeg = true
 			if a.RealizedGainLossBase != nil {
-				totalRealizedBase += *a.RealizedGainLossBase
+				totalRealizedBase += a.RealizedGainLossBase.Float64()
 			}
 			if a.CostBasisAllocated != nil {
-				totalBasisLocal += *a.CostBasisAllocated
+				totalBasisLocal += a.CostBasisAllocated.Float64()
 			}
 		}
 	}
@@ -1210,7 +1242,7 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 		// Legacy fallback: no (or incomplete) episode ledger history. Use the
 		// position row's own final snapshot rather than fabricating a history
 		// we cannot reconstruct.
-		costBase, err := s.fx.Convert(ctx, pos.Quantity*pos.AverageBuyPrice, pos.Currency, fx.BaseCurrency)
+		costBase, err := s.fx.Convert(ctx, pos.Quantity.MulPrice(pos.AverageBuyPrice).Float64(), pos.Currency, fx.BaseCurrency)
 		if err != nil {
 			return ClosedPositionSummary{}, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
 		}
@@ -1218,8 +1250,8 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 			ID:                         pos.ID,
 			Symbol:                     pos.Symbol,
 			AssetType:                  pos.AssetType,
-			Quantity:                   pos.Quantity,
-			BaselinePrice:              pos.AverageBuyPrice,
+			Quantity:                   pos.Quantity.Float64(),
+			BaselinePrice:              pos.AverageBuyPrice.Float64(),
 			BaselineCurrency:           pos.Currency,
 			ClosePrice:                 round2(closePrice),
 			ClosePriceCurrency:         firstNonEmpty(pos.CloseCurrency, pos.Currency),
@@ -1243,8 +1275,8 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 		ID:                         pos.ID,
 		Symbol:                     pos.Symbol,
 		AssetType:                  pos.AssetType,
-		Quantity:                   pos.Quantity,
-		BaselinePrice:              pos.AverageBuyPrice,
+		Quantity:                   pos.Quantity.Float64(),
+		BaselinePrice:              pos.AverageBuyPrice.Float64(),
 		BaselineCurrency:           pos.Currency,
 		ClosePrice:                 round2(closePrice),
 		ClosePriceCurrency:         firstNonEmpty(pos.CloseCurrency, pos.Currency),
@@ -1380,7 +1412,7 @@ func validateAndNormalize(in PositionInput) (PositionInput, error) {
 	if !validAssetTypes[assetType] {
 		return PositionInput{}, ErrInvalidAssetType
 	}
-	if !finitePositive(in.Quantity) {
+	if in.Quantity.Sign() <= 0 {
 		return PositionInput{}, ErrInvalidQuantity
 	}
 

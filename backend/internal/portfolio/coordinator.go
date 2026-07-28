@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -58,7 +59,7 @@ type MutationRequest struct {
 
 	Input      PositionInput         // add
 	PositionID string                // resize / delete / close / write_off
-	Quantity   float64               // resize
+	Quantity   money.Quantity        // resize
 	Weights    []StrategyWeightInput // replace
 	CashFlow   CashFlowInput
 	Buy        BuyInput
@@ -79,8 +80,8 @@ type MutationResult struct {
 	Position          *Position
 	Closed            *ClosedPositionSummary
 	PortfolioVersion  int64
-	RankedIndexBefore float64
-	RankedIndexAfter  float64
+	RankedIndexBefore money.IndexValue
+	RankedIndexAfter  money.IndexValue
 	RankingStatus     performance.Status
 	Activity          *Activity
 	// Duplicate is true when an idempotent retry replayed an earlier commit.
@@ -264,7 +265,7 @@ func (c *MutationCoordinator) observeHeldPositions(ctx context.Context, val *Val
 		return nil // nothing open under that symbol; planWriteOff rejects it
 	}
 	rate, ok := val.rates[exemptPosition.Currency]
-	if !ok || !finitePositive(rate) {
+	if !ok || rate.Sign() <= 0 {
 		return ErrUnsupportedCurrency
 	}
 	val.pinCostBasisFallback(exemptSymbol, exemptPosition.AverageBuyPrice, exemptPosition.Currency)
@@ -373,7 +374,7 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 	if err != nil {
 		return MutationResult{}, nil, err
 	}
-	var valueAfter float64
+	valueAfter := money.ZeroAmount()
 	var hasActiveAfter bool
 	if plan.valueInvariant {
 		// A pure re-expression of the same economic holding (split, symbol change).
@@ -432,14 +433,14 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		effect = plan.performanceEffect
 	}
 	var next performance.State
-	var indexAfter float64
+	indexAfter := money.ZeroIndexValue()
 
-	if plan.returnValueBase != 0 {
+	if !plan.returnValueBase.IsZero() {
 		// Mixed mutation: a neutral reallocation plus a return-bearing fee.
 		// Stage 1 re-baselines the segment at the neutral value (index
 		// unchanged); stage 2 preserves that baseline so only the fee moves the
 		// index. Two chained pure transitions, one transaction, one commit.
-		neutralAfter := valueAfter - plan.returnValueBase
+		neutralAfter := valueAfter.Sub(plan.returnValueBase)
 		mid := performance.ApplyCheckpoint(state, performance.CheckpointInput{
 			PortfolioID: pf.ID, UserID: req.UserID,
 			ValueBeforeBase: valueBefore, HasActiveBefore: hadActiveBefore,
@@ -464,7 +465,7 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		}
 		indexAfter = performance.CalculateCurrentIndex(next, valueAfter)
 		// A fee must never raise the ranked index.
-		if plan.returnValueBase < 0 && indexAfter > indexMid+1e-9*math.Max(1, math.Abs(indexMid)) {
+		if plan.returnValueBase.Sign() < 0 && indexAfter.Cmp(indexMid) > 0 {
 			return MutationResult{}, nil, ErrRankedInvariant
 		}
 	} else {
@@ -623,8 +624,8 @@ func (c *MutationCoordinator) validateHistorical(
 	if !at.Before(c.now()) {
 		return nil // current-dated (or clock skew); nothing historical about it
 	}
-	if (req.Kind == MutationBuy && req.Buy.ExecutionPrice == 0) ||
-		(req.Kind == MutationSell && req.Sell.ExecutionPrice == 0) {
+	if (req.Kind == MutationBuy && req.Buy.ExecutionPrice.IsZero()) ||
+		(req.Kind == MutationSell && req.Sell.ExecutionPrice.IsZero()) {
 		return ErrHistoricalExecutionPriceRequired
 	}
 
@@ -639,9 +640,10 @@ func (c *MutationCoordinator) validateHistorical(
 		if !opened {
 			return ErrHistoricalEpisodeNotOpen
 		}
-		if req.Sell.Quantity > held+quantityTolerance {
-			return fmt.Errorf("%w: the position held only %g units at %s",
-				ErrHistoricalQuantityInsufficient, held, at.Format(time.RFC3339))
+		// Exact decimal comparison: no epsilon tolerance.
+		if req.Sell.Quantity.Cmp(held) > 0 {
+			return fmt.Errorf("%w: the position held only %s units at %s",
+				ErrHistoricalQuantityInsufficient, held.String(), at.Format(time.RFC3339))
 		}
 	}
 
@@ -661,8 +663,10 @@ func (c *MutationCoordinator) validateHistorical(
 	return ErrHistoricalRankedConflict
 }
 
-// historicalEpisodeQuantity replays quantity effects for one durable episode.
-func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time) (float64, bool) {
+// historicalEpisodeQuantity replays quantity effects for one durable episode,
+// using exact decimal arithmetic throughout (no epsilon banding needed: a
+// full sale followed by no further activity lands on exactly zero).
+func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time) (money.Quantity, bool) {
 	ordered := make([]Activity, 0, len(ledger))
 	for _, activity := range ledger {
 		if activity.PositionEpisodeID == episodeID && !activity.OccurredAt.After(at) {
@@ -675,7 +679,7 @@ func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time
 		}
 		return ordered[i].OccurredAt.Before(ordered[j].OccurredAt)
 	})
-	total := 0.0
+	total := money.ZeroQuantity()
 	opened := false
 	for _, activity := range ordered {
 		if activity.Quantity == nil {
@@ -684,31 +688,27 @@ func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time
 		switch activity.Type {
 		case ActivityBuy, ActivityOpeningBalance:
 			opened = true
-			total += *activity.Quantity
+			total = total.Add(*activity.Quantity)
 		case ActivityStockDividend, ActivityReinvestedDividend:
-			total += *activity.Quantity
+			total = total.Add(*activity.Quantity)
 		case ActivitySell, ActivityWriteOff:
-			total -= *activity.Quantity
+			total = total.Sub(*activity.Quantity)
 		case ActivityStockSplit, ActivityReverseSplit:
 			// Splits restate the running total rather than adding to it.
 			total = *activity.Quantity
 		}
 	}
-	if total < 0 {
-		total = 0
+	if total.Sign() < 0 {
+		total = money.ZeroQuantity()
 	}
-	return total, opened && total > 0
+	return total, opened && total.Sign() > 0
 }
 
 // neutral reports whether two ranked indexes are equal within a relative
 // floating-point tolerance. Chain-linked segment ratios cannot be compared with
 // exact equality.
-func neutral(before, after float64) bool {
-	if !isFinite(before) || !isFinite(after) {
-		return false
-	}
-	scale := math.Max(1, math.Abs(before))
-	return math.Abs(before-after) <= 1e-9*scale
+func neutral(before, after money.IndexValue) bool {
+	return money.QuantizeIndex(before).EqualIndex(money.QuantizeIndex(after))
 }
 
 // isIncomeKind reports whether a return-bearing mutation adds value (income) as
@@ -728,18 +728,14 @@ func isIncomeKind(req MutationRequest) bool {
 // in the economically correct direction: income never lowers it, fees and
 // write-offs never raise it. A tiny tolerance permits an exactly-zero income/fee
 // (already rejected earlier) and floating-point noise.
-func assertReturnDirection(kind MutationKind, before, after float64) error {
-	if !isFinite(before) || !isFinite(after) {
-		return ErrRankedInvariant
-	}
-	tol := 1e-9 * math.Max(1, math.Abs(before))
+func assertReturnDirection(kind MutationKind, before, after money.IndexValue) error {
 	switch kind {
 	case MutationIncome, MutationReinvestedDividend, MutationReturnOfCapital:
-		if after < before-tol {
+		if after.Cmp(before) < 0 {
 			return ErrRankedInvariant
 		}
 	case MutationFee, MutationWriteOff:
-		if after > before+tol {
+		if after.Cmp(before) > 0 {
 			return ErrRankedInvariant
 		}
 	}
@@ -799,7 +795,7 @@ type mutationPlan struct {
 	// returnValueBase), then a return-bearing one on to value_after. This makes
 	// an automatically-funded purchase ranked-neutral while its fee lowers the
 	// ranked index exactly once.
-	returnValueBase float64
+	returnValueBase money.Amount
 	// buyCashUsed / buyFunding are reported for previews and diagnostics.
 	buyCashUsed float64
 	buyFunding  float64
@@ -814,13 +810,15 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 	case MutationDeposit, MutationWithdrawal:
 		currency := req.CashFlow.Currency
 		current, found := cashAmount(oldCash, currency)
-		if req.Kind == MutationWithdrawal && (!found || current+1e-9 < req.CashFlow.Amount) {
+		// Exact decimal comparison: no epsilon tolerance. A withdrawal that
+		// exceeds the held balance is rejected outright.
+		if req.Kind == MutationWithdrawal && (!found || current.Cmp(req.CashFlow.Amount) < 0) {
 			return mutationPlan{}, ErrInsufficientCash
 		}
-		nextAmount := current + req.CashFlow.Amount
+		nextAmount := current.Add(req.CashFlow.Amount)
 		activityType := ActivityDeposit
 		if req.Kind == MutationWithdrawal {
-			nextAmount = current - req.CashFlow.Amount
+			nextAmount = current.Sub(req.CashFlow.Amount)
 			activityType = ActivityWithdrawal
 		}
 		now := val.ObservedAt
@@ -868,19 +866,22 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		// rather than presented as confirmed broker executions.
 		executionPrice := req.Buy.ExecutionPrice
 		priceSource := PriceSourceUserRecorded
-		if executionPrice == 0 {
+		if executionPrice.IsZero() {
 			executionPrice = quote.Price
 			priceSource = PriceSourceProviderEstimate
 		}
-		if !finitePositive(executionPrice) {
+		if executionPrice.Sign() <= 0 {
 			return mutationPlan{}, ErrInvalidBuyPrice
 		}
-		if err := validateLiveExecutionPrice(req.Buy.EffectiveAt, priceSource, executionPrice, quote.Price); err != nil {
+		// validateLiveExecutionPrice still takes float64 (it also compares
+		// against quote.Price, which stays float64 in this pass); .Float64()
+		// is a documented boundary conversion, not further decimal math.
+		if err := validateLiveExecutionPrice(req.Buy.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
 			return mutationPlan{}, err
 		}
 		fee := req.Buy.Fee
 		feeSource := FeeSourceUserRecorded
-		if fee == 0 {
+		if fee.IsZero() {
 			feeSource = FeeSourceDefaultZero
 		}
 		occurred := now
@@ -888,34 +889,40 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			occurred = req.Buy.EffectiveAt.UTC()
 		}
 
-		gross := req.Buy.Quantity * executionPrice
-		totalRequired := gross + fee
+		// Canonical purchase contract: gross cost = quantity * execution
+		// price; cost basis includes gross cost AND the buy fee. All exact
+		// decimal arithmetic, no intermediate rounding.
+		gross := req.Buy.Quantity.MulPrice(executionPrice)
+		totalRequiredAmt := gross.Add(fee)
 		available, _ := cashAmount(oldCash, quote.Currency)
 
-		// Automatic purchase funding. The user records a real purchase; Alarvest
-		// infers the funding consequence rather than blocking on a cash balance
-		// the user never asked to manage. Funding is created in the INSTRUMENT'S
-		// QUOTE CURRENCY only — cash in other currencies is never auto-converted.
-		funding := totalRequired - available
-		if funding < 1e-9 {
-			funding = 0
+		// Automatic purchase funding: funding = max(quantity*price + fee -
+		// available_cash, 0), computed with exact decimal arithmetic so no
+		// epsilon snapping is needed to land on exactly zero. Funding is
+		// created in the INSTRUMENT'S QUOTE CURRENCY only — cash in other
+		// currencies is never auto-converted.
+		fundingAmt := totalRequiredAmt.Sub(available)
+		if fundingAmt.Sign() < 0 {
+			fundingAmt = money.ZeroAmount()
 		}
-		if funding > 0 && !pf.AutoFundPurchases {
+		if fundingAmt.Sign() > 0 && !pf.AutoFundPurchases {
 			return mutationPlan{}, ErrInsufficientCash
 		}
-		cashUsed := math.Min(available, totalRequired)
-		nextCash := available + funding - totalRequired
-		if math.Abs(nextCash) < 1e-9 {
-			nextCash = 0
+		cashUsedAmt := totalRequiredAmt
+		if available.Cmp(totalRequiredAmt) < 0 {
+			cashUsedAmt = available
 		}
-		if nextCash < 0 {
+		nextCashAmt := available.Add(fundingAmt).Sub(totalRequiredAmt)
+		if nextCashAmt.Sign() < 0 {
 			return mutationPlan{}, ErrInsufficientCash
 		}
+		funding := fundingAmt.Float64()
+		cashUsed := cashUsedAmt.Float64()
 
 		balance, _ := cashBalance(oldCash, quote.Currency)
 		balance.PortfolioID = pf.ID
 		balance.Currency = quote.Currency
-		balance.Amount = nextCash
+		balance.Amount = nextCashAmt
 		balance.UpdatedAt = now
 		if balance.CreatedAt.IsZero() {
 			balance.CreatedAt = now
@@ -940,9 +947,20 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			if (sameInstrument || legacyMatch) && position.AssetType == req.Buy.AssetType &&
 				position.Currency == quote.Currency {
 				merged := *position
-				totalQuantity := position.Quantity + req.Buy.Quantity
-				merged.AverageBuyPrice = (position.Quantity*position.AverageBuyPrice + gross + fee) / totalQuantity
-				merged.Quantity = totalQuantity
+				// Fee-inclusive weighted-average basis across buys in one
+				// episode: new_avg = (existing_qty*existing_avg + gross + fee)
+				// / (existing_qty + new_qty), computed as exact decimal Amount
+				// arithmetic then divided to the policy price precision only
+				// at this posting boundary (QuantizePrice, round-half-even).
+				totalQuantity := position.Quantity.Add(req.Buy.Quantity)
+				existingBasis := position.Quantity.MulPrice(position.AverageBuyPrice)
+				newBasis := existingBasis.Add(gross).Add(fee)
+				avgPrice, err := newBasis.DivByQuantity(totalQuantity, money.ScalePrice)
+				if err != nil {
+					return mutationPlan{}, err
+				}
+				merged.AverageBuyPrice = money.QuantizePrice(avgPrice)
+				merged.Quantity = money.QuantizeQuantity(totalQuantity)
 				merged.UpdatedAt = now
 				result = &merged
 				break
@@ -953,10 +971,14 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			// always starts a NEW episode (a new positions row, which is the
 			// durable episode identity).
 			create = true
+			avgPrice, err := totalRequiredAmt.DivByQuantity(req.Buy.Quantity, money.ScalePrice)
+			if err != nil {
+				return mutationPlan{}, err
+			}
 			result = &Position{
 				ID: uuid.NewString(), UserID: req.UserID, PortfolioID: pf.ID,
 				Symbol: req.Buy.Symbol, InstrumentID: req.Buy.InstrumentID, AssetType: req.Buy.AssetType,
-				Quantity: req.Buy.Quantity, AverageBuyPrice: (gross + fee) / req.Buy.Quantity,
+				Quantity: money.QuantizeQuantity(req.Buy.Quantity), AverageBuyPrice: money.QuantizePrice(avgPrice),
 				Currency: quote.Currency, Status: PositionStatusOpen,
 				CreatedAt: occurred, UpdatedAt: now,
 			}
@@ -972,7 +994,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			"recorded_at":                 now.Format(time.RFC3339Nano),
 			"instrument_identity_quality": req.Buy.IdentityQuality,
 		})
-		if funding > 0 {
+		if fundingAmt.Sign() > 0 {
 			buyMeta["automatic_funding_amount"] = funding
 		}
 		activity := &Activity{
@@ -980,21 +1002,21 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			UserID: req.UserID, Type: ActivityBuy, Symbol: result.Symbol,
 			InstrumentID: result.InstrumentID,
 			AssetType:    result.AssetType, Currency: quote.Currency,
-			Quantity: floatPointer(req.Buy.Quantity), UnitPrice: floatPointer(executionPrice),
+			Quantity: quantityPointer(req.Buy.Quantity), UnitPrice: pricePointer(executionPrice),
 			GrossAmount: gross, OccurredAt: occurred, CreatedAt: now,
 			Metadata: buyMeta, PositionEpisodeID: result.ID, GroupID: groupID,
-			FeeAmount: fee, NetAmount: totalRequired,
+			FeeAmount: fee, NetAmount: totalRequiredAmt,
 		}
 
 		var extraActivities []Activity
-		if funding > 0 {
+		if fundingAmt.Sign() > 0 {
 			// Reuses the existing neutral deposit activity type (no new
 			// Postgres-constrained type). Metadata marks it as automatic and
 			// links it to the purchase group.
 			extraActivities = append(extraActivities, Activity{
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivityDeposit, Currency: quote.Currency,
-				GrossAmount: funding, OccurredAt: occurred, CreatedAt: now,
+				GrossAmount: fundingAmt, OccurredAt: occurred, CreatedAt: now,
 				GroupID: groupID, Origin: "system_generated",
 				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, map[string]any{
 					"activity_group_id":        groupID,
@@ -1006,7 +1028,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				}),
 			})
 		}
-		if fee > 0 {
+		if fee.Sign() > 0 {
 			extraActivities = append(extraActivities, Activity{
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivityBuyFee, Symbol: result.Symbol, Currency: quote.Currency,
@@ -1038,7 +1060,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			},
 			resultPosition: result, resultPositionID: result.ID, activity: activity,
 			extraActivities: extraActivities,
-			returnValueBase: -fee * val.rates[quote.Currency],
+			returnValueBase: fee.Convert(val.rates[quote.Currency]).Neg(),
 			buyCashUsed:     cashUsed, buyFunding: funding,
 		}, nil
 
@@ -1051,7 +1073,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		if req.Kind == MutationClose {
 			quantity = existing.Quantity
 		}
-		if !finitePositive(quantity) || quantity > existing.Quantity+1e-9 {
+		// Exact decimal comparison: no epsilon tolerance for the sale-quantity
+		// bound.
+		if quantity.Sign() <= 0 || quantity.Cmp(existing.Quantity) > 0 {
 			return mutationPlan{}, ErrInvalidSaleQuantity
 		}
 		quote, ok := val.Quote(existing.Symbol)
@@ -1061,34 +1085,45 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		now := val.ObservedAt
 		executionPrice := req.Sell.ExecutionPrice
 		priceSource := PriceSourceUserRecorded
-		if executionPrice == 0 {
+		if executionPrice.IsZero() {
 			executionPrice = quote.Price
 			priceSource = PriceSourceProviderEstimate
 		}
-		if err := validateLiveExecutionPrice(req.Sell.EffectiveAt, priceSource, executionPrice, quote.Price); err != nil {
+		if err := validateLiveExecutionPrice(req.Sell.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
 			return mutationPlan{}, err
 		}
+		fee := req.Sell.Fee
 		feeSource := FeeSourceUserRecorded
-		if req.Sell.Fee == 0 {
+		if fee.IsZero() {
 			feeSource = FeeSourceDefaultZero
 		}
-		proceeds := quantity * executionPrice
-		if req.Sell.Fee >= proceeds {
+		// Canonical sale contract, exact decimal arithmetic throughout:
+		// gross proceeds = quantity * execution price; net proceeds = gross
+		// proceeds - sale fee; realized P&L = net proceeds - allocated cost
+		// basis. Allocated basis uses the position's EXISTING average price,
+		// so a partial sale never touches the remaining position's basis.
+		proceeds := quantity.MulPrice(executionPrice)
+		if fee.Cmp(proceeds) >= 0 {
 			return mutationPlan{}, ErrInvalidSaleFee
 		}
-		netProceeds := proceeds - req.Sell.Fee
-		allocatedBasis := quantity * existing.AverageBuyPrice
+		netProceeds := proceeds.Sub(fee)
+		allocatedBasis := quantity.MulPrice(existing.AverageBuyPrice)
+		// basisRate/saleRate stay float64 (FX is out of scope for this
+		// section); realizedBase/realizedPct are documented boundary
+		// conversions back into decimal at the point they're persisted.
 		basisRate := val.rates[existing.Currency]
 		saleRate := val.rates[quote.Currency]
-		realizedBase := netProceeds*saleRate - allocatedBasis*basisRate
+		realizedBase := netProceeds.Convert(saleRate).Sub(allocatedBasis.Convert(basisRate))
+		realizedBaseF := realizedBase.Float64()
+		basisBaseF := allocatedBasis.Convert(basisRate).Float64()
 		realizedPct := 0.0
-		if allocatedBasis*basisRate > 0 {
-			realizedPct = realizedBase / (allocatedBasis * basisRate) * 100
+		if basisBaseF > 0 {
+			realizedPct = realizedBaseF / basisBaseF * 100
 		}
 		balance, _ := cashBalance(oldCash, quote.Currency)
 		balance.PortfolioID = pf.ID
 		balance.Currency = quote.Currency
-		balance.Amount += netProceeds
+		balance.Amount = balance.Amount.Add(netProceeds)
 		balance.UpdatedAt = now
 		if balance.CreatedAt.IsZero() {
 			balance.CreatedAt = now
@@ -1103,9 +1138,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			UserID: req.UserID, Type: ActivitySell, Symbol: existing.Symbol,
 			InstrumentID: existing.InstrumentID,
 			AssetType:    existing.AssetType, Currency: quote.Currency,
-			Quantity: floatPointer(quantity), UnitPrice: floatPointer(executionPrice),
-			GrossAmount: proceeds, CostBasisAllocated: floatPointer(allocatedBasis),
-			RealizedGainLossBase:       floatPointer(realizedBase),
+			Quantity: quantityPointer(quantity), UnitPrice: pricePointer(executionPrice),
+			GrossAmount: proceeds, CostBasisAllocated: amountPointer(allocatedBasis),
+			RealizedGainLossBase:       amountPointer(realizedBase),
 			RealizedGainLossPercentage: floatPointer(realizedPct),
 			OccurredAt:                 occurred, CreatedAt: now,
 			Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceUserReported, map[string]any{
@@ -1116,15 +1151,15 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				"recorded_at":            now.Format(time.RFC3339Nano),
 			}),
 			GroupID: groupID, PositionEpisodeID: existing.ID,
-			FeeAmount: req.Sell.Fee, NetAmount: netProceeds,
+			FeeAmount: fee, NetAmount: netProceeds,
 		}
 		var extraActivities []Activity
-		if req.Sell.Fee > 0 {
+		if fee.Sign() > 0 {
 			extraActivities = append(extraActivities, Activity{
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivitySellFee, Symbol: existing.Symbol, Currency: quote.Currency,
 				InstrumentID: existing.InstrumentID,
-				GrossAmount:  req.Sell.Fee, OccurredAt: occurred, CreatedAt: now,
+				GrossAmount:  fee, OccurredAt: occurred, CreatedAt: now,
 				GroupID: groupID, PositionEpisodeID: existing.ID,
 				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, ProvenanceUserReported, map[string]any{
 					"component": "sale_fee",
@@ -1132,12 +1167,17 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			})
 		}
 		effect := PerformanceEffectNeutral
-		if req.Sell.Fee > 0 || !neutral(executionPrice, quote.Price) {
+		if fee.Sign() > 0 || executionPrice.Cmp(quote.Price) != 0 {
 			effect = PerformanceEffectReturn
 		}
-		if quantity < existing.Quantity-1e-9 {
+		// Automatic closure detection: exact-zero-after-quantization, not a
+		// float epsilon band. A full sale (sold == held) subtracts to exactly
+		// zero under exact decimal arithmetic; QuantizeQuantity applies the
+		// policy posting-boundary scale before the zero check.
+		remainingQty := money.QuantizeQuantity(existing.Quantity.Sub(quantity))
+		if !remainingQty.IsZero() {
 			remaining := *existing
-			remaining.Quantity -= quantity
+			remaining.Quantity = remainingQty
 			remaining.UpdatedAt = now
 			return mutationPlan{
 				newOpen: replaceInSet(oldOpen, existing.ID, &remaining),
@@ -1153,23 +1193,23 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				performanceEffect: effect,
 			}, nil
 		}
-		closePrice := executionPrice
+		closePriceF := executionPrice.Float64()
 		closed := *existing
 		closed.Status = PositionStatusClosed
 		closed.ClosedAt = &occurred
-		closed.ClosePrice = &closePrice
+		closed.ClosePrice = &closePriceF
 		closed.CloseCurrency = quote.Currency
-		closed.RealizedGainLossBase = round2(realizedBase)
+		closed.RealizedGainLossBase = round2(realizedBaseF)
 		closed.RealizedGainLossPercentage = round2(realizedPct)
 		closed.UpdatedAt = now
 		view := ClosedPositionSummary{
 			ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType,
-			Quantity: quantity, BaselinePrice: closed.AverageBuyPrice,
-			BaselineCurrency: closed.Currency, ClosePrice: round2(closePrice),
+			Quantity: quantity.Float64(), BaselinePrice: closed.AverageBuyPrice.Float64(),
+			BaselineCurrency: closed.Currency, ClosePrice: round2(closePriceF),
 			ClosePriceCurrency: quote.Currency, ClosedAt: occurred.Format(time.RFC3339),
-			RealizedGainLossBase:       round2(realizedBase),
+			RealizedGainLossBase:       round2(realizedBaseF),
 			RealizedGainLossPercentage: round2(realizedPct),
-			ClosedCostBasisBase:        round2(allocatedBasis * basisRate),
+			ClosedCostBasisBase:        round2(basisBaseF),
 			BaseCurrency:               fx.BaseCurrency,
 		}
 		return mutationPlan{
@@ -1217,7 +1257,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			return mutationPlan{}, err
 		}
 		updated := *existing
-		updated.Quantity = req.Quantity
+		updated.Quantity = money.QuantizeQuantity(req.Quantity)
 		updated.UpdatedAt = val.ObservedAt
 		return mutationPlan{
 			newOpen:          replaceInSet(oldOpen, req.PositionID, &updated),
@@ -1249,7 +1289,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		targetCashBase := 0.0
 		for _, w := range req.Weights {
 			if w.AssetType == AssetTypeCash {
-				targetCashBase += totalValue * (w.WeightPercentage / 100)
+				targetCashBase += totalValue.Float64() * (w.WeightPercentage / 100)
 				continue
 			}
 			quote, ok := val.Quote(w.Symbol)
@@ -1260,7 +1300,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			if !ok {
 				return mutationPlan{}, ErrUnsupportedCurrency
 			}
-			quantity := totalValue * (w.WeightPercentage / 100) / (quote.Price * rate)
+			quantity := totalValue.Float64() * (w.WeightPercentage / 100) / (quote.Price.Float64() * rate.Float64())
 			if !finitePositive(quantity) {
 				return mutationPlan{}, ErrInvalidWeights
 			}
@@ -1270,7 +1310,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				PortfolioID:     pf.ID,
 				Symbol:          w.Symbol,
 				AssetType:       w.AssetType,
-				Quantity:        quantity,
+				Quantity:        money.QuantizeQuantity(money.QuantityFromFloat64(quantity)),
 				AverageBuyPrice: quote.Price,
 				Currency:        quote.Currency,
 				Status:          PositionStatusOpen,
@@ -1280,14 +1320,14 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		}
 		nextCash := append([]CashBalance(nil), oldCash...)
 		for i := range nextCash {
-			nextCash[i].Amount = 0
+			nextCash[i].Amount = money.ZeroAmount()
 			nextCash[i].UpdatedAt = now
 		}
 		if targetCashBase > 0 {
 			usd, _ := cashBalance(nextCash, fx.BaseCurrency)
 			usd.PortfolioID = pf.ID
 			usd.Currency = fx.BaseCurrency
-			usd.Amount = targetCashBase
+			usd.Amount = money.AmountFromFloat64(targetCashBase)
 			usd.UpdatedAt = now
 			if usd.CreatedAt.IsZero() {
 				usd.CreatedAt = now
@@ -1349,10 +1389,13 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 	if err := validateIncomeAmounts(req.Income); err != nil {
 		return mutationPlan{}, err
 	}
-	net := round2(req.Income.NetCash())
+	net, err := money.QuantizeCash(req.Income.NetCash(), currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	now := val.ObservedAt
 	current, _ := cashAmount(oldCash, currency)
-	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current + net, UpdatedAt: now, CreatedAt: now}
+	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(net), UpdatedAt: now, CreatedAt: now}
 	if existing, ok := cashBalance(oldCash, currency); ok {
 		balance.CreatedAt = existing.CreatedAt
 	}
@@ -1388,13 +1431,13 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 // deductions, or deductions that exceed the gross amount (which would fabricate
 // a negative income).
 func validateIncomeAmounts(in IncomeInput) error {
-	if !finitePositive(in.Amount) {
+	if in.Amount.Sign() <= 0 {
 		return ErrInvalidIncomeAmount
 	}
-	if !isFinite(in.Withholding) || in.Withholding < 0 || !isFinite(in.Fee) || in.Fee < 0 {
+	if in.Withholding.Sign() < 0 || in.Fee.Sign() < 0 {
 		return ErrInvalidIncomeAmount
 	}
-	if in.Withholding+in.Fee > in.Amount+1e-9 {
+	if in.Withholding.Add(in.Fee).Cmp(in.Amount) > 0 {
 		return ErrInvalidIncomeAmount
 	}
 	return nil
@@ -1402,17 +1445,17 @@ func validateIncomeAmounts(in IncomeInput) error {
 
 // incomeMetadata builds the auditable, separated income breakdown stored on the
 // immutable ledger activity: gross, withholding, fee, and net are distinct.
-func incomeMetadata(in IncomeInput, net float64) map[string]any {
+func incomeMetadata(in IncomeInput, net money.Amount) map[string]any {
 	m := map[string]any{
 		"income_subtype": string(in.Subtype),
-		"gross_amount":   round2(in.Amount),
-		"net_amount":     net,
+		"gross_amount":   in.Amount.String(),
+		"net_amount":     net.String(),
 	}
-	if in.Withholding > 0 {
-		m["withholding_amount"] = round2(in.Withholding)
+	if in.Withholding.Sign() > 0 {
+		m["withholding_amount"] = in.Withholding.String()
 	}
-	if in.Fee > 0 {
-		m["income_fee_amount"] = round2(in.Fee)
+	if in.Fee.Sign() > 0 {
+		m["income_fee_amount"] = in.Fee.String()
 	}
 	if in.Estimated {
 		m["estimated"] = true
@@ -1447,26 +1490,32 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 	}
 	// The buy leg reinvests the NET income (after withholding/fees), so ranked
 	// performance reflects the income exactly once.
-	net := round2(req.Income.NetCash())
+	netAmt, err := money.QuantizeCash(req.Income.NetCash(), quote.Currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	// Reinvestment price hierarchy: an explicit broker/DRIP execution price when
 	// supplied, otherwise the current tracked market price (estimated).
-	price := quote.Price
+	priceAmt := quote.Price
 	method := "market_close_on_payment_date"
-	if finitePositive(req.Income.ReinvestPrice) {
-		price = req.Income.ReinvestPrice
+	if req.Income.ReinvestPrice.Sign() > 0 {
+		priceAmt = req.Income.ReinvestPrice
 		method = "broker_reported"
 	}
 	if req.Income.PriceMethod != "" {
 		method = req.Income.PriceMethod
 	}
-	if !finitePositive(price) {
+	if priceAmt.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidReinvestment
 	}
 	now := val.ObservedAt
-	qty := net / price // reinvest the net income at the chosen price
-	if !finitePositive(qty) {
+	// Reinvest the net income at the chosen price, exact decimal division to
+	// the policy quantity precision.
+	qty, err := netAmt.DivByPrice(priceAmt, money.ScaleQuantity)
+	if err != nil || qty.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidReinvestment
 	}
+	qty = money.QuantizeQuantity(qty)
 	estimated := req.Income.Estimated || method != "broker_reported"
 	// The dividend enters and leaves cash in the same transaction; net cash is
 	// unchanged, so no negative-cash check is needed.
@@ -1475,10 +1524,18 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 	for _, position := range oldOpen {
 		if position.Symbol == req.Income.Symbol && position.AssetType == req.Income.AssetType && position.Currency == quote.Currency {
 			merged := *position
-			totalQty := position.Quantity + qty
-			// Add the reinvested (net) amount to weighted-average basis.
-			merged.AverageBuyPrice = (position.Quantity*position.AverageBuyPrice + net) / totalQty
-			merged.Quantity = totalQty
+			totalQty := position.Quantity.Add(qty)
+			// Add the reinvested (net) amount to weighted-average basis, exact
+			// decimal arithmetic, quantized to the policy price precision only
+			// at this posting boundary.
+			existingBasis := position.Quantity.MulPrice(position.AverageBuyPrice)
+			newBasis := existingBasis.Add(netAmt)
+			avgPrice, err := newBasis.DivByQuantity(totalQty, money.ScalePrice)
+			if err != nil {
+				return mutationPlan{}, err
+			}
+			merged.AverageBuyPrice = money.QuantizePrice(avgPrice)
+			merged.Quantity = money.QuantizeQuantity(totalQty)
 			merged.UpdatedAt = now
 			result = &merged
 			break
@@ -1489,23 +1546,23 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 		result = &Position{
 			ID: uuid.NewString(), UserID: req.UserID, PortfolioID: pf.ID,
 			Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
-			Quantity: qty, AverageBuyPrice: price, Currency: quote.Currency,
+			Quantity: qty, AverageBuyPrice: money.QuantizePrice(priceAmt), Currency: quote.Currency,
 			Status: PositionStatusOpen, CreatedAt: now, UpdatedAt: now,
 		}
 	}
 	groupID := uuid.NewString()
-	incomeMeta := incomeMetadata(req.Income, net)
+	incomeMeta := incomeMetadata(req.Income, netAmt)
 	incomeMeta["income_subtype"] = string(IncomeReinvestedDiv)
 	incomeMeta["activity_group_id"] = groupID
 	incomeMeta["component"] = "income"
 	incomeMeta["reinvestment_price_method"] = method
-	incomeMeta["reinvestment_quantity"] = round4(qty)
+	incomeMeta["reinvestment_quantity"] = qty.String()
 	incomeMeta["reinvestment_estimated"] = estimated
 	incomeActivity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityReinvestedDividend, Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
 		InstrumentID: result.InstrumentID,
-		Currency:     quote.Currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
+		Currency:     quote.Currency, GrossAmount: netAmt, OccurredAt: occurredAt(req.Income.OccurredAt, now),
 		CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, incomeMeta),
 	}
@@ -1513,8 +1570,8 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 		ID: uuid.NewString(), RequestID: "", PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityBuy, Symbol: req.Income.Symbol, AssetType: req.Income.AssetType,
 		InstrumentID: result.InstrumentID,
-		Currency:     quote.Currency, Quantity: floatPointer(qty), UnitPrice: floatPointer(price),
-		GrossAmount: net, OccurredAt: now, CreatedAt: now,
+		Currency:     quote.Currency, Quantity: quantityPointer(qty), UnitPrice: pricePointer(priceAmt),
+		GrossAmount: netAmt, OccurredAt: now, CreatedAt: now,
 		GroupID: groupID, PositionEpisodeID: result.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, map[string]any{
 			"activity_group_id":         groupID,
@@ -1556,39 +1613,48 @@ func (c *MutationCoordinator) planReturnOfCapital(req MutationRequest, pf *Portf
 	if existing == nil {
 		return mutationPlan{}, ErrInstrumentNotFound
 	}
-	net := round2(req.Income.NetCash())
+	netAmt, err := money.QuantizeCash(req.Income.NetCash(), currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	now := val.ObservedAt
 
-	// Reduce remaining basis by the net distribution, floored at zero.
-	remainingBasis := existing.Quantity * existing.AverageBuyPrice
-	basisReduction := net
-	excessOverBasis := 0.0
-	if basisReduction > remainingBasis {
-		excessOverBasis = round2(basisReduction - remainingBasis)
+	// Reduce remaining basis by the net distribution, floored at zero (cost
+	// basis must never go negative). Exact decimal arithmetic throughout.
+	remainingBasis := existing.Quantity.MulPrice(existing.AverageBuyPrice)
+	basisReduction := netAmt
+	excessOverBasis := money.ZeroAmount()
+	if basisReduction.Cmp(remainingBasis) > 0 {
+		excessOverBasis = basisReduction.Sub(remainingBasis)
 		basisReduction = remainingBasis
 	}
 	updated := *existing
-	if existing.Quantity > 0 {
-		updated.AverageBuyPrice = round4((remainingBasis - basisReduction) / existing.Quantity)
+	if existing.Quantity.Sign() > 0 {
+		newBasis := remainingBasis.Sub(basisReduction)
+		avgPrice, err := newBasis.DivByQuantity(existing.Quantity, money.ScalePrice)
+		if err != nil {
+			return mutationPlan{}, err
+		}
+		updated.AverageBuyPrice = money.QuantizePrice(avgPrice)
 	}
 	updated.UpdatedAt = now
 
 	current, _ := cashAmount(oldCash, currency)
-	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current + net, UpdatedAt: now, CreatedAt: now}
+	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(netAmt), UpdatedAt: now, CreatedAt: now}
 	if existingCash, ok := cashBalance(oldCash, currency); ok {
 		balance.CreatedAt = existingCash.CreatedAt
 	}
 
-	meta := incomeMetadata(req.Income, net)
+	meta := incomeMetadata(req.Income, netAmt)
 	meta["income_subtype"] = string(IncomeReturnOfCapitalSub)
-	meta["basis_reduction"] = round2(basisReduction)
-	meta["excess_over_basis"] = excessOverBasis
+	meta["basis_reduction"] = basisReduction.String()
+	meta["excess_over_basis"] = excessOverBasis.String()
 	meta["accounting_policy"] = "return_of_capital_basis_reduction"
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityReturnOfCapital, Symbol: req.Income.Symbol, AssetType: existing.AssetType,
 		InstrumentID: existing.InstrumentID,
-		Currency:     currency, GrossAmount: net, CostBasisAllocated: floatPointer(round2(basisReduction)),
+		Currency:     currency, GrossAmount: netAmt, CostBasisAllocated: amountPointer(basisReduction),
 		OccurredAt: occurredAt(req.Income.OccurredAt, now), CreatedAt: now,
 		PositionEpisodeID: existing.ID,
 		Metadata:          activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance, meta),
@@ -1615,29 +1681,41 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 		return mutationPlan{}, ErrInstrumentNotFound
 	}
 	num, den := req.Income.StockRatioNum, req.Income.StockRatioDen
-	if !finitePositive(num) || !finitePositive(den) {
+	if num.Sign() <= 0 || den.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
-	factor := 1 + num/den
-	if !finitePositive(factor) || factor <= 1 {
+	fraction, err := num.DivExact(den, money.ScaleQuantity)
+	if err != nil {
+		return mutationPlan{}, ErrInvalidSplitRatio
+	}
+	factorRatio := money.MustRatio("1").Add(fraction)
+	if factorRatio.Cmp(money.MustRatio("1")) <= 0 {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
 	now := val.ObservedAt
 	updated := *existing
-	updated.Quantity = existing.Quantity * factor
-	updated.AverageBuyPrice = existing.AverageBuyPrice / factor // total basis preserved
+	updated.Quantity = money.QuantizeQuantity(existing.Quantity.MulRatio(factorRatio))
+	// Average cost can be a repeating decimal after a stock dividend. Carry
+	// enough guard digits for the authoritative total cost basis to round
+	// exactly at its 18dp persistence boundary; treating average cost as a
+	// 12dp market quote here would introduce basis drift.
+	avgPrice, err := existing.AverageBuyPrice.DivRatio(factorRatio, money.ScaleCostBasis+money.ScaleQuantity)
+	if err != nil {
+		return mutationPlan{}, ErrInvalidSplitRatio
+	}
+	updated.AverageBuyPrice = avgPrice
 	updated.UpdatedAt = now
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityStockDividend, Symbol: req.Income.Symbol, AssetType: existing.AssetType,
 		InstrumentID: existing.InstrumentID,
-		Currency:     existing.Currency, Quantity: floatPointer(updated.Quantity - existing.Quantity),
+		Currency:     existing.Currency, Quantity: quantityPointer(updated.Quantity.Sub(existing.Quantity)),
 		OccurredAt: occurredAt(req.Income.OccurredAt, now), CreatedAt: now,
 		PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.Income.Provenance, map[string]any{
 			"income_subtype":    string(IncomeStockDividendSub),
-			"ratio_numerator":   num,
-			"ratio_denominator": den,
+			"ratio_numerator":   num.String(),
+			"ratio_denominator": den.String(),
 			"income_event_id":   nonEmpty(req.Income.IncomeEventID),
 		}),
 	}
@@ -1732,7 +1810,7 @@ func (c *MutationCoordinator) validateIncomeEvent(req *MutationRequest) ([]strin
 			}
 			symbol = sym
 		case IncomeStockDividendSub:
-			if !finitePositive(comp.StockRatioNum) || !finitePositive(comp.StockRatioDen) {
+			if comp.StockRatioNum.Cmp(money.ZeroRatio()) <= 0 || comp.StockRatioDen.Cmp(money.ZeroRatio()) <= 0 {
 				return nil, ErrInvalidSplitRatio
 			}
 			if symbol == "" {
@@ -1801,9 +1879,9 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 	// the event actually returned value.
 	hasReturnLeg := false
 
-	creditCash := func(currency string, delta float64) {
+	creditCash := func(currency string, delta money.Amount) {
 		current, _ := cashAmount(cash, currency)
-		balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current + delta, UpdatedAt: now, CreatedAt: now}
+		balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(delta), UpdatedAt: now, CreatedAt: now}
 		if existing, ok := cashBalance(cash, currency); ok {
 			balance.CreatedAt = existing.CreatedAt
 		}
@@ -1847,13 +1925,20 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 			if existing == nil {
 				return mutationPlan{}, ErrInstrumentNotFound
 			}
-			factor := 1 + comp.StockRatioNum/comp.StockRatioDen
-			if !finitePositive(factor) || factor <= 1 {
+			increment, err := comp.StockRatioNum.DivExact(comp.StockRatioDen, money.ScaleQuantity)
+			if err != nil {
+				return mutationPlan{}, ErrInvalidSplitRatio
+			}
+			factor := money.MustRatio("1").Add(increment)
+			if factor.Cmp(money.MustRatio("1")) <= 0 {
 				return mutationPlan{}, ErrInvalidSplitRatio
 			}
 			updated := *existing
-			updated.Quantity = existing.Quantity * factor
-			updated.AverageBuyPrice = existing.AverageBuyPrice / factor // total basis preserved
+			updated.Quantity = money.QuantizeQuantity(existing.Quantity.MulRatio(factor))
+			updated.AverageBuyPrice, err = existing.AverageBuyPrice.DivRatio(factor, money.ScalePrice) // total basis preserved
+			if err != nil {
+				return mutationPlan{}, ErrInvalidSplitRatio
+			}
 			updated.UpdatedAt = now
 			open = replaceOrAppendPosition(open, &updated)
 			touchedPositions[updated.ID] = &updated
@@ -1862,7 +1947,7 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivityStockDividend, Symbol: symbol, AssetType: existing.AssetType,
 				InstrumentID: existing.InstrumentID, Currency: existing.Currency,
-				Quantity:   floatPointer(updated.Quantity - existing.Quantity),
+				Quantity:   quantityPointer(updated.Quantity.Sub(existing.Quantity)),
 				OccurredAt: occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: existing.ID,
 				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, comp.Provenance, baseMeta(map[string]any{
 					"income_subtype":    string(IncomeStockDividendSub),
@@ -1878,20 +1963,26 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 			if existing == nil {
 				return mutationPlan{}, ErrInstrumentNotFound
 			}
-			net := round2(comp.NetCash())
-			remainingBasis := existing.Quantity * existing.AverageBuyPrice
+			net, err := money.QuantizeCash(comp.NetCash(), currency)
+			if err != nil {
+				return mutationPlan{}, err
+			}
+			remainingBasis := money.QuantizeCostBasis(existing.Quantity.MulPrice(existing.AverageBuyPrice))
 			basisReduction := net
-			excessOverBasis := 0.0
-			if basisReduction > remainingBasis {
+			excessOverBasis := money.ZeroAmount()
+			if basisReduction.Cmp(remainingBasis) > 0 {
 				// Documented existing treatment (see planReturnOfCapital): excess ROC
 				// over the remaining basis is recorded separately and never drives
 				// basis negative.
-				excessOverBasis = round2(basisReduction - remainingBasis)
+				excessOverBasis = basisReduction.Sub(remainingBasis)
 				basisReduction = remainingBasis
 			}
 			updated := *existing
-			if existing.Quantity > 0 {
-				updated.AverageBuyPrice = round4((remainingBasis - basisReduction) / existing.Quantity)
+			if existing.Quantity.Cmp(money.ZeroQuantity()) > 0 {
+				updated.AverageBuyPrice, err = remainingBasis.Sub(basisReduction).DivByQuantity(existing.Quantity, money.ScalePrice)
+				if err != nil {
+					return mutationPlan{}, err
+				}
 			}
 			updated.UpdatedAt = now
 			open = replaceOrAppendPosition(open, &updated)
@@ -1902,17 +1993,17 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 				Type: ActivityReturnOfCapital, Symbol: symbol, AssetType: existing.AssetType,
 				InstrumentID: existing.InstrumentID, Currency: currency, GrossAmount: net,
-				CostBasisAllocated: floatPointer(round2(basisReduction)),
+				CostBasisAllocated: amountPointer(money.QuantizeCostBasis(basisReduction)),
 				OccurredAt:         occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: existing.ID,
 				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, comp.Provenance, baseMeta(map[string]any{
 					"income_subtype":     string(IncomeReturnOfCapitalSub),
-					"gross_amount":       round2(comp.Amount),
+					"gross_amount":       comp.Amount.String(),
 					"net_amount":         net,
-					"basis_reduction":    round2(basisReduction),
-					"excess_over_basis":  excessOverBasis,
+					"basis_reduction":    basisReduction.String(),
+					"excess_over_basis":  excessOverBasis.String(),
 					"accounting_policy":  "return_of_capital_basis_reduction",
-					"withholding_amount": nonEmptyFloat(comp.Withholding),
-					"income_fee_amount":  nonEmptyFloat(comp.Fee),
+					"withholding_amount": nonEmptyAmount(comp.Withholding),
+					"income_fee_amount":  nonEmptyAmount(comp.Fee),
 				})),
 			}
 			activities = append(activities, act)
@@ -1922,7 +2013,10 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 		default: // every ordinary-income subtype (dividend, distribution, coupon,
 			// interest, capital-gains distribution, staking, other-provider income),
 			// optionally reinvested.
-			net := round2(comp.NetCash())
+			net, err := money.QuantizeCash(comp.NetCash(), currency)
+			if err != nil {
+				return mutationPlan{}, err
+			}
 			reinvest := comp.Reinvest || ev.Reinvest || comp.Subtype == IncomeReinvestedDiv
 			hasReturnLeg = true
 			if reinvest {
@@ -1933,20 +2027,21 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 				qcurrency := quote.Currency
 				price := quote.Price
 				method := "market_close_on_payment_date"
-				if finitePositive(comp.ReinvestPrice) {
+				if comp.ReinvestPrice.Cmp(money.ZeroPrice()) > 0 {
 					price = comp.ReinvestPrice
 					method = "broker_reported"
 				}
 				if comp.PriceMethod != "" {
 					method = comp.PriceMethod
 				}
-				if !finitePositive(price) {
+				if price.Cmp(money.ZeroPrice()) <= 0 {
 					return mutationPlan{}, ErrInvalidReinvestment
 				}
-				qty := net / price
-				if !finitePositive(qty) {
+				qty, err := net.DivByPrice(price, money.ScaleQuantity)
+				if err != nil || qty.Cmp(money.ZeroQuantity()) <= 0 {
 					return mutationPlan{}, ErrInvalidReinvestment
 				}
+				qty = money.QuantizeQuantity(qty)
 				estimated := comp.Estimated || method != "broker_reported"
 
 				var result *Position
@@ -1954,8 +2049,11 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 				for _, p := range open {
 					if p.Symbol == symbol && p.AssetType == assetType && p.Currency == qcurrency {
 						merged := *p
-						totalQty := p.Quantity + qty
-						merged.AverageBuyPrice = (p.Quantity*p.AverageBuyPrice + net) / totalQty
+						totalQty := money.QuantizeQuantity(p.Quantity.Add(qty))
+						merged.AverageBuyPrice, err = p.Quantity.MulPrice(p.AverageBuyPrice).Add(net).DivByQuantity(totalQty, money.ScalePrice)
+						if err != nil {
+							return mutationPlan{}, err
+						}
 						merged.Quantity = totalQty
 						merged.UpdatedAt = now
 						result = &merged
@@ -1983,21 +2081,21 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 					OccurredAt: occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
 					Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, comp.Provenance, baseMeta(map[string]any{
 						"income_subtype":            string(IncomeReinvestedDiv),
-						"gross_amount":              round2(comp.Amount),
+						"gross_amount":              comp.Amount.String(),
 						"net_amount":                net,
 						"component":                 "income",
 						"reinvestment_price_method": method,
-						"reinvestment_quantity":     round4(qty),
+						"reinvestment_quantity":     qty.String(),
 						"reinvestment_estimated":    estimated,
-						"withholding_amount":        nonEmptyFloat(comp.Withholding),
-						"income_fee_amount":         nonEmptyFloat(comp.Fee),
+						"withholding_amount":        nonEmptyAmount(comp.Withholding),
+						"income_fee_amount":         nonEmptyAmount(comp.Fee),
 					})),
 				}
 				buyLeg := Activity{
 					ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
 					Type: ActivityBuy, Symbol: symbol, AssetType: assetType,
 					InstrumentID: result.InstrumentID, Currency: qcurrency,
-					Quantity: floatPointer(qty), UnitPrice: floatPointer(price), GrossAmount: net,
+					Quantity: quantityPointer(qty), UnitPrice: pricePointer(price), GrossAmount: net,
 					OccurredAt: now, CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
 					Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, baseMeta(map[string]any{
 						"component":                 "reinvestment_buy",
@@ -2022,10 +2120,10 @@ func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio
 					OccurredAt: occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: episodeID,
 					Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, comp.Provenance, baseMeta(map[string]any{
 						"income_subtype":     string(comp.Subtype),
-						"gross_amount":       round2(comp.Amount),
+						"gross_amount":       comp.Amount.String(),
 						"net_amount":         net,
-						"withholding_amount": nonEmptyFloat(comp.Withholding),
-						"income_fee_amount":  nonEmptyFloat(comp.Fee),
+						"withholding_amount": nonEmptyAmount(comp.Withholding),
+						"income_fee_amount":  nonEmptyAmount(comp.Fee),
 						"estimated":          nonEmptyBool(comp.Estimated),
 					})),
 				}
@@ -2098,6 +2196,13 @@ func nonEmptyFloat(v float64) any {
 	return round2(v)
 }
 
+func nonEmptyAmount(v money.Amount) any {
+	if v.IsZero() {
+		return nil
+	}
+	return v.String()
+}
+
 func nonEmptyBool(v bool) any {
 	if !v {
 		return nil
@@ -2114,14 +2219,20 @@ func (c *MutationCoordinator) planFee(req MutationRequest, pf *Portfolio, oldOpe
 		return mutationPlan{}, ErrUnsupportedCurrency
 	}
 	current, found := cashAmount(oldCash, currency)
-	if !found || current+1e-9 < req.Fee.Amount {
+	feeAmt, err := money.QuantizeCash(req.Fee.Amount, currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
+	// Exact decimal comparison: no epsilon tolerance for the insufficient-cash
+	// check.
+	if !found || current.Cmp(feeAmt) < 0 {
 		return mutationPlan{}, ErrInsufficientCashForFee
 	}
 	now := val.ObservedAt
 	balance, _ := cashBalance(oldCash, currency)
 	balance.PortfolioID = pf.ID
 	balance.Currency = currency
-	balance.Amount = current - req.Fee.Amount
+	balance.Amount = current.Sub(feeAmt)
 	balance.UpdatedAt = now
 	if balance.CreatedAt.IsZero() {
 		balance.CreatedAt = now
@@ -2129,7 +2240,7 @@ func (c *MutationCoordinator) planFee(req MutationRequest, pf *Portfolio, oldOpe
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: feeActivityType(req.Fee.Subtype), Symbol: strings.ToUpper(strings.TrimSpace(req.Fee.Symbol)),
-		Currency: currency, GrossAmount: req.Fee.Amount, OccurredAt: occurredAt(req.Fee.OccurredAt, now),
+		Currency: currency, GrossAmount: feeAmt, OccurredAt: occurredAt(req.Fee.OccurredAt, now),
 		CreatedAt: now, Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Fee.Provenance, map[string]any{
 			"fee_subtype":        string(req.Fee.Subtype),
 			"linked_activity_id": nonEmpty(req.Fee.LinkedActivityID),
@@ -2153,30 +2264,32 @@ func (c *MutationCoordinator) planWriteOff(req MutationRequest, pf *Portfolio, o
 	}
 	now := val.ObservedAt
 	basisRate := val.rates[existing.Currency]
-	allocatedBasis := existing.Quantity * existing.AverageBuyPrice
-	realizedBase := -allocatedBasis * basisRate // full loss
+	allocatedBasis := existing.Quantity.MulPrice(existing.AverageBuyPrice)
+	realizedBase := allocatedBasis.Convert(basisRate).Neg() // full loss
+	realizedBaseF := realizedBase.Float64()
+	basisBaseF := allocatedBasis.Convert(basisRate).Float64()
 	closed := *existing
 	zero := 0.0
 	closed.Status = PositionStatusClosed
 	closed.ClosedAt = &now
 	closed.ClosePrice = &zero
 	closed.CloseCurrency = existing.Currency
-	closed.RealizedGainLossBase = round2(realizedBase)
+	closed.RealizedGainLossBase = round2(realizedBaseF)
 	closed.RealizedGainLossPercentage = -100
 	closed.UpdatedAt = now
 	view := ClosedPositionSummary{
-		ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType, Quantity: existing.Quantity,
-		BaselinePrice: closed.AverageBuyPrice, BaselineCurrency: closed.Currency, ClosePrice: 0,
+		ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType, Quantity: existing.Quantity.Float64(),
+		BaselinePrice: closed.AverageBuyPrice.Float64(), BaselineCurrency: closed.Currency, ClosePrice: 0,
 		ClosePriceCurrency: existing.Currency, ClosedAt: now.Format(time.RFC3339),
-		RealizedGainLossBase: round2(realizedBase), RealizedGainLossPercentage: -100,
-		ClosedCostBasisBase: round2(allocatedBasis * basisRate), BaseCurrency: fx.BaseCurrency,
+		RealizedGainLossBase: round2(realizedBaseF), RealizedGainLossPercentage: -100,
+		ClosedCostBasisBase: round2(basisBaseF), BaseCurrency: fx.BaseCurrency,
 	}
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: ActivityWriteOff, Symbol: existing.Symbol, AssetType: existing.AssetType, Currency: existing.Currency,
 		InstrumentID: existing.InstrumentID,
-		Quantity:     floatPointer(existing.Quantity), GrossAmount: 0,
-		CostBasisAllocated: floatPointer(allocatedBasis), RealizedGainLossBase: floatPointer(realizedBase),
+		Quantity:     quantityPointer(existing.Quantity), GrossAmount: money.ZeroAmount(),
+		CostBasisAllocated: amountPointer(allocatedBasis), RealizedGainLossBase: amountPointer(realizedBase),
 		RealizedGainLossPercentage: floatPointer(-100), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.CorpAction.Provenance, map[string]any{
@@ -2202,11 +2315,18 @@ func (c *MutationCoordinator) planSplit(req MutationRequest, pf *Portfolio, oldO
 		return mutationPlan{}, ErrInstrumentNotFound
 	}
 	now := val.ObservedAt
+	ratioRatio := money.RatioFromFloat64(ratio)
 	updated := *existing
-	updated.Quantity = existing.Quantity * ratio
-	updated.AverageBuyPrice = existing.AverageBuyPrice / ratio
+	updated.Quantity = money.QuantizeQuantity(existing.Quantity.MulRatio(ratioRatio))
+	// Splits have the same repeating-decimal issue as stock dividends. Preserve
+	// guard digits so total cost basis remains exact at its 18dp boundary.
+	avgPrice, divErr := existing.AverageBuyPrice.DivRatio(ratioRatio, money.ScaleCostBasis+money.ScaleQuantity)
+	if divErr != nil {
+		return mutationPlan{}, ErrInvalidSplitRatio
+	}
+	updated.AverageBuyPrice = avgPrice
 	updated.UpdatedAt = now
-	if !finitePositive(updated.Quantity) || !finitePositive(updated.AverageBuyPrice) {
+	if updated.Quantity.Sign() <= 0 || updated.AverageBuyPrice.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
 	subtype := CorpStockSplit
@@ -2217,7 +2337,7 @@ func (c *MutationCoordinator) planSplit(req MutationRequest, pf *Portfolio, oldO
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: splitActivityType(subtype), Symbol: existing.Symbol, AssetType: existing.AssetType,
 		InstrumentID: existing.InstrumentID,
-		Currency:     existing.Currency, Quantity: floatPointer(updated.Quantity), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
+		Currency:     existing.Currency, Quantity: quantityPointer(updated.Quantity), OccurredAt: occurredAt(req.CorpAction.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.CorpAction.Provenance, map[string]any{
 			"corporate_action":  string(subtype),
@@ -2366,7 +2486,9 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.CashFlow.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.CashFlow.Amount) {
+		// Decimal amounts cannot be NaN/Inf by construction; only the sign needs
+		// checking (exact, no epsilon).
+		if req.CashFlow.Amount.Sign() <= 0 {
 			return nil, ErrInvalidCashAmount
 		}
 		return nil, nil
@@ -2378,14 +2500,14 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if req.Buy.ExecutionPrice != 0 && !finitePositive(req.Buy.ExecutionPrice) {
+		if !req.Buy.ExecutionPrice.IsZero() && req.Buy.ExecutionPrice.Sign() <= 0 {
 			return nil, ErrInvalidBuyPrice
 		}
 		if req.Buy.EffectiveAt != nil && req.Buy.EffectiveAt.UTC().Before(c.now()) &&
-			req.Buy.ExecutionPrice == 0 {
+			req.Buy.ExecutionPrice.IsZero() {
 			return nil, ErrHistoricalExecutionPriceRequired
 		}
-		if !isFinite(req.Buy.Fee) || req.Buy.Fee < 0 {
+		if req.Buy.Fee.Sign() < 0 {
 			return nil, ErrInvalidBuyFee
 		}
 		req.Buy = BuyInput{
@@ -2397,17 +2519,17 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		}
 		return []string{clean.Symbol}, nil
 	case MutationSell:
-		if !finitePositive(req.Sell.Quantity) {
+		if req.Sell.Quantity.Sign() <= 0 {
 			return nil, ErrInvalidSaleQuantity
 		}
-		if req.Sell.ExecutionPrice != 0 && !finitePositive(req.Sell.ExecutionPrice) {
+		if !req.Sell.ExecutionPrice.IsZero() && req.Sell.ExecutionPrice.Sign() <= 0 {
 			return nil, ErrInvalidSalePrice
 		}
 		if req.Sell.EffectiveAt != nil && req.Sell.EffectiveAt.UTC().Before(c.now()) &&
-			req.Sell.ExecutionPrice == 0 {
+			req.Sell.ExecutionPrice.IsZero() {
 			return nil, ErrHistoricalExecutionPriceRequired
 		}
-		if !isFinite(req.Sell.Fee) || req.Sell.Fee < 0 {
+		if req.Sell.Fee.Sign() < 0 {
 			return nil, ErrInvalidSaleFee
 		}
 		req.Sell.Symbol = strings.ToUpper(strings.TrimSpace(req.Sell.Symbol))
@@ -2433,7 +2555,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		return []string{clean.Symbol}, nil
 
 	case MutationResize:
-		if !finitePositive(req.Quantity) {
+		if req.Quantity.Cmp(money.ZeroQuantity()) <= 0 {
 			return nil, ErrInvalidQuantity
 		}
 		return nil, nil
@@ -2457,7 +2579,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Income.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Income.Amount) {
+		if req.Income.Amount.Sign() <= 0 {
 			return nil, ErrInvalidIncomeAmount
 		}
 		switch req.Income.Subtype {
@@ -2486,11 +2608,11 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Income.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Income.Amount) {
+		if req.Income.Amount.Sign() <= 0 {
 			return nil, ErrInvalidIncomeAmount
 		}
 		clean, err := validateAndNormalize(PositionInput{
-			Symbol: req.Income.Symbol, AssetType: req.Income.AssetType, Quantity: 1,
+			Symbol: req.Income.Symbol, AssetType: req.Income.AssetType, Quantity: money.QuantityFromFloat64(1),
 		})
 		if err != nil {
 			return nil, err
@@ -2504,7 +2626,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Income.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Income.Amount) {
+		if req.Income.Amount.Sign() <= 0 {
 			return nil, ErrInvalidIncomeAmount
 		}
 		sym, err := prices.ValidateAndNormalizeSymbol(strings.ToUpper(strings.TrimSpace(req.Income.Symbol)))
@@ -2515,7 +2637,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		return nil, nil // the paying position is already held; only basis + cash change
 
 	case MutationStockDividend:
-		if !finitePositive(req.Income.StockRatioNum) || !finitePositive(req.Income.StockRatioDen) {
+		if req.Income.StockRatioNum.Sign() <= 0 || req.Income.StockRatioDen.Sign() <= 0 {
 			return nil, ErrInvalidSplitRatio
 		}
 		sym, err := prices.ValidateAndNormalizeSymbol(strings.ToUpper(strings.TrimSpace(req.Income.Symbol)))
@@ -2533,7 +2655,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Fee.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Fee.Amount) {
+		if req.Fee.Amount.Sign() <= 0 {
 			return nil, ErrInvalidFeeAmount
 		}
 		switch req.Fee.Subtype {
@@ -2590,7 +2712,7 @@ func supportedCurrency(currency string) bool {
 	}
 }
 
-func cashAmount(balances []CashBalance, currency string) (float64, bool) {
+func cashAmount(balances []CashBalance, currency string) (money.Amount, bool) {
 	balance, ok := cashBalance(balances, currency)
 	return balance.Amount, ok
 }
@@ -2647,6 +2769,10 @@ func findSalePosition(all []*Position, req MutationRequest) (*Position, error) {
 
 func floatPointer(value float64) *float64 { return &value }
 
+func quantityPointer(value money.Quantity) *money.Quantity { return &value }
+func pricePointer(value money.Price) *money.Price          { return &value }
+func amountPointer(value money.Amount) *money.Amount       { return &value }
+
 func prepareActivity(activity *Activity) {
 	if activity.Metadata == nil {
 		activity.Metadata = map[string]any{}
@@ -2671,11 +2797,11 @@ func prepareActivity(activity *Activity) {
 	if activity.PositionEpisodeID != "" {
 		activity.Metadata["position_episode_id"] = activity.PositionEpisodeID
 	}
-	if activity.FeeAmount > 0 {
-		activity.Metadata["fee_amount"] = activity.FeeAmount
+	if activity.FeeAmount.Sign() > 0 {
+		activity.Metadata["fee_amount"] = activity.FeeAmount.String()
 	}
-	if activity.NetAmount != 0 {
-		activity.Metadata["net_amount"] = activity.NetAmount
+	if !activity.NetAmount.IsZero() {
+		activity.Metadata["net_amount"] = activity.NetAmount.String()
 	}
 }
 

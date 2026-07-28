@@ -8,7 +8,11 @@
 // swappable without touching the math.
 package benchmark
 
-import "time"
+import (
+	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
+)
 
 // Difficulty tiers order badges from onboarding-easy to elite.
 type Difficulty string
@@ -43,9 +47,9 @@ const (
 // RecipeRef must be set: Symbol names a tradable ticker; RecipeRef nests another
 // recipe (e.g. a commodity basket inside All-Weather).
 type AssetAllocation struct {
-	Symbol    string  `json:"symbol,omitempty"`
-	RecipeRef string  `json:"recipe_ref,omitempty"`
-	Weight    float64 `json:"weight"` // target weight as a decimal, 0.60 = 60%
+	Symbol    string       `json:"symbol,omitempty"`
+	RecipeRef string       `json:"recipe_ref,omitempty"`
+	Weight    money.Weight `json:"weight"` // target weight as a decimal, 0.60 = 60%
 }
 
 // BenchmarkRecipe is a named target allocation. Dynamic recipes (e.g. a 13F
@@ -186,16 +190,16 @@ func EvidenceFromResult(result BenchmarkReturnResult) BenchmarkDataEvidence {
 // PricePoint is a single benchmark price observation. Raw provider closes are
 // kept separate so they can never be silently blessed as adjusted data.
 type PricePoint struct {
-	Date          string  `json:"date"` // YYYY-MM-DD
-	AdjustedClose float64 `json:"adjusted_close"`
-	RawClose      float64 `json:"raw_close,omitempty"`
+	Date          string      `json:"date"` // YYYY-MM-DD
+	AdjustedClose money.Price `json:"adjusted_close"`
+	RawClose      money.Price `json:"raw_close,omitempty"`
 }
 
 // IndexPoint is a generic normalized index point. Ranked achievements do not
 // use this legacy archive-series type.
 type IndexPoint struct {
-	Date  string  `json:"date"`
-	Index float64 `json:"index"`
+	Date  string           `json:"date"`
+	Index money.IndexValue `json:"index"`
 }
 
 const MethodologyVirtualPortfolioV2 = "benchmark_virtual_portfolio_v2"
@@ -217,9 +221,9 @@ type BenchmarkEvaluationRequest struct {
 // through each common close. Units only change when the executed policy says
 // to rebalance.
 type BenchmarkPortfolioState struct {
-	NAV               float64
-	Cash              float64
-	Holdings          map[string]float64
+	NAV               money.IndexValue
+	Cash              money.Amount
+	Holdings          map[string]money.Quantity
 	RecipeID          string
 	RecipeVersionID   string
 	RebalancingPolicy RebalancingPolicy

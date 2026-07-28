@@ -2,10 +2,10 @@ package performancehistory
 
 import (
 	"errors"
-	"math"
 	"sort"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
@@ -15,9 +15,9 @@ const RankedBenchmarkAlignmentMethod = "latest_trusted_snapshot_not_after_utc_cl
 
 type AlignedBenchmarkComparison struct {
 	Window                    Window
-	PortfolioReturnPercentage float64
-	BenchmarkReturnPercentage float64
-	EdgePercentagePoints      float64
+	PortfolioReturnPercentage money.Ratio
+	BenchmarkReturnPercentage money.Ratio
+	EdgePercentagePoints      money.Ratio
 }
 
 // CompareWithBenchmarkCloses is the canonical comparison calculation used by
@@ -25,13 +25,13 @@ type AlignedBenchmarkComparison struct {
 func CompareWithBenchmarkCloses(
 	points []Snapshot,
 	startDate, endDate time.Time,
-	benchmarkReturn float64,
+	benchmarkReturn money.Ratio,
 ) (AlignedBenchmarkComparison, error) {
 	window, err := AlignWindowToBenchmarkCloses(points, startDate, endDate)
 	if err != nil {
 		return AlignedBenchmarkComparison{}, err
 	}
-	portfolioReturn, err := TimeframeReturnPercent(
+	portfolioReturn, err := TimeframeReturnRatio(
 		window.StartSnapshot.RankedIndex, window.EndSnapshot.RankedIndex,
 	)
 	if err != nil {
@@ -40,7 +40,7 @@ func CompareWithBenchmarkCloses(
 	return AlignedBenchmarkComparison{
 		Window: window, PortfolioReturnPercentage: portfolioReturn,
 		BenchmarkReturnPercentage: benchmarkReturn,
-		EdgePercentagePoints:      portfolioReturn - benchmarkReturn,
+		EdgePercentagePoints:      portfolioReturn.Sub(benchmarkReturn),
 	}, nil
 }
 
@@ -94,7 +94,7 @@ func trustedAtOrBeforeClose(points []Snapshot, day time.Time) (Snapshot, bool) {
 		}
 		if point.DataQualityStatus != QualityComplete ||
 			point.RankingStatus != performance.StatusActive ||
-			point.RankedIndex <= 0 || math.IsNaN(point.RankedIndex) || math.IsInf(point.RankedIndex, 0) {
+			point.RankedIndex.Cmp(money.ZeroIndexValue()) <= 0 {
 			continue
 		}
 		return point, true

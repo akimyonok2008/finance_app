@@ -24,35 +24,35 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "pg-seed-dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "pg-seed-dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "pg-seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx, userID, "pg-seed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	// Cash dividend (return-bearing) raises the index.
 	div, err := svc.RecordIncome(ctx, userID, "pg-div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
-	assert.Greater(t, div.RankedIndexAfter, div.RankedIndexBefore)
+	assert.Greater(t, div.RankedIndexAfter.Cmp(div.RankedIndexBefore), 0)
 
 	// Reinvested dividend commits two grouped activity rows atomically.
 	_, err = svc.RecordIncome(ctx, userID, "pg-reinv", IncomeInput{
-		Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD", Amount: 195,
+		Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD", Amount: testAmount("195"),
 	})
 	require.NoError(t, err)
 
 	// Management fee (return-bearing negative) lowers the index.
-	fee, err := svc.RecordFee(ctx, userID, "pg-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 25})
+	fee, err := svc.RecordFee(ctx, userID, "pg-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
-	assert.Less(t, fee.RankedIndexAfter, fee.RankedIndexBefore)
+	assert.Less(t, fee.RankedIndexAfter.Cmp(fee.RankedIndexBefore), 0)
 
 	// Stock split (neutral) preserves the index at the action.
 	split, err := svc.RecordCorporateAction(ctx, userID, "pg-split", CorpActionInput{
 		Subtype: CorpStockSplit, Symbol: "AAPL", RatioNumerator: 2, RatioDenominator: 1,
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, split.RankedIndexBefore, split.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, split.RankedIndexBefore, split.RankedIndexAfter)
 
 	// Symbol change (neutral).
 	quotes.Set("APLX", 97.5, "USD")
@@ -66,11 +66,11 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 		Subtype: CorpWriteOff, Symbol: "APLX",
 	})
 	require.NoError(t, err)
-	assert.Less(t, wo.RankedIndexAfter, wo.RankedIndexBefore)
+	assert.Less(t, wo.RankedIndexAfter.Cmp(wo.RankedIndexBefore), 0)
 
 	// Idempotent replay of the dividend.
 	replay, err := svc.RecordIncome(ctx, userID, "pg-div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 	assert.True(t, replay.Duplicate)
@@ -128,9 +128,9 @@ func TestPG_ApplyIncomeEventMixedComponentsCommitAtomically(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "pg-mixed-dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "pg-mixed-dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "pg-mixed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx, userID, "pg-mixed-buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	pf, err := repo.GetPortfolioByUser(ctx, userID)
@@ -138,12 +138,12 @@ func TestPG_ApplyIncomeEventMixedComponentsCommitAtomically(t *testing.T) {
 	positions, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	basisBefore := positions[0].Quantity * positions[0].AverageBuyPrice
+	basisBefore := positions[0].Quantity.MulPrice(positions[0].AverageBuyPrice)
 
 	components := []IncomeComponentInput{
-		{Subtype: IncomeCashDividend, Amount: 70},
-		{Subtype: IncomeCapitalGainsDist, Amount: 20},
-		{Subtype: IncomeReturnOfCapitalSub, Amount: 10},
+		{Subtype: IncomeCashDividend, Amount: testAmount("70")},
+		{Subtype: IncomeCapitalGainsDist, Amount: testAmount("20")},
+		{Subtype: IncomeReturnOfCapitalSub, Amount: testAmount("10")},
 	}
 	// The audit table's request_id column is globally unique (see
 	// 0010_portfolio_mutation_aggregate.sql), so the idempotency key must be
@@ -155,7 +155,7 @@ func TestPG_ApplyIncomeEventMixedComponentsCommitAtomically(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, res.Duplicate)
-	assert.Greater(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Greater(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 
 	// One activity group across all three legs.
 	var groupCount, groupIDCount int
@@ -174,8 +174,8 @@ func TestPG_ApplyIncomeEventMixedComponentsCommitAtomically(t *testing.T) {
 	positionsAfter, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positionsAfter, 1)
-	basisAfter := positionsAfter[0].Quantity * positionsAfter[0].AverageBuyPrice
-	assert.InDelta(t, basisBefore-10, basisAfter, 0.001)
+	basisAfter := positionsAfter[0].Quantity.MulPrice(positionsAfter[0].AverageBuyPrice)
+	assertAmountValuesEqual(t, basisBefore.Sub(testAmount("10")), basisAfter)
 
 	// Retry with the SAME event-level request id replays the committed result
 	// and creates no duplicate cash, activities, or basis reduction.
@@ -195,7 +195,7 @@ func TestPG_ApplyIncomeEventMixedComponentsCommitAtomically(t *testing.T) {
 	positionsAfterRetry, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positionsAfterRetry, 1)
-	assert.InDelta(t, basisAfter, positionsAfterRetry[0].Quantity*positionsAfterRetry[0].AverageBuyPrice, 0.001,
+	assertAmountValuesEqual(t, basisAfter, positionsAfterRetry[0].Quantity.MulPrice(positionsAfterRetry[0].AverageBuyPrice),
 		"retry must not reduce basis a second time")
 
 	// One audit row and one outbox event for the WHOLE event (not one per

@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
+
+const intermediatePrecision = int32(36)
 
 type resolvedRecipeVersion struct {
 	version    BenchmarkRecipeVersion
@@ -110,7 +113,7 @@ func (s *BenchmarkConstructionService) CalculateIndex(
 
 	firstDate, _ := time.Parse(dateLayout, dates[0])
 	state := BenchmarkPortfolioState{
-		NAV: 100, Holdings: map[string]float64{},
+		NAV: money.MustIndexValue("100"), Cash: money.ZeroAmount(), Holdings: map[string]money.Quantity{},
 		RecipeID: request.RecipeID, RecipeVersionID: timeline[0].version.VersionID,
 		RebalancingPolicy: policy, LastValuationDate: firstDate,
 	}
@@ -119,7 +122,7 @@ func (s *BenchmarkConstructionService) CalculateIndex(
 	}
 	metadata.ActivatedVersions = append(metadata.ActivatedVersions,
 		activationEvidence(timeline[0], dates[0]))
-	points := []IndexPoint{{Date: dates[0], Index: 100}}
+	points := []IndexPoint{{Date: dates[0], Index: money.MustIndexValue("100")}}
 
 	nextVersion := 1
 	for index := 1; index < len(dates); index++ {
@@ -164,7 +167,7 @@ func (s *BenchmarkConstructionService) CalculateIndex(
 			if err != nil {
 				return BenchmarkReturnResult{}, err
 			}
-			if math.Abs(before-after) > 1e-9 {
+			if before.Cmp(after) != 0 {
 				return BenchmarkReturnResult{}, fmt.Errorf("%w: rebalance changed NAV", ErrInvalidBenchmarkSeries)
 			}
 			state.NAV = after
@@ -177,10 +180,10 @@ func (s *BenchmarkConstructionService) CalculateIndex(
 	effectiveEnd, _ := time.Parse(dateLayout, dates[len(dates)-1])
 	endNAV := points[len(points)-1].Index
 	result := BenchmarkReturnResult{
-		ReturnPercentage: round((endNAV/100-1)*100, 4),
+		ReturnPercentage: endNAV.Sub(money.MustIndexValue("100")),
 		EffectiveStart:   effectiveStart, EffectiveEnd: effectiveEnd,
 		RecipeVersion: timeline[0].version.Metadata(),
-		DataMetadata:  metadata, StartNAV: 100, EndNAV: endNAV, Points: points,
+		DataMetadata:  metadata, StartNAV: money.MustIndexValue("100"), EndNAV: endNAV, Points: points,
 	}
 	// Evidence reports the policy actually dispatched by the engine.
 	result.RecipeVersion.RebalancingPolicy = policy
@@ -198,7 +201,7 @@ func (s *BenchmarkConstructionService) resolveTimeline(recipeID string, start, e
 	}
 	out := make([]resolvedRecipeVersion, 0, len(versions))
 	for _, version := range versions {
-		components, err := s.flattenConcreteVersion(version, version.PubliclyKnownAt, 1, map[string]bool{})
+		components, err := s.flattenConcreteVersion(version, version.PubliclyKnownAt, money.MustWeight("1"), map[string]bool{})
 		if err != nil {
 			return nil, err
 		}
@@ -213,7 +216,7 @@ func (s *BenchmarkConstructionService) resolveTimeline(recipeID string, start, e
 func (s *BenchmarkConstructionService) flattenConcreteVersion(
 	version BenchmarkRecipeVersion,
 	asOf time.Time,
-	parentWeight float64,
+	parentWeight money.Weight,
 	visited map[string]bool,
 ) ([]AssetAllocation, error) {
 	if visited[version.RecipeID] {
@@ -223,7 +226,7 @@ func (s *BenchmarkConstructionService) flattenConcreteVersion(
 	defer delete(visited, version.RecipeID)
 	var result []AssetAllocation
 	for _, component := range version.Components {
-		weight := parentWeight * component.Weight
+		weight := parentWeight.Mul(component.Weight)
 		switch {
 		case component.Symbol != "":
 			result = append(result, AssetAllocation{Symbol: component.Symbol, Weight: weight})
@@ -295,13 +298,13 @@ func (s *BenchmarkConstructionService) convertedPrices(
 	request BenchmarkEvaluationRequest,
 	dates []string,
 	series map[string]BenchmarkPriceSeries,
-) (map[string]map[string]float64, []FXEvidencePoint, string, error) {
-	out := map[string]map[string]float64{}
+) (map[string]map[string]money.Price, []FXEvidencePoint, string, error) {
+	out := map[string]map[string]money.Price{}
 	evidence := []FXEvidencePoint{}
 	providerSet := map[string]struct{}{}
 	base := strings.ToUpper(request.BaseCurrency)
 	for symbol, item := range series {
-		out[symbol] = map[string]float64{}
+		out[symbol] = map[string]money.Price{}
 		native := strings.ToUpper(item.Metadata.Currency)
 		priceMap := toPriceMap(item.Points)
 		for _, dateKey := range dates {
@@ -324,9 +327,10 @@ func (s *BenchmarkConstructionService) convertedPrices(
 					return nil, nil, "", fmt.Errorf("%w: FX date mismatch for %s/%s", ErrHistoricalFXUnavailable, native, base)
 				}
 			}
-			out[symbol][dateKey] = price * rate.Rate
+			exactRate := money.QuantizeFX(money.FXRateFromFloat64(rate.Rate))
+			out[symbol][dateKey] = money.QuantizePrice(price.Convert(exactRate))
 			evidence = append(evidence, FXEvidencePoint{
-				From: native, To: base, Date: dateKey, Rate: rate.Rate, Provider: rate.Provider,
+				From: native, To: base, Date: dateKey, Rate: exactRate, Provider: rate.Provider,
 			})
 			providerSet[rate.Provider] = struct{}{}
 		}
@@ -347,35 +351,48 @@ func (s *BenchmarkConstructionService) convertedPrices(
 func allocateAtNAV(
 	state *BenchmarkPortfolioState,
 	components []AssetAllocation,
-	prices map[string]map[string]float64,
+	prices map[string]map[string]money.Price,
 	date string,
 ) error {
-	holdings := make(map[string]float64, len(components))
+	holdings := make(map[string]money.Quantity, len(components))
+	nav, err := money.ParseAmount(state.NAV.String())
+	if err != nil {
+		return ErrInvalidBenchmarkSeries
+	}
 	for _, component := range components {
 		price := prices[component.Symbol][date]
-		if price <= 0 {
+		if price.Cmp(money.ZeroPrice()) <= 0 {
 			return fmt.Errorf("%w: invalid converted price for %s", ErrInvalidBenchmarkSeries, component.Symbol)
 		}
-		holdings[component.Symbol] = state.NAV * component.Weight / price
+		target := nav.MulRatio(money.MustRatio(component.Weight.String()))
+		units, err := target.DivByPrice(price, 36)
+		if err != nil {
+			return ErrInvalidBenchmarkSeries
+		}
+		holdings[component.Symbol] = units
 	}
 	state.Holdings = holdings
-	state.Cash = 0
+	state.Cash = money.ZeroAmount()
 	return nil
 }
 
-func valueState(state BenchmarkPortfolioState, prices map[string]map[string]float64, date string) (float64, error) {
+func valueState(state BenchmarkPortfolioState, prices map[string]map[string]money.Price, date string) (money.IndexValue, error) {
 	value := state.Cash
 	for symbol, units := range state.Holdings {
 		price, ok := prices[symbol][date]
-		if !ok || price <= 0 {
-			return 0, fmt.Errorf("%w: missing converted price for %s on %s", ErrIncompleteSeries, symbol, date)
+		if !ok || price.Cmp(money.ZeroPrice()) <= 0 {
+			return money.ZeroIndexValue(), fmt.Errorf("%w: missing converted price for %s on %s", ErrIncompleteSeries, symbol, date)
 		}
-		value += units * price
+		value = value.Add(units.MulPrice(price))
 	}
-	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, ErrInvalidBenchmarkSeries
+	if value.Cmp(money.ZeroAmount()) <= 0 {
+		return money.ZeroIndexValue(), ErrInvalidBenchmarkSeries
 	}
-	return value, nil
+	index, err := money.ParseIndexValue(value.String())
+	if err != nil {
+		return money.ZeroIndexValue(), ErrInvalidBenchmarkSeries
+	}
+	return money.QuantizeIndex(index), nil
 }
 
 func supportedPolicy(policy RebalancingPolicy) bool {
@@ -421,7 +438,7 @@ func computeVirtualFingerprint(
 		builder.WriteString("version=" + activated.RecipeID + "|" + activated.VersionID + "|" +
 			activated.ActivationDate + "|" + activated.PubliclyKnownAt + "\n")
 		for _, component := range activated.Components {
-			builder.WriteString(component.Symbol + "=" + strconv.FormatFloat(component.Weight, 'g', 17, 64) + "\n")
+			builder.WriteString(component.Symbol + "=" + component.Weight.String() + "\n")
 		}
 	}
 	for _, date := range result.DataMetadata.RebalanceDates {
@@ -439,7 +456,7 @@ func computeVirtualFingerprint(
 	}
 	for _, fx := range result.DataMetadata.FXPoints {
 		builder.WriteString("fx=" + fx.From + "|" + fx.To + "|" + fx.Date + "|" +
-			strconv.FormatFloat(fx.Rate, 'g', 17, 64) + "|" + fx.Provider + "\n")
+			fx.Rate.String() + "|" + fx.Provider + "\n")
 	}
 	builder.WriteString("quality=" + string(result.DataMetadata.Quality) + "\n")
 	sum := sha256.Sum256([]byte(builder.String()))
@@ -450,10 +467,10 @@ func seriesPointsHash(points []PricePoint) string {
 	var builder strings.Builder
 	for _, point := range points {
 		value := point.AdjustedClose
-		if value == 0 {
+		if value.IsZero() {
 			value = point.RawClose
 		}
-		builder.WriteString(point.Date + ":" + strconv.FormatFloat(value, 'g', 17, 64) + ";")
+		builder.WriteString(point.Date + ":" + value.String() + ";")
 	}
 	sum := sha256.Sum256([]byte(builder.String()))
 	return hex.EncodeToString(sum[:])

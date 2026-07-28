@@ -3,6 +3,8 @@ package benchmark
 import (
 	"errors"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // PriceType records what kind of price series a leg was built from. This is the
@@ -200,24 +202,27 @@ type ActivatedRecipeVersion struct {
 }
 
 type FXEvidencePoint struct {
-	From     string  `json:"from"`
-	To       string  `json:"to"`
-	Date     string  `json:"date"`
-	Rate     float64 `json:"rate"`
-	Provider string  `json:"provider"`
+	From     string       `json:"from"`
+	To       string       `json:"to"`
+	Date     string       `json:"date"`
+	Rate     money.FXRate `json:"rate"`
+	Provider string       `json:"provider"`
 }
 
 // BenchmarkReturnResult is the full outcome of a benchmark evaluation: the
 // number plus everything needed to trust, audit and reproduce it.
 type BenchmarkReturnResult struct {
-	ReturnPercentage float64                     `json:"return_percentage"`
+	// ReturnPercentage is percentage points (e.g. 5.23 means +5.23%), derived
+	// exactly from the quantized index (index - 100 base). It is exact
+	// decimal, never a rounded float display value.
+	ReturnPercentage money.Ratio                 `json:"return_percentage"`
 	EffectiveStart   time.Time                   `json:"effective_start"`
 	EffectiveEnd     time.Time                   `json:"effective_end"`
 	RecipeVersion    RecipeVersionMetadata       `json:"recipe_version"`
 	DataMetadata     BenchmarkEvaluationMetadata `json:"data_metadata"`
 	Fingerprint      string                      `json:"fingerprint"`
-	StartNAV         float64                     `json:"start_nav"`
-	EndNAV           float64                     `json:"end_nav"`
+	StartNAV         money.IndexValue            `json:"start_nav"`
+	EndNAV           money.IndexValue            `json:"end_nav"`
 	Points           []IndexPoint                `json:"points"`
 }
 

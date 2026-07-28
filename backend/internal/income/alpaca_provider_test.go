@@ -48,7 +48,7 @@ func TestAlpacaIncomeProviderNormalizesDividends(t *testing.T) {
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
 	}
-	if events[0].Type != TypeCashDividend || events[0].AmountPerUnit != 0.24 {
+	if events[0].Type != TypeCashDividend || events[0].AmountPerUnit.Cmp(testPrice("0.24")) != 0 {
 		t.Fatalf("unexpected cash dividend: %+v", events[0])
 	}
 	if events[0].PaymentDate.Format("2006-01-02") != "2024-02-15" {
@@ -57,7 +57,7 @@ func TestAlpacaIncomeProviderNormalizesDividends(t *testing.T) {
 	if events[1].Type != TypeSpecialDividend {
 		t.Fatalf("special flag should map to special_dividend: %+v", events[1])
 	}
-	if events[2].Type != TypeStockDividend || events[2].AmountPerUnit != 0.05 {
+	if events[2].Type != TypeStockDividend || events[2].AmountPerUnit.Cmp(testPrice("0.05")) != 0 {
 		t.Fatalf("unexpected stock dividend: %+v", events[2])
 	}
 	if norm := normalize(p.Name(), events[2], time.Now().UTC()); norm.Quality != QualityVerified {

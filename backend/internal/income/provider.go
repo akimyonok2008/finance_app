@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // IncomeEventProvider is the neutral provider boundary. Adapters for FMP, EODHD,
@@ -107,7 +109,6 @@ func (p *ManualDevelopmentProvider) FetchIncomeEvents(_ context.Context, request
 func fingerprint(e ProviderIncomeEvent) string {
 	var b []byte
 	add := func(s string) { b = append(b, s...); b = append(b, '|') }
-	addF := func(f float64) { add(strconv.FormatFloat(f, 'f', 8, 64)) }
 	addT := func(t *time.Time) {
 		if t == nil {
 			add("-")
@@ -118,7 +119,7 @@ func fingerprint(e ProviderIncomeEvent) string {
 	add(string(e.Type))
 	add(e.Instrument.InstrumentID)
 	add(e.Instrument.Symbol)
-	addF(e.AmountPerUnit)
+	add(e.AmountPerUnit.String())
 	add(e.Currency)
 	addT(e.ExDate)
 	addT(e.RecordDate)
@@ -127,7 +128,7 @@ func fingerprint(e ProviderIncomeEvent) string {
 	sort.Slice(comps, func(i, j int) bool { return comps[i].Type < comps[j].Type })
 	for _, c := range comps {
 		add(string(c.Type))
-		addF(c.AmountPerUnit)
+		add(c.AmountPerUnit.String())
 	}
 	add(strconv.FormatBool(e.Cancelled))
 	sum := sha256.Sum256(b)
@@ -146,33 +147,25 @@ func assessQuality(e ProviderIncomeEvent) Quality {
 	if e.Type == TypeStockDividend {
 		// A stock dividend needs a ratio, carried as AmountPerUnit (new shares per
 		// held share).
-		if e.AmountPerUnit <= 0 {
+		if e.AmountPerUnit.Sign() <= 0 {
 			return QualityIncomplete
 		}
 		return QualityVerified
 	}
-	if e.AmountPerUnit <= 0 {
+	if e.AmountPerUnit.Sign() <= 0 {
 		return QualityIncomplete
 	}
 	// A mixed distribution's components must reconcile to the headline amount.
 	if len(e.Components) > 0 {
-		var sum float64
+		sum := money.ZeroPrice()
 		for _, c := range e.Components {
-			sum += c.AmountPerUnit
+			sum = sum.Add(c.AmountPerUnit)
 		}
-		if !within(sum, e.AmountPerUnit, 1e-6) {
+		if sum.Cmp(e.AmountPerUnit) != 0 {
 			return QualityConflicting
 		}
 	}
 	return QualityVerified
-}
-
-func within(a, b, tol float64) bool {
-	d := a - b
-	if d < 0 {
-		d = -d
-	}
-	return d <= tol
 }
 
 // normalize converts a raw provider event into a stored normalized event and

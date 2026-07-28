@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/db"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
@@ -86,11 +87,11 @@ func TestPostgresCompetitionRepository_EntryWithSnapshots(t *testing.T) {
 	entryID := uuid.NewString()
 	entry := CompetitionEntry{
 		ID: entryID, CompetitionID: c.ID, UserID: userID,
-		StartingValue: 1950, StartingIndex: 100, JoinedAt: time.Now().UTC(),
+		StartingValue: money.MustAmount("1950"), StartingIndex: money.MustIndexValue("100"), JoinedAt: time.Now().UTC(),
 		Snapshots: []CompetitionEntrySnapshotPosition{{
 			ID: uuid.NewString(), CompetitionEntryID: entryID,
-			Symbol: "AAPL", AssetType: "stock", Quantity: 10, Currency: "USD",
-			StartingPrice: 195, StartingPriceCurrency: "USD", StartingValueBase: 1950,
+			Symbol: "AAPL", AssetType: "stock", Quantity: money.MustQuantity("10"), Currency: "USD",
+			StartingPrice: money.MustPrice("195"), StartingPriceCurrency: "USD", StartingValueBase: money.MustAmount("1950"),
 		}},
 	}
 	require.NoError(t, repo.CreateEntry(ctx, entry))
@@ -102,10 +103,10 @@ func TestPostgresCompetitionRepository_EntryWithSnapshots(t *testing.T) {
 
 	got, err := repo.GetEntry(ctx, c.ID, userID)
 	require.NoError(t, err)
-	assert.Equal(t, 1950.0, got.StartingValue)
+	assert.True(t, money.MustAmount("1950").EqualAmount(got.StartingValue))
 	require.Len(t, got.Snapshots, 1)
 	assert.Equal(t, "AAPL", got.Snapshots[0].Symbol)
-	assert.Equal(t, 195.0, got.Snapshots[0].StartingPrice)
+	assert.Equal(t, 0, money.MustPrice("195").Cmp(got.Snapshots[0].StartingPrice))
 
 	entries, err := repo.ListEntries(ctx, c.ID)
 	require.NoError(t, err)

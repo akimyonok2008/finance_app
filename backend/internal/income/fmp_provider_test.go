@@ -45,7 +45,7 @@ func TestFMPProviderNormalizesDividend(t *testing.T) {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
 	e := events[0]
-	if e.Type != TypeCashDividend || e.Instrument.Symbol != "AAPL" || e.AmountPerUnit != 0.24 {
+	if e.Type != TypeCashDividend || e.Instrument.Symbol != "AAPL" || e.AmountPerUnit.Cmp(testPrice("0.24")) != 0 {
 		t.Fatalf("unexpected event: %+v", e)
 	}
 	if e.PaymentDate.Format("2006-01-02") != "2024-02-15" {

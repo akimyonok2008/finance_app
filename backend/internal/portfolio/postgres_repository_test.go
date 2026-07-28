@@ -55,7 +55,7 @@ func newPGPosition(userID, portfolioID string) *Position {
 	now := time.Now().UTC()
 	return &Position{
 		ID: uuid.NewString(), UserID: userID, PortfolioID: portfolioID,
-		Symbol: "AAPL", AssetType: "stock", Quantity: 10, AverageBuyPrice: 180,
+		Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("10"), AverageBuyPrice: testPrice("180"),
 		Currency: "USD", Status: PositionStatusOpen, CreatedAt: now, UpdatedAt: now,
 	}
 }
@@ -102,7 +102,7 @@ func TestPG_MutationCommitsPositionAndRankedStateTogether(t *testing.T) {
 
 	err = repo.WithLockedPortfolio(ctx, userID, func(ctx context.Context, tx AggregateTx) error {
 		require.NoError(t, tx.CreatePosition(ctx, pos))
-		st := performance.ActivateState(pf.ID, userID, 1800, true, time.Now().UTC())
+		st := performance.ActivateState(pf.ID, userID, testAmount("1800"), true, time.Now().UTC())
 		require.NoError(t, tx.PutRankedState(ctx, st, true, 0))
 		return tx.SetPortfolioVersion(ctx, pf.Version+1)
 	})
@@ -114,7 +114,7 @@ func TestPG_MutationCommitsPositionAndRankedStateTogether(t *testing.T) {
 
 	state, err := performance.NewPostgresStateReader(pool).GetByPortfolio(ctx, pf.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 100.0, state.CheckpointIndex)
+	assertIndexEqual(t, "100.0", state.CheckpointIndex)
 
 	after, err := repo.GetPortfolioByUser(ctx, userID)
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestPG_RollbackLeavesNoPartialState(t *testing.T) {
 	sentinel := assert.AnError
 	err = repo.WithLockedPortfolio(ctx, userID, func(ctx context.Context, tx AggregateTx) error {
 		require.NoError(t, tx.CreatePosition(ctx, pos))
-		st := performance.ActivateState(pf.ID, userID, 1800, true, time.Now().UTC())
+		st := performance.ActivateState(pf.ID, userID, testAmount("1800"), true, time.Now().UTC())
 		require.NoError(t, tx.PutRankedState(ctx, st, true, 0))
 		return sentinel
 	})
@@ -203,22 +203,22 @@ func TestPG_CashActivityIsAtomicIdempotentAndConstrained(t *testing.T) {
 	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
 
 	deposit, err := svc.DepositCash(context.Background(), userID, "pg-deposit", CashFlowInput{
-		Currency: "USD", Amount: 1000,
+		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, deposit.RankedIndexBefore, deposit.RankedIndexAfter)
 
 	retry, err := svc.DepositCash(context.Background(), userID, "pg-deposit", CashFlowInput{
-		Currency: "USD", Amount: 1000,
+		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
 
 	buy, err := svc.BuyPosition(context.Background(), userID, "pg-buy", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 5,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("5"),
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, buy.RankedIndexBefore, buy.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, buy.RankedIndexBefore, buy.RankedIndexAfter)
 
 	balances, err := repo.ListCashBalances(context.Background(), userID)
 	require.NoError(t, err)
@@ -250,7 +250,7 @@ func TestPG_ConcurrentBuysCannotOverspendCash(t *testing.T) {
 	userID := seedUser(t, pool)
 	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
 	_, err := svc.DepositCash(context.Background(), userID, "seed-cash", CashFlowInput{
-		Currency: "USD", Amount: 1000,
+		Currency: "USD", Amount: testAmount("1000"),
 	})
 	require.NoError(t, err)
 
@@ -262,7 +262,7 @@ func TestPG_ConcurrentBuysCannotOverspendCash(t *testing.T) {
 			defer wg.Done()
 			_, errs[index] = svc.BuyPosition(context.Background(), userID,
 				fmt.Sprintf("concurrent-buy-%d", index), BuyInput{
-					Symbol: symbol, AssetType: AssetTypeStock, Quantity: 3,
+					Symbol: symbol, AssetType: AssetTypeStock, Quantity: testQuantity("3"),
 				})
 		}(i, symbol)
 	}
@@ -331,7 +331,7 @@ func TestPG_OutboxClaimingSkipsLockedRows(t *testing.T) {
 		return tx.AppendOutbox(ctx, OutboxEvent{
 			ID: uuid.NewString(), EventType: EventPortfolioMutated,
 			AggregateType: "portfolio", AggregateID: pf.ID, AggregateVersion: 1,
-			UserID: userID, RankedIndex: 100, RankingStatus: "active",
+			UserID: userID, RankedIndex: testIndex("100"), RankingStatus: "active",
 			TrackingStartedAt: time.Now().UTC().Add(-time.Hour),
 			ValuationAsOf:     time.Now().UTC(),
 			DataQualityStatus: "complete",

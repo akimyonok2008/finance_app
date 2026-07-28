@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
@@ -133,8 +134,8 @@ func (r *PostgresRepository) List(ctx context.Context, userID string, from, to t
 	return out, rows.Err()
 }
 
-func (r *PostgresRepository) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error) {
-	var index float64
+func (r *PostgresRepository) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (money.IndexValue, time.Time, bool, error) {
+	var index money.IndexValue
 	var capturedAt time.Time
 	err := r.pool.QueryRow(ctx, `SELECT ranked_index, captured_at
 		FROM ranked_performance_snapshots
@@ -142,7 +143,7 @@ func (r *PostgresRepository) IndexAtOrBefore(ctx context.Context, userID string,
 		  AND data_quality_status='complete'
 		ORDER BY captured_at DESC LIMIT 1`, userID, epoch.UTC(), cutoff.UTC()).Scan(&index, &capturedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, time.Time{}, false, nil
+		return money.ZeroIndexValue(), time.Time{}, false, nil
 	}
 	return index, capturedAt, err == nil, err
 }

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -40,13 +41,13 @@ func CheckProjectorReadiness(ctx context.Context, running bool, backlog BacklogS
 
 // RankedCache is the leaderboard cache surface the processor keeps in sync.
 type RankedCache interface {
-	UpsertGlobalScore(ctx context.Context, userID string, score float64) error
+	UpsertGlobalScore(ctx context.Context, userID string, score money.Ratio) error
 	RemoveGlobalScore(ctx context.Context, userID string) error
 }
 
 type RankedCacheState struct {
 	Active bool
-	Score  float64
+	Score  money.Ratio
 }
 
 // RankedCacheStateProvider rereads the current database-backed ranking state.

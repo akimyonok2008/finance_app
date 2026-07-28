@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
@@ -98,7 +99,7 @@ func (s *Service) RecordCurrent(ctx context.Context, userID string) (int, Qualit
 		return 0, QualityInvalid, err
 	}
 	if ranked.PortfolioID == "" || ranked.TrackingStartedAt.IsZero() ||
-		ranked.RankedIndex <= 0 || math.IsNaN(ranked.RankedIndex) || math.IsInf(ranked.RankedIndex, 0) {
+		ranked.RankedIndex.Sign() <= 0 {
 		return 0, QualityInvalid, ErrInvalidSnapshot
 	}
 	now := s.now()
@@ -189,7 +190,7 @@ func (s *Service) RecordCurrentTransition(ctx context.Context, userID string) (b
 	})
 }
 
-func (s *Service) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error) {
+func (s *Service) IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (money.IndexValue, time.Time, bool, error) {
 	return s.repo.IndexAtOrBefore(ctx, userID, cutoff, epoch)
 }
 

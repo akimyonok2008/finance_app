@@ -28,7 +28,7 @@ func TestPG_AutomaticFundingGroupPersists(t *testing.T) {
 
 	// No cash at all: the entire purchase must be funded automatically.
 	_, err := svc.BuyPosition(ctx, userID, "pg-autofund", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 2, Fee: 4,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("2"), Fee: testAmount("4"),
 	})
 	require.NoError(t, err)
 
@@ -106,15 +106,15 @@ func TestPG_BuyIdempotencyConstraint(t *testing.T) {
 	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "pg-idem-dep", CashFlowInput{Currency: "USD", Amount: 5000})
+	_, err := svc.DepositCash(ctx, userID, "pg-idem-dep", CashFlowInput{Currency: "USD", Amount: testAmount("5000")})
 	require.NoError(t, err)
 
 	first, err := svc.BuyPosition(ctx, userID, "pg-idem-buy", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 3, Fee: 2,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("3"), Fee: testAmount("2"),
 	})
 	require.NoError(t, err)
 	retry, err := svc.BuyPosition(ctx, userID, "pg-idem-buy", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 3, Fee: 2,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("3"), Fee: testAmount("2"),
 	})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
@@ -147,11 +147,11 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 
 	early := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	_, err := svc.BuyPosition(ctx, userID, "pg-hist-1", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 5, ExecutionPrice: 195, EffectiveAt: &early,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("5"), ExecutionPrice: testPrice("195"), EffectiveAt: &early,
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx, userID, "pg-hist-2", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 20,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("20"),
 	})
 	require.NoError(t, err)
 
@@ -163,7 +163,7 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 	// Only 5 units were held 9 days ago, even though 25 are held now.
 	backdated := early.Add(24 * time.Hour)
 	_, err = svc.SellPosition(ctx, userID, "pg-hist-sell", SellInput{
-		PositionID: positions[0].ID, Quantity: 10, ExecutionPrice: 195, EffectiveAt: &backdated,
+		PositionID: positions[0].ID, Quantity: testQuantity("10"), ExecutionPrice: testPrice("195"), EffectiveAt: &backdated,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
@@ -210,11 +210,11 @@ func TestPG_InstrumentIdentityMatchesMemoryPortfolioFlow(t *testing.T) {
 	xetra := createListing("GY", "BBG"+uuid.NewString())
 
 	first, err := svc.BuyPosition(ctx, userID, "pg-identity-un", BuyInput{
-		Symbol: ticker, ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: ticker, ExchangeCode: "UN", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	second, err := svc.BuyPosition(ctx, userID, "pg-identity-gy", BuyInput{
-		Symbol: ticker, ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: ticker, ExchangeCode: "GY", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, nyse.ID, first.Position.InstrumentID)
@@ -257,19 +257,19 @@ func TestPG_IncomeDiscoveryAndEntitlementMatchHistoricalLedger(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = svc.DepositCash(ctx, userID, "income-pg-deposit", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err = svc.DepositCash(ctx, userID, "income-pg-deposit", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	buyAt := now.AddDate(0, 0, -10)
 	buy, err := svc.BuyPosition(ctx, userID, "income-pg-buy", BuyInput{
 		Symbol: ticker, ExchangeCode: "UN", AssetType: AssetTypeStock,
-		Quantity: 10, ExecutionPrice: 100, EffectiveAt: &buyAt,
+		Quantity: testQuantity("10"), ExecutionPrice: testPrice("100"), EffectiveAt: &buyAt,
 	})
 	require.NoError(t, err)
 	require.Equal(t, in.ID, buy.Position.InstrumentID)
 	sellAt := now.AddDate(0, 0, -2)
 	_, err = svc.SellPosition(ctx, userID, "income-pg-sell", SellInput{
-		Symbol: ticker, Quantity: 10, ExecutionPrice: 105, EffectiveAt: &sellAt,
+		Symbol: ticker, Quantity: testQuantity("10"), ExecutionPrice: testPrice("105"), EffectiveAt: &sellAt,
 	})
 	require.NoError(t, err)
 
@@ -286,5 +286,5 @@ func TestPG_IncomeDiscoveryAndEntitlementMatchHistoricalLedger(t *testing.T) {
 
 	eligible, err := svc.EligibleQuantity(ctx, userID, in.ID, ticker, now.AddDate(0, 0, -5))
 	require.NoError(t, err)
-	assert.Equal(t, 10.0, eligible)
+	assertQuantityEqual(t, "10", eligible)
 }

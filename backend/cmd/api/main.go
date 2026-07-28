@@ -29,6 +29,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
 	"github.com/ardakimyonok/finance_app/internal/moderation"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
@@ -165,7 +166,11 @@ func (a benchmarkHistoryAdapter) GetAdjustedCloseSeries(ctx context.Context, sym
 	}
 	out := make([]benchmark.PricePoint, 0, len(bars))
 	for _, bar := range bars {
-		out = append(out, benchmark.PricePoint{Date: bar.Date, RawClose: bar.Close})
+		price, err := money.ParsePrice(strconv.FormatFloat(bar.Close, 'f', -1, 64))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, benchmark.PricePoint{Date: bar.Date, RawClose: price})
 	}
 	return out, nil
 }
@@ -222,10 +227,14 @@ func (a benchmarkComparisonAdapter) ReturnOver(ctx context.Context, recipeID str
 		}
 		return performancehistory.BenchmarkReturn{}, performancehistory.BenchmarkUnavailableError{Reason: reason}
 	}
+	returnPct, err := strconv.ParseFloat(result.ReturnPercentage.String(), 64)
+	if err != nil {
+		return performancehistory.BenchmarkReturn{}, err
+	}
 	return performancehistory.BenchmarkReturn{
 		RecipeID:         recipeID,
 		Name:             a.recipes[recipeID].Name,
-		ReturnPercentage: result.ReturnPercentage,
+		ReturnPercentage: returnPct,
 		EffectiveStart:   result.EffectiveStart,
 		EffectiveEnd:     result.EffectiveEnd,
 		Quality:          string(result.DataMetadata.Quality),
@@ -415,8 +424,8 @@ func (a profileRankedAdapter) CurrentRankedPerformance(ctx context.Context, user
 		return profile.RankedPerformance{}, err
 	}
 	return profile.RankedPerformance{
-		RankedIndex:            rp.RankedIndex,
-		RankedReturnPercentage: rp.RankedReturnPercentage,
+		RankedIndex:            rp.RankedIndex.Float64(),
+		RankedReturnPercentage: rp.RankedReturnPercentage.Float64(),
 		Paused:                 rp.Status == performance.StatusPaused,
 	}, nil
 }
@@ -432,8 +441,8 @@ func (a profileHistoryAdapter) RankedHistory(ctx context.Context, userID string,
 	for _, point := range points {
 		out = append(out, profile.PublicPerformancePoint{
 			CapturedAt:       point.CapturedAt.Format(time.RFC3339),
-			PortfolioIndex:   point.RankedIndex,
-			ReturnPercentage: point.RankedIndex - 100,
+			PortfolioIndex:   point.RankedIndex.Float64(),
+			ReturnPercentage: point.RankedIndex.Sub(money.MustIndexValue("100")).Float64(),
 		})
 	}
 	return out, nil
@@ -1035,7 +1044,7 @@ func main() {
 		incomeSvc.SetPreferences(income.Preferences{
 			ReinvestByDefault: cfg.IncomeReinvestByDefault,
 			UseEstimatedGross: cfg.IncomeUseEstimatedGross,
-			Withholding:       income.WithholdingProfile{DefaultRate: cfg.IncomeWithholdingDefault},
+			Withholding:       income.WithholdingProfile{DefaultRate: money.RatioFromFloat64(cfg.IncomeWithholdingDefault)},
 		})
 		incomeView = incomeViewAdapter{svc: incomeSvc}
 		if optionalJobs {

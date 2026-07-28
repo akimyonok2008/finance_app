@@ -3,6 +3,8 @@ package competitions
 import (
 	"fmt"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Competition types and statuses.
@@ -34,8 +36,8 @@ type CompetitionEntry struct {
 	ID            string
 	CompetitionID string
 	UserID        string
-	StartingValue float64 // sum of snapshot StartingValueBase (base currency)
-	StartingIndex float64
+	StartingValue money.Amount // sum of snapshot StartingValueBase (base currency)
+	StartingIndex money.IndexValue
 	JoinedAt      time.Time
 	Snapshots     []CompetitionEntrySnapshotPosition
 }
@@ -47,11 +49,11 @@ type CompetitionEntrySnapshotPosition struct {
 	CompetitionEntryID    string
 	Symbol                string
 	AssetType             string
-	Quantity              float64
+	Quantity              money.Quantity
 	Currency              string
-	StartingPrice         float64
+	StartingPrice         money.Price
 	StartingPriceCurrency string
-	StartingValueBase     float64
+	StartingValueBase     money.Amount
 }
 
 // --- public DTOs (the only shapes ever serialized) ---------------------------
@@ -69,27 +71,27 @@ type CompetitionResponse struct {
 // JoinCompetitionResponse confirms a join. It returns starting_index (always
 // 100) but never the private starting value.
 type JoinCompetitionResponse struct {
-	CompetitionID string  `json:"competition_id"`
-	Joined        bool    `json:"joined"`
-	StartingIndex float64 `json:"starting_index"`
+	CompetitionID string           `json:"competition_id"`
+	Joined        bool             `json:"joined"`
+	StartingIndex money.IndexValue `json:"starting_index"`
 }
 
 // MyCompetitionStatusResponse is the requesting user's own sprint status.
 type MyCompetitionStatusResponse struct {
-	CompetitionID          string  `json:"competition_id"`
-	Joined                 bool    `json:"joined"`
-	CurrentRank            int     `json:"current_rank"`
-	SprintReturnPercentage float64 `json:"sprint_return_percentage"`
-	SprintIndex            float64 `json:"sprint_index"`
+	CompetitionID          string           `json:"competition_id"`
+	Joined                 bool             `json:"joined"`
+	CurrentRank            int              `json:"current_rank"`
+	SprintReturnPercentage money.Ratio      `json:"sprint_return_percentage"`
+	SprintIndex            money.IndexValue `json:"sprint_index"`
 }
 
 // SprintLeaderboardEntry is the privacy-safe sprint ranking row.
 type SprintLeaderboardEntry struct {
-	Rank                   int     `json:"rank"`
-	DisplayName            string  `json:"display_name"`
-	AvatarKey              string  `json:"avatar_key"`
-	SprintReturnPercentage float64 `json:"sprint_return_percentage"`
-	SprintIndex            float64 `json:"sprint_index"`
+	Rank                   int              `json:"rank"`
+	DisplayName            string           `json:"display_name"`
+	AvatarKey              string           `json:"avatar_key"`
+	SprintReturnPercentage money.Ratio      `json:"sprint_return_percentage"`
+	SprintIndex            money.IndexValue `json:"sprint_index"`
 }
 
 // weekStart returns Monday 00:00 UTC of the ISO week containing now.

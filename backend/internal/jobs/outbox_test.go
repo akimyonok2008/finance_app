@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -23,13 +24,13 @@ type fakeCache struct {
 
 func newFakeCache() *fakeCache { return &fakeCache{scores: map[string]float64{}} }
 
-func (c *fakeCache) UpsertGlobalScore(_ context.Context, userID string, score float64) error {
+func (c *fakeCache) UpsertGlobalScore(_ context.Context, userID string, score money.Ratio) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fail != nil {
 		return c.fail
 	}
-	c.scores[userID] = score
+	c.scores[userID] = score.Float64()
 	return nil
 }
 
@@ -73,7 +74,7 @@ func (s *fakeRankedCacheState) CurrentRankedCacheState(_ context.Context, userID
 func (s *fakeRankedCacheState) set(userID string, active bool, score float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.states[userID] = RankedCacheState{Active: active, Score: score}
+	s.states[userID] = RankedCacheState{Active: active, Score: money.RatioFromFloat64(score)}
 }
 
 // fakeSource is a minimal outbox: claim-once semantics plus settle tracking.
@@ -147,7 +148,7 @@ func mutatedEvent(id, userID string, index float64, status portfolio.RankingStat
 	return portfolio.OutboxEvent{
 		ID: id, EventType: portfolio.EventPortfolioMutated,
 		AggregateType: "portfolio", AggregateID: "pf-1", AggregateVersion: 1,
-		UserID: userID, RankedIndex: index, RankingStatus: string(status),
+		UserID: userID, RankedIndex: money.IndexValueFromFloat64(index), RankingStatus: string(status),
 	}
 }
 

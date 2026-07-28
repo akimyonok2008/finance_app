@@ -17,7 +17,7 @@ import (
 func TestWriteOffUnpriceablePosition_RejectsStillPriceableSymbol(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10"),
 	})
 	require.NoError(t, err)
 
@@ -36,7 +36,7 @@ func TestWriteOffUnpriceablePosition_RejectsStillPriceableSymbol(t *testing.T) {
 func TestWriteOffUnpriceablePosition_SucceedsAndRealizesFullBasisAsLoss(t *testing.T) {
 	svc, _, _, pp := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10, ExecutionPrice: 195,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10"), ExecutionPrice: testPrice("195"),
 	})
 	require.NoError(t, err)
 	rankedBefore := buy.RankedIndexAfter
@@ -53,7 +53,7 @@ func TestWriteOffUnpriceablePosition_SucceedsAndRealizesFullBasisAsLoss(t *testi
 
 	// Ranked index drops by exactly the known cost basis — never a fabricated
 	// market move, since no market price for this symbol ever existed.
-	assert.Less(t, res.RankedIndexAfter, rankedBefore)
+	assert.Less(t, res.RankedIndexAfter.Cmp(rankedBefore), 0)
 
 	open, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
@@ -69,13 +69,13 @@ func TestWriteOffUnpriceablePosition_SucceedsAndRealizesFullBasisAsLoss(t *testi
 // failed because of the one broken symbol; after it, everything works again.
 func TestWriteOffUnpriceablePosition_UnblocksEverythingElse(t *testing.T) {
 	svc, _, _, pp := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 100000)
+	seedCash(t, svc, "u1", "USD", "100000")
 	broken, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10"),
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 5,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("5"),
 	})
 	require.NoError(t, err)
 
@@ -83,19 +83,19 @@ func TestWriteOffUnpriceablePosition_UnblocksEverythingElse(t *testing.T) {
 
 	// Sanity check the bug this fixes: an unrelated deposit is currently
 	// blocked solely because AAPL can't be priced.
-	_, err = svc.DepositCash(ctx(), "u1", "dep-blocked", CashFlowInput{Currency: "USD", Amount: 100})
+	_, err = svc.DepositCash(ctx(), "u1", "dep-blocked", CashFlowInput{Currency: "USD", Amount: testAmount("100")})
 	require.Error(t, err, "sanity check: the broken symbol blocks unrelated mutations before write-off")
 
 	_, err = svc.WriteOffUnpriceablePosition(ctx(), "u1", "wo-3", broken.Position.ID)
 	require.NoError(t, err)
 
-	_, err = svc.DepositCash(ctx(), "u1", "dep-unblocked", CashFlowInput{Currency: "USD", Amount: 100})
+	_, err = svc.DepositCash(ctx(), "u1", "dep-unblocked", CashFlowInput{Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err, "an unrelated deposit must work once the broken position is written off")
 
-	_, err = svc.BuyPosition(ctx(), "u1", "buy-nvda", BuyInput{Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 1})
+	_, err = svc.BuyPosition(ctx(), "u1", "buy-nvda", BuyInput{Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: testQuantity("1")})
 	require.NoError(t, err, "buying a healthy symbol must work once the broken position is written off")
 
-	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: 1})
+	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: testQuantity("1")})
 	require.NoError(t, err, "selling a healthy symbol must work once the broken position is written off")
 
 	_, err = svc.Summary(ctx(), "u1")
@@ -105,10 +105,10 @@ func TestWriteOffUnpriceablePosition_UnblocksEverythingElse(t *testing.T) {
 func TestWriteOffUnpriceablePosition_RejectsClosedPosition(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
-	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: 2, ExecutionPrice: 450})
+	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: testQuantity("2"), ExecutionPrice: testPrice("450")})
 	require.NoError(t, err)
 
 	_, err = svc.WriteOffUnpriceablePosition(ctx(), "u1", "wo-4", buy.Position.ID)
@@ -125,9 +125,9 @@ func TestWriteOffUnpriceablePosition_RejectsClosedPosition(t *testing.T) {
 // this feature.
 func TestWriteOffUnpriceablePosition_ReconcilesCleanly(t *testing.T) {
 	svc, _, _, pp := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 100000)
+	seedCash(t, svc, "u1", "USD", "100000")
 	broken, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10, ExecutionPrice: 195,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10"), ExecutionPrice: testPrice("195"),
 	})
 	require.NoError(t, err)
 	pp.Unset("AAPL")
@@ -146,7 +146,7 @@ func TestWriteOffUnpriceablePosition_ReconcilesCleanly(t *testing.T) {
 func TestWriteOffUnpriceablePosition_RejectsOtherUsersPosition(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10"),
 	})
 	require.NoError(t, err)
 

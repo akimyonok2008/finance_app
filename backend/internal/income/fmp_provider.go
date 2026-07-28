@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/providerhttp"
 )
 
@@ -57,13 +58,13 @@ func NewFMPProvider(cfg FMPConfig) (*FMPProvider, error) {
 func (p *FMPProvider) Name() string { return fmpProviderName }
 
 type fmpDividend struct {
-	Symbol          string  `json:"symbol"`
-	Date            string  `json:"date"` // ex-dividend date
-	RecordDate      string  `json:"recordDate"`
-	PaymentDate     string  `json:"paymentDate"`
-	DeclarationDate string  `json:"declarationDate"`
-	Dividend        float64 `json:"dividend"`
-	Frequency       string  `json:"frequency"`
+	Symbol          string      `json:"symbol"`
+	Date            string      `json:"date"` // ex-dividend date
+	RecordDate      string      `json:"recordDate"`
+	PaymentDate     string      `json:"paymentDate"`
+	DeclarationDate string      `json:"declarationDate"`
+	Dividend        money.Price `json:"dividend"`
+	Frequency       string      `json:"frequency"`
 }
 
 // FetchIncomeEvents queries FMP once per requested symbol. A budget exhaustion

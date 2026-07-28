@@ -71,7 +71,9 @@ func (t *memoryTx) PutCashBalance(_ context.Context, balance CashBalance) error 
 	if err := t.store.faults.PutCash; err != nil {
 		return err
 	}
-	if balance.Amount < 0 || !isFinite(balance.Amount) {
+	// Decimal amounts cannot be NaN/Inf; only the sign needs checking (exact,
+	// no epsilon). Full memory-store decimal conversion is a later sub-scope.
+	if balance.Amount.Sign() < 0 {
 		return ErrInsufficientCash
 	}
 	stored := balance

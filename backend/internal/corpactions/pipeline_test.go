@@ -10,6 +10,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/corpactions"
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
@@ -58,9 +59,9 @@ func fundedService(t *testing.T, userID string) (*portfolio.Service, *portfolio.
 	repo := portfolio.NewInMemoryRepository()
 	svc := portfolio.NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
-	_, err := svc.DepositCash(ctx, userID, "dep-"+userID, portfolio.CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "dep-"+userID, portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(10000)})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "buy-"+userID, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx, userID, "buy-"+userID, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: money.QuantityFromFloat64(10)})
 	require.NoError(t, err)
 	return svc, repo, quotes
 }
@@ -71,7 +72,7 @@ func rankedIndex(t *testing.T, svc *portfolio.Service, repo *portfolio.InMemoryR
 	perf.SetValuator(svc)
 	rp, err := perf.CurrentRankedPerformance(context.Background(), userID)
 	require.NoError(t, err)
-	return rp.RankedIndex
+	return rp.RankedIndex.Float64()
 }
 
 func fptr(f float64) *float64 { return &f }
@@ -110,18 +111,18 @@ func TestAutomaticSplitAppliedAndIdempotent(t *testing.T) {
 
 	after := position(t, svc, "u1", "AAPL")
 	require.NotNil(t, after)
-	assert.InDelta(t, before.Quantity*4, after.Quantity, 1e-9, "quantity must quadruple")
-	assert.InDelta(t, before.AverageBuyPrice/4, after.AverageBuyPrice, 1e-9, "basis must quarter")
-	assert.InDelta(t, before.Quantity*before.AverageBuyPrice, after.Quantity*after.AverageBuyPrice, 1e-6, "total basis preserved")
+	assert.InDelta(t, before.Quantity.Float64()*4, after.Quantity.Float64(), 1e-9, "quantity must quadruple")
+	assert.InDelta(t, before.AverageBuyPrice.Float64()/4, after.AverageBuyPrice.Float64(), 1e-9, "basis must quarter")
+	assert.InDelta(t, before.Quantity.Float64()*before.AverageBuyPrice.Float64(), after.Quantity.Float64()*after.AverageBuyPrice.Float64(), 1e-6, "total basis preserved")
 
 	// A split-adjusted feed halves... quarters the quote; ranked index unchanged.
-	quotes.Set("AAPL", before.AverageBuyPrice/4, "USD")
+	quotes.Set("AAPL", before.AverageBuyPrice.Float64()/4, "USD")
 	assert.InDelta(t, beforeIdx, rankedIndex(t, svc, repo, "u1"), 1e-6, "no phantom ranked gain")
 
 	// Running again must be idempotent: no second application.
 	require.NoError(t, pipeline.RunOnce(context.Background()))
 	again := position(t, svc, "u1", "AAPL")
-	assert.InDelta(t, after.Quantity, again.Quantity, 1e-9, "split must not apply twice")
+	assert.InDelta(t, after.Quantity.Float64(), again.Quantity.Float64(), 1e-9, "split must not apply twice")
 }
 
 func TestSymbolChangeAppliedAutomatically(t *testing.T) {
@@ -142,7 +143,7 @@ func TestSymbolChangeAppliedAutomatically(t *testing.T) {
 	assert.Nil(t, position(t, svc, "u1", "AAPL"), "old ticker must be gone")
 	newPos := position(t, svc, "u1", "APLX")
 	require.NotNil(t, newPos, "position must be re-tickered")
-	assert.InDelta(t, 10, newPos.Quantity, 1e-9)
+	assert.InDelta(t, 10, newPos.Quantity.Float64(), 1e-9)
 
 	views, err := pipeline.ListCorporateActionViews(context.Background(), "u1")
 	require.NoError(t, err)
@@ -167,7 +168,7 @@ func TestIncompleteMergerStaysPending(t *testing.T) {
 
 	pos := position(t, svc, "u1", "AAPL")
 	require.NotNil(t, pos, "incomplete merger must leave the position visible")
-	assert.InDelta(t, 10, pos.Quantity, 1e-9)
+	assert.InDelta(t, 10, pos.Quantity.Float64(), 1e-9)
 
 	events, err := store.ListEventsByStatus(context.Background(), corpactions.StatusUnresolved)
 	require.NoError(t, err)
@@ -189,7 +190,7 @@ func TestDelistingDoesNotZeroPosition(t *testing.T) {
 
 	pos := position(t, svc, "u1", "AAPL")
 	require.NotNil(t, pos, "delisting must never silently zero a position")
-	assert.InDelta(t, 10, pos.Quantity, 1e-9)
+	assert.InDelta(t, 10, pos.Quantity.Float64(), 1e-9)
 }
 
 func TestBoughtAfterEffectiveIsSkipped(t *testing.T) {
@@ -208,7 +209,7 @@ func TestBoughtAfterEffectiveIsSkipped(t *testing.T) {
 	})
 	require.NoError(t, pipeline.RunOnce(context.Background()))
 	pos := position(t, svc, "u1", "AAPL")
-	assert.InDelta(t, 10, pos.Quantity, 1e-9, "a split before acquisition must not apply")
+	assert.InDelta(t, 10, pos.Quantity.Float64(), 1e-9, "a split before acquisition must not apply")
 }
 
 func TestCancelledEventNotApplied(t *testing.T) {
@@ -224,7 +225,7 @@ func TestCancelledEventNotApplied(t *testing.T) {
 		RatioNumerator: fptr(2), RatioDenominator: fptr(1),
 	})
 	require.NoError(t, pipeline.RunOnce(context.Background()))
-	assert.InDelta(t, 10, position(t, svc, "u1", "AAPL").Quantity, 1e-9)
+	assert.InDelta(t, 10, position(t, svc, "u1", "AAPL").Quantity.Float64(), 1e-9)
 }
 
 func TestWorkerAppliesToMultiplePortfolios(t *testing.T) {
@@ -234,9 +235,9 @@ func TestWorkerAppliesToMultiplePortfolios(t *testing.T) {
 	svc := portfolio.NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 	for _, u := range []string{"u1", "u2"} {
-		_, err := svc.DepositCash(ctx, u, "d-"+u, portfolio.CashFlowInput{Currency: "USD", Amount: 5000})
+		_, err := svc.DepositCash(ctx, u, "d-"+u, portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(5000)})
 		require.NoError(t, err)
-		_, err = svc.BuyPosition(ctx, u, "b-"+u, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 4})
+		_, err = svc.BuyPosition(ctx, u, "b-"+u, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: money.QuantityFromFloat64(4)})
 		require.NoError(t, err)
 	}
 	store := corpactions.NewInMemoryStore()
@@ -250,7 +251,7 @@ func TestWorkerAppliesToMultiplePortfolios(t *testing.T) {
 	})
 	require.NoError(t, pipeline.RunOnce(ctx))
 	for _, u := range []string{"u1", "u2"} {
-		assert.InDelta(t, 8, position(t, svc, u, "AAPL").Quantity, 1e-9, "each holder gets the split once")
+		assert.InDelta(t, 8, position(t, svc, u, "AAPL").Quantity.Float64(), 1e-9, "each holder gets the split once")
 	}
 }
 

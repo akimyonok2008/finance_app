@@ -6,6 +6,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 func mustTime(s string) time.Time {
@@ -58,7 +60,7 @@ func TestTwoAssetRecipeReturnBetweenComponents(t *testing.T) {
 func TestNestedRecipeFlattening(t *testing.T) {
 	engine := newTestEngine(DefaultMockReturns())
 	recipe := Recipes["ALL_WEATHER"]
-	flattened, err := engine.flattenRecipe(context.Background(), recipe, mustTime("2026-06-01"), 1)
+	flattened, err := engine.flattenRecipe(context.Background(), recipe, mustTime("2026-06-01"), money.MustWeight("1"))
 	if err != nil {
 		t.Fatalf("flattenRecipe: %v", err)
 	}
@@ -66,7 +68,7 @@ func TestNestedRecipeFlattening(t *testing.T) {
 		t.Fatalf("flattened weights invalid: %v", err)
 	}
 	// GLD appears directly (0.15) and inside CMDTY (0.075 * 0.25 = 0.01875).
-	var gld float64
+	var gld money.Weight
 	seen := map[string]bool{}
 	for _, c := range flattened {
 		if seen[c.Symbol] {
@@ -77,8 +79,9 @@ func TestNestedRecipeFlattening(t *testing.T) {
 			gld = c.Weight
 		}
 	}
-	if math.Abs(gld-(0.15+0.075*0.25)) > 1e-9 {
-		t.Errorf("expected merged GLD weight %.6f, got %.6f", 0.15+0.075*0.25, gld)
+	want := money.MustWeight("0.15").Add(money.MustWeight("0.075").Mul(money.MustWeight("0.25")))
+	if !gld.Equal(want.Decimal) {
+		t.Errorf("expected merged GLD weight %s, got %s", want.String(), gld.String())
 	}
 }
 
@@ -151,15 +154,15 @@ func TestSubtractPeriod(t *testing.T) {
 
 func TestCalculateIndexReturnPct(t *testing.T) {
 	points := []IndexPoint{
-		{Date: "2026-01-01", Index: 100},
-		{Date: "2026-02-01", Index: 107},
+		{Date: "2026-01-01", Index: money.MustIndexValue("100")},
+		{Date: "2026-02-01", Index: money.MustIndexValue("107")},
 	}
 	got, err := CalculateIndexReturnPct(points)
 	if err != nil {
 		t.Fatalf("CalculateIndexReturnPct: %v", err)
 	}
-	if got != 7 {
-		t.Errorf("expected 7, got %.4f", got)
+	if got.String() != "7" {
+		t.Errorf("expected 7, got %s", got.String())
 	}
 }
 

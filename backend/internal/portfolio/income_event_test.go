@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // mixedComponents builds the canonical mixed-distribution scenario used across
@@ -12,9 +14,9 @@ import (
 // return of capital, all part of ONE economic payment on AAPL.
 func mixedComponents() []IncomeComponentInput {
 	return []IncomeComponentInput{
-		{Subtype: IncomeCashDividend, Amount: 70},
-		{Subtype: IncomeCapitalGainsDist, Amount: 20},
-		{Subtype: IncomeReturnOfCapitalSub, Amount: 10},
+		{Subtype: IncomeCashDividend, Amount: testAmount("70")},
+		{Subtype: IncomeCapitalGainsDist, Amount: testAmount("20")},
+		{Subtype: IncomeReturnOfCapitalSub, Amount: testAmount("10")},
 	}
 }
 
@@ -26,7 +28,7 @@ func TestApplyIncomeEvent_MixedEvent_FullSuccess(t *testing.T) {
 	require.NoError(t, err)
 	cashBefore, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usdBefore float64
+	usdBefore := money.ZeroAmount()
 	for _, c := range cashBefore {
 		if c.Currency == "USD" {
 			usdBefore = c.Amount
@@ -34,10 +36,10 @@ func TestApplyIncomeEvent_MixedEvent_FullSuccess(t *testing.T) {
 	}
 	positionsBefore, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
-	var basisBeforeTotal float64
+	basisBeforeTotal := money.ZeroAmount()
 	for _, p := range positionsBefore {
 		if p.Symbol == "AAPL" {
-			basisBeforeTotal = p.Quantity * p.AverageBuyPrice
+			basisBeforeTotal = p.Quantity.MulPrice(p.AverageBuyPrice)
 		}
 	}
 
@@ -51,13 +53,13 @@ func TestApplyIncomeEvent_MixedEvent_FullSuccess(t *testing.T) {
 	// $100 total cash effect (70 + 20 + 10).
 	cashAfter, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usdAfter float64
+	usdAfter := money.ZeroAmount()
 	for _, c := range cashAfter {
 		if c.Currency == "USD" {
 			usdAfter = c.Amount
 		}
 	}
-	assert.InDelta(t, usdBefore+100, usdAfter, 0.001)
+	assertAmountValuesEqual(t, usdBefore.Add(testAmount("100")), usdAfter)
 
 	// $10 basis reduction on the AAPL position (10 shares @ 805 -> 805 - 1/share).
 	positions, err := svc.ListPositions(ctx(), "u1")
@@ -69,17 +71,17 @@ func TestApplyIncomeEvent_MixedEvent_FullSuccess(t *testing.T) {
 		}
 	}
 	require.NotNil(t, aapl)
-	assert.InDelta(t, basisBeforeTotal-10, aapl.Quantity*aapl.AverageBuyPrice, 0.001)
+	assertAmountValuesEqual(t, basisBeforeTotal.Sub(testAmount("10")), aapl.Quantity.MulPrice(aapl.AverageBuyPrice))
 
 	// Ranked index rose (positive economic return), and exactly ONE checkpoint
 	// was applied for the whole event (single version bump).
 	after, err := perf.CurrentRankedPerformance(ctx(), "u1")
 	require.NoError(t, err)
-	assert.Greater(t, after.RankedIndex, before.RankedIndex)
+	assert.Greater(t, after.RankedIndex.Cmp(before.RankedIndex), 0)
 	// One combined ranked-performance update for the whole event: the
 	// coordinator's checkpoint before/after on the MutationResult itself moved
 	// exactly once.
-	assert.Greater(t, res.RankedIndexAfter, res.RankedIndexBefore)
+	assert.Greater(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0)
 
 	// One activity group: every leg shares the same activity_group_id, and
 	// there is exactly one leg per component (no reinvestment here).
@@ -107,7 +109,7 @@ func TestApplyIncomeEvent_Retry_NoDuplicates(t *testing.T) {
 	fundedPortfolio(t, svc, "u1")
 	cashBefore, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usdBefore float64
+	usdBefore := money.ZeroAmount()
 	for _, c := range cashBefore {
 		if c.Currency == "USD" {
 			usdBefore = c.Amount
@@ -125,14 +127,14 @@ func TestApplyIncomeEvent_Retry_NoDuplicates(t *testing.T) {
 
 	cashBalances, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := money.ZeroAmount()
 	for _, c := range cashBalances {
 		if c.Currency == "USD" {
 			usd = c.Amount
 		}
 	}
 	// Only the FIRST application's $100 landed; the retry created no duplicate.
-	assert.InDelta(t, usdBefore+100, usd, 0.001)
+	assertAmountValuesEqual(t, usdBefore.Add(testAmount("100")), usd)
 
 	activities, err := repo.ListActivities(ctx(), "u1", 1000)
 	require.NoError(t, err)
@@ -150,17 +152,17 @@ func TestApplyIncomeEvent_ReturnOfCapital_ExcessOverBasis(t *testing.T) {
 	fundedPortfolio(t, svc, "u1")
 	positionsBefore, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
-	var basisBefore float64
+	basisBefore := money.ZeroAmount()
 	for _, p := range positionsBefore {
 		if p.Symbol == "AAPL" {
-			basisBefore = p.Quantity * p.AverageBuyPrice
+			basisBefore = p.Quantity.MulPrice(p.AverageBuyPrice)
 		}
 	}
 
 	res, err := svc.ApplyIncomeEvent(ctx(), "u1", "evt:roc:u1", IncomeEventInput{
 		IncomeEventID: "evt-roc", Symbol: "AAPL", Currency: "USD",
 		Components: []IncomeComponentInput{
-			{Subtype: IncomeReturnOfCapitalSub, Amount: 9000}, // exceeds remaining basis
+			{Subtype: IncomeReturnOfCapitalSub, Amount: testAmount("9000")}, // exceeds remaining basis
 		},
 	})
 	require.NoError(t, err)
@@ -175,8 +177,8 @@ func TestApplyIncomeEvent_ReturnOfCapital_ExcessOverBasis(t *testing.T) {
 	}
 	require.NotNil(t, aapl)
 	// Basis floored at zero, never negative.
-	assert.GreaterOrEqual(t, aapl.AverageBuyPrice, 0.0)
-	assert.InDelta(t, 0, aapl.AverageBuyPrice, 0.001)
+	assert.GreaterOrEqual(t, aapl.AverageBuyPrice.Cmp(money.ZeroPrice()), 0)
+	assertPriceEqual(t, "0", aapl.AverageBuyPrice)
 
 	activities, err := repo.ListActivities(ctx(), "u1", 1000)
 	require.NoError(t, err)
@@ -187,8 +189,8 @@ func TestApplyIncomeEvent_ReturnOfCapital_ExcessOverBasis(t *testing.T) {
 		}
 	}
 	require.NotNil(t, roc)
-	excess, _ := roc.Metadata["excess_over_basis"].(float64)
-	assert.InDelta(t, 9000-basisBefore, excess, 0.001)
+	excess, _ := roc.Metadata["excess_over_basis"].(string)
+	assert.Equal(t, testAmount("9000").Sub(basisBefore).String(), excess)
 
 	// Cash still credited for the FULL net amount; ROC is never counted as
 	// ordinary income.
@@ -202,7 +204,7 @@ func TestApplyIncomeEvent_Reinvestment_OneIncomeOneNeutralBuy(t *testing.T) {
 	require.NoError(t, err)
 	cashBefore, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usdBefore float64
+	usdBefore := money.ZeroAmount()
 	for _, c := range cashBefore {
 		if c.Currency == "USD" {
 			usdBefore = c.Amount
@@ -212,7 +214,7 @@ func TestApplyIncomeEvent_Reinvestment_OneIncomeOneNeutralBuy(t *testing.T) {
 	res, err := svc.ApplyIncomeEvent(ctx(), "u1", "evt:reinvest:u1", IncomeEventInput{
 		IncomeEventID: "evt-reinvest", Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD",
 		Components: []IncomeComponentInput{
-			{Subtype: IncomeCashDividend, Amount: 100, Reinvest: true},
+			{Subtype: IncomeCashDividend, Amount: testAmount("100"), Reinvest: true},
 		},
 	})
 	require.NoError(t, err)
@@ -221,16 +223,16 @@ func TestApplyIncomeEvent_Reinvestment_OneIncomeOneNeutralBuy(t *testing.T) {
 	// Cash unchanged (income in, buy out, same transaction).
 	cashBalances, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usd float64
+	usd := money.ZeroAmount()
 	for _, c := range cashBalances {
 		if c.Currency == "USD" {
 			usd = c.Amount
 		}
 	}
-	assert.InDelta(t, usdBefore, usd, 0.001)
+	assertAmountValuesEqual(t, usdBefore, usd)
 
 	// Shares increased.
-	assert.Greater(t, res.Position.Quantity, 10.0)
+	assert.Greater(t, res.Position.Quantity.Cmp(testQuantity("10")), 0)
 
 	// Exactly one income leg + one neutral buy leg, sharing the group id.
 	activities, err := repo.ListActivities(ctx(), "u1", 1000)
@@ -255,7 +257,7 @@ func TestApplyIncomeEvent_Reinvestment_OneIncomeOneNeutralBuy(t *testing.T) {
 	// 10000 base ~ +1%), not twice (income + a non-neutral buy).
 	after, err := perf.CurrentRankedPerformance(ctx(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, before.RankedIndex*1.01, after.RankedIndex, 0.5)
+	assert.InDelta(t, before.RankedIndex.MulRatio(testRatio("1.01")).Float64(), after.RankedIndex.Float64(), 0.5)
 }
 
 func TestApplyIncomeEvent_UnsupportedComponent_WholeEventStaysPending(t *testing.T) {
@@ -263,7 +265,7 @@ func TestApplyIncomeEvent_UnsupportedComponent_WholeEventStaysPending(t *testing
 	fundedPortfolio(t, svc, "u1")
 	cashBefore, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usdBefore float64
+	usdBefore := money.ZeroAmount()
 	for _, c := range cashBefore {
 		if c.Currency == "USD" {
 			usdBefore = c.Amount
@@ -273,8 +275,8 @@ func TestApplyIncomeEvent_UnsupportedComponent_WholeEventStaysPending(t *testing
 	_, err = svc.ApplyIncomeEvent(ctx(), "u1", "evt:bad:u1", IncomeEventInput{
 		IncomeEventID: "evt-bad", Symbol: "AAPL", Currency: "USD",
 		Components: []IncomeComponentInput{
-			{Subtype: IncomeCashDividend, Amount: 70},
-			{Subtype: IncomeSubtype("unknown_component_type"), Amount: 20},
+			{Subtype: IncomeCashDividend, Amount: testAmount("70")},
+			{Subtype: IncomeSubtype("unknown_component_type"), Amount: testAmount("20")},
 		},
 	})
 	require.ErrorIs(t, err, ErrUnsupportedIncomeComponent)
@@ -283,13 +285,13 @@ func TestApplyIncomeEvent_UnsupportedComponent_WholeEventStaysPending(t *testing
 	// event stayed pending, not partially applied.
 	cashAfter, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
-	var usdAfter float64
+	usdAfter := money.ZeroAmount()
 	for _, c := range cashAfter {
 		if c.Currency == "USD" {
 			usdAfter = c.Amount
 		}
 	}
-	assert.InDelta(t, usdBefore, usdAfter, 0.001)
+	assertAmountValuesEqual(t, usdBefore, usdAfter)
 
 	activities, err := repo.ListActivities(ctx(), "u1", 1000)
 	require.NoError(t, err)
@@ -313,8 +315,8 @@ func TestApplyIncomeEvent_InvalidComponent_RollsBackWholeEvent(t *testing.T) {
 	_, err = svc.ApplyIncomeEvent(ctx(), "u1", "evt:invalid:u1", IncomeEventInput{
 		IncomeEventID: "evt-invalid", Symbol: "AAPL", Currency: "USD",
 		Components: []IncomeComponentInput{
-			{Subtype: IncomeCashDividend, Amount: 70},
-			{Subtype: IncomeCapitalGainsDist, Amount: -20},
+			{Subtype: IncomeCashDividend, Amount: testAmount("70")},
+			{Subtype: IncomeCapitalGainsDist, Amount: testAmount("-20")},
 		},
 	})
 	require.Error(t, err)
@@ -325,7 +327,7 @@ func TestApplyIncomeEvent_InvalidComponent_RollsBackWholeEvent(t *testing.T) {
 
 	after, err := perf.CurrentRankedPerformance(ctx(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, before.RankedIndex, after.RankedIndex, 1e-9)
+	assertIndexValuesEqual(t, before.RankedIndex, after.RankedIndex)
 
 	activities, err := repo.ListActivities(ctx(), "u1", 1000)
 	require.NoError(t, err)

@@ -11,6 +11,7 @@ require (
 	github.com/piquette/finance-go v1.1.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.20.0
+	github.com/shopspring/decimal v1.4.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.53.0
 )
@@ -29,7 +30,6 @@ require (
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect

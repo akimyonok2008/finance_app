@@ -483,6 +483,18 @@ All routes below require `Authorization: Bearer <jwt>`.
 
 Apple verifier/service code exists but `/auth/apple` is not registered.
 
+### Decimal JSON contract
+
+Authoritative financial inputs (money, quantity, price, FX, index, NAV, and
+weight) are decoded from their JSON token text into exact decimals. During the
+compatibility window, clients may send either a JSON string (`"100.25"`) or a
+bare JSON number (`100.25`); neither path converts through `float64`.
+Exponent notation, NaN/Infinity, locale-formatted values such as `"1,234.56"`,
+oversized input, and values beyond the field's precision policy are rejected as
+invalid request bodies. Financial responses use canonical decimal strings.
+Percentages used only for charts, coverage, risk statistics, or other explicitly
+non-authoritative presentation may remain JSON numbers.
+
 ## Authentication
 
 Password registration requires at least eight characters, stores a bcrypt
@@ -529,7 +541,7 @@ matching explicit erasure hooks. No financial portfolio is retained.
 Each user has one lazily created USD-default portfolio. A position accepts:
 
 ```json
-{"symbol":"AAPL","asset_type":"stock","quantity":2}
+{"symbol":"AAPL","asset_type":"stock","quantity":"2"}
 ```
 
 Supported asset types are `stock`, `etf`, and `crypto`. The service normalizes
@@ -598,6 +610,13 @@ invariants that back the transactional write path:
 
 Migrations are forward-only and idempotent; no user data is dropped. Operational
 recovery notes are in the migration header.
+
+Migration `0027_financial_precision_numeric.sql` widens authoritative financial
+columns to the current decimal policy and converts legacy quote/index
+`DOUBLE PRECISION` columns to `NUMERIC` after explicitly rejecting
+NaN/Infinity. That conversion preserves the value PostgreSQL currently holds;
+it cannot reconstruct decimal digits already lost when historical values were
+first stored as binary floating point.
 
 The ranked formula:
 

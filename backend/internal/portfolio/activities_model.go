@@ -1,6 +1,10 @@
 package portfolio
 
-import "time"
+import (
+	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
+)
 
 // This file extends the immutable activity ledger with income, fee, and
 // corporate-action mechanics. Everything here is USER-REPORTED tracking data:
@@ -130,9 +134,9 @@ type IncomeInput struct {
 	// Amount is the gross income in Currency (eligible quantity × amount per
 	// unit). Withholding and Fee are account-specific deductions; net cash is
 	// derived from all three.
-	Amount      float64
-	Withholding float64
-	Fee         float64
+	Amount      money.Amount
+	Withholding money.Amount
+	Fee         money.Amount
 
 	// Estimated marks the gross amount as a provider expectation rather than a
 	// confirmed broker receipt (surfaced to the user, correctable later).
@@ -141,13 +145,13 @@ type IncomeInput struct {
 	// Reinvestment estimation (only for reinvested dividends): when ReinvestPrice
 	// is > 0 it is used as the execution price; otherwise the current tracked
 	// market price is used. PriceMethod records which pricing rule was applied.
-	ReinvestPrice float64
+	ReinvestPrice money.Price
 	PriceMethod   string
 
 	// Stock-dividend ratio: new_qty = qty × (1 + Num/Den). Only used by the
 	// stock-dividend plan.
-	StockRatioNum float64
-	StockRatioDen float64
+	StockRatioNum money.Ratio
+	StockRatioDen money.Ratio
 
 	// IncomeEventID links the ledger activity back to the normalized provider
 	// event for audit and reconciliation. TaxClassification is passed through for
@@ -160,7 +164,7 @@ type IncomeInput struct {
 }
 
 // NetCash returns the net cash credited by an ordinary/return income event.
-func (in IncomeInput) NetCash() float64 { return in.Amount - in.Withholding - in.Fee }
+func (in IncomeInput) NetCash() money.Amount { return in.Amount.Sub(in.Withholding).Sub(in.Fee) }
 
 // IncomeComponentInput is ONE economic slice of a mixed income event (e.g. the
 // ordinary-income, capital-gains-distribution, and return-of-capital slices of
@@ -174,20 +178,20 @@ type IncomeComponentInput struct {
 	AssetType string
 	Currency  string // overrides IncomeEventInput.Currency when set
 
-	Amount      float64
-	Withholding float64
-	Fee         float64
+	Amount      money.Amount
+	Withholding money.Amount
+	Fee         money.Amount
 	Estimated   bool
 
 	// Reinvest requests that THIS component's net cash be reinvested into the
 	// paying instrument. Only ordinary-income components may reinvest; return
 	// of capital and stock dividends never do (planIncomeEvent rejects it).
 	Reinvest      bool
-	ReinvestPrice float64
+	ReinvestPrice money.Price
 	PriceMethod   string
 
-	StockRatioNum float64
-	StockRatioDen float64
+	StockRatioNum money.Ratio
+	StockRatioDen money.Ratio
 
 	TaxClassification string
 	OccurredAt        *time.Time
@@ -195,7 +199,9 @@ type IncomeComponentInput struct {
 }
 
 // NetCash returns the net cash credited by this component.
-func (c IncomeComponentInput) NetCash() float64 { return c.Amount - c.Withholding - c.Fee }
+func (c IncomeComponentInput) NetCash() money.Amount {
+	return c.Amount.Sub(c.Withholding).Sub(c.Fee)
+}
 
 // IncomeEventInput is ONE full economic income event — possibly with several
 // components (ordinary income, capital-gains distribution, return of capital,
@@ -222,7 +228,7 @@ type IncomeEventInput struct {
 type FeeInput struct {
 	Subtype          FeeSubtype
 	Currency         string
-	Amount           float64
+	Amount           money.Amount
 	Symbol           string // optional, informational
 	LinkedActivityID string // optional grouping
 	Description      string

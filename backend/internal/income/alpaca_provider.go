@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/providerhttp"
 )
 
@@ -68,22 +69,22 @@ type alpacaIncomeResponse struct {
 }
 
 type alpacaCashDividend struct {
-	Symbol      string  `json:"symbol"`
-	Rate        float64 `json:"rate"`
-	Special     bool    `json:"special"`
-	ExDate      string  `json:"ex_date"`
-	RecordDate  string  `json:"record_date"`
-	PayableDate string  `json:"payable_date"`
-	ProcessDate string  `json:"process_date"`
+	Symbol      string      `json:"symbol"`
+	Rate        money.Price `json:"rate"`
+	Special     bool        `json:"special"`
+	ExDate      string      `json:"ex_date"`
+	RecordDate  string      `json:"record_date"`
+	PayableDate string      `json:"payable_date"`
+	ProcessDate string      `json:"process_date"`
 }
 
 type alpacaStockDividend struct {
-	Symbol      string  `json:"symbol"`
-	Rate        float64 `json:"rate"`
-	ExDate      string  `json:"ex_date"`
-	RecordDate  string  `json:"record_date"`
-	PayableDate string  `json:"payable_date"`
-	ProcessDate string  `json:"process_date"`
+	Symbol      string      `json:"symbol"`
+	Rate        money.Price `json:"rate"`
+	ExDate      string      `json:"ex_date"`
+	RecordDate  string      `json:"record_date"`
+	PayableDate string      `json:"payable_date"`
+	ProcessDate string      `json:"process_date"`
 }
 
 // FetchIncomeEvents queries Alpaca for the requested symbols and window.

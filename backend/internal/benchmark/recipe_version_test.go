@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 func mustStore(t *testing.T) *VersionedRecipeStore {
@@ -98,10 +100,10 @@ func TestStore_RejectsOverlappingEffectiveRanges(t *testing.T) {
 	_, err := NewVersionedRecipeStore([]BenchmarkRecipeVersion{
 		{RecipeID: "X", VersionID: "X_a", PubliclyKnownAt: mustTime("2025-01-01"),
 			EffectiveFrom: mustTime("2025-01-01"), EffectiveUntil: &until,
-			Components: []AssetAllocation{{Symbol: "SPY", Weight: 1}}, SourceType: "static_model"},
+			Components: []AssetAllocation{{Symbol: "SPY", Weight: money.MustWeight("1")}}, SourceType: "static_model"},
 		{RecipeID: "X", VersionID: "X_b", PubliclyKnownAt: mustTime("2025-04-01"),
 			EffectiveFrom: overlap, // starts before the previous version ends
-			Components:    []AssetAllocation{{Symbol: "SPY", Weight: 1}}, SourceType: "static_model"},
+			Components:    []AssetAllocation{{Symbol: "SPY", Weight: money.MustWeight("1")}}, SourceType: "static_model"},
 	})
 	if err == nil {
 		t.Fatal("expected overlapping effective ranges to be rejected")
@@ -114,7 +116,7 @@ func TestVersion_RejectsInvalidSourceMetadata(t *testing.T) {
 	v := BenchmarkRecipeVersion{
 		RecipeID: "BUFFETT_13F", VersionID: "bad", PubliclyKnownAt: mustTime("2026-05-15"),
 		EffectiveFrom: mustTime("2026-05-15"), ReportPeriodEnd: &rpe,
-		Components: []AssetAllocation{{Symbol: "AAPL", Weight: 1}},
+		Components: []AssetAllocation{{Symbol: "AAPL", Weight: money.MustWeight("1")}},
 		SourceType: "sec_13f_hr",
 		SourceURL:  "https://sec.gov/x", SourceAccession: "0001-25-1",
 		MappingCoverage: &cov,
@@ -130,7 +132,7 @@ func TestVersion_RejectsMissingAccession(t *testing.T) {
 	v := BenchmarkRecipeVersion{
 		RecipeID: "BUFFETT_13F", VersionID: "bad", PubliclyKnownAt: mustTime("2026-05-15"),
 		EffectiveFrom: mustTime("2026-05-15"), ReportPeriodEnd: &rpe,
-		Components: []AssetAllocation{{Symbol: "AAPL", Weight: 1}},
+		Components: []AssetAllocation{{Symbol: "AAPL", Weight: money.MustWeight("1")}},
 		SourceType: "sec_13f_hr", MappingCoverage: &cov, // no URL/accession
 	}
 	if err := v.Validate(); err == nil {

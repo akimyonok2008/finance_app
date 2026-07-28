@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/profile"
@@ -65,7 +66,7 @@ func TestCopyPreviewPrivacy(t *testing.T) {
 func TestCopyFromProfileCreatesFreshBaseline(t *testing.T) {
 	svc, pf := copyTestService()
 	ctx := context.Background()
-	_, err := pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 10})
+	_, err := pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: money.QuantityFromFloat64(10)})
 	require.NoError(t, err)
 
 	resp, err := svc.CopyFromProfile(ctx, "caller", CopyFromProfileRequest{
@@ -110,9 +111,9 @@ func TestCopyRejectsSelfCopyAndInvalidWeights(t *testing.T) {
 func TestCompareProfileUsesPublicWeights(t *testing.T) {
 	svc, pf := copyTestService()
 	ctx := context.Background()
-	_, err := pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "NVDA", AssetType: "stock", Quantity: 1})
+	_, err := pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "NVDA", AssetType: "stock", Quantity: money.QuantityFromFloat64(1)})
 	require.NoError(t, err)
-	_, err = pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: 1})
+	_, err = pf.AddPosition(ctx, "caller", portfolio.PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: money.QuantityFromFloat64(1)})
 	require.NoError(t, err)
 
 	resp, err := svc.CompareProfile(ctx, "caller", "alpha_wolf")

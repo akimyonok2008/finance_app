@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Valuator supplies the current base-currency market value of a user's ACTIVE
@@ -11,7 +13,7 @@ import (
 // cannot be valued consistently (missing prices/FX); the ranked engine then
 // refuses to report rather than inventing zeros.
 type Valuator interface {
-	PortfolioValueBase(ctx context.Context, userID string) (portfolioID string, valueBase float64, hasActive bool, err error)
+	PortfolioValueBase(ctx context.Context, userID string) (portfolioID string, valueBase money.Amount, hasActive bool, err error)
 }
 
 type ObservedValuator interface {
@@ -94,7 +96,7 @@ func (s *Service) CurrentRankedPerformance(ctx context.Context, userID string) (
 // PerformanceFrom projects a ranked state plus a current valuation into the
 // privacy-safe read model. It preserves full precision so canonical snapshot
 // persistence never receives presentation-rounded data.
-func PerformanceFrom(state State, valueBase float64) *RankedPerformance {
+func PerformanceFrom(state State, valueBase money.Amount) *RankedPerformance {
 	return PerformanceFromObservation(state, ValuationObservation{
 		PortfolioID: state.PortfolioID, ValueBase: valueBase,
 		ValuationAsOf: time.Now().UTC(), DataQualityStatus: "complete",
@@ -106,7 +108,7 @@ func PerformanceFromObservation(state State, observation ValuationObservation) *
 	return &RankedPerformance{
 		PortfolioID:            state.PortfolioID,
 		RankedIndex:            idx,
-		RankedReturnPercentage: idx - 100,
+		RankedReturnPercentage: idx.Sub(money.MustIndexValue("100")),
 		Status:                 state.Status,
 		TrackingStartedAt:      state.TrackingStartedAt,
 		ValuationAsOf:          observation.ValuationAsOf,

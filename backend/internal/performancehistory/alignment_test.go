@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,7 +13,7 @@ import (
 func alignedSnapshot(at time.Time, index float64, epoch time.Time) Snapshot {
 	return Snapshot{
 		ID: at.Format(time.RFC3339Nano), PortfolioID: "portfolio", UserID: "user",
-		TrackingStartedAt: epoch, RankedIndex: index,
+		TrackingStartedAt: epoch, RankedIndex: money.IndexValueFromFloat64(index),
 		RankingStatus: performance.StatusActive, CapturedAt: at, ValuationAsOf: at,
 		Kind: KindIntraday, BucketStart: &at, DataQualityStatus: QualityComplete,
 	}
@@ -30,8 +31,8 @@ func TestAlignWindowToBenchmarkClosesNeverSelectsAfterBoundary(t *testing.T) {
 		points, day(2026, time.January, 2), day(2026, time.January, 5),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, 100.0, window.StartSnapshot.RankedIndex)
-	assert.Equal(t, 110.0, window.EndSnapshot.RankedIndex)
+	assertIndexEqual(t, "100", window.StartSnapshot.RankedIndex)
+	assertIndexEqual(t, "110", window.EndSnapshot.RankedIndex)
 }
 
 func TestAlignWindowToBenchmarkClosesRejectsDifferentEpochs(t *testing.T) {

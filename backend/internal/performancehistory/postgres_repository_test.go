@@ -57,7 +57,7 @@ func seedHistoryOwner(t *testing.T, pool *pgxpool.Pool) (string, string) {
 func pgHistorySnapshot(id, userID, portfolioID string, epoch, at time.Time, kind SnapshotKind) Snapshot {
 	snapshot := Snapshot{
 		ID: id, UserID: userID, PortfolioID: portfolioID,
-		TrackingStartedAt: epoch, RankedIndex: 101.25,
+		TrackingStartedAt: epoch, RankedIndex: testIndex("101.25"),
 		RankingStatus: performance.StatusActive, CapturedAt: at,
 		Kind: kind, ValuationAsOf: at, DataQualityStatus: QualityComplete,
 		CreatedAt: at,
@@ -117,17 +117,17 @@ func TestPGIndexAtOrBeforeIsEpochSafeAndCompleteOnly(t *testing.T) {
 	currentEpoch := now.AddDate(0, 0, -30)
 
 	old := pgHistorySnapshot(uuid.NewString(), userID, portfolioID, oldEpoch, now.AddDate(0, 0, -20), KindTransition)
-	old.RankedIndex = 999
+	old.RankedIndex = testIndex("999")
 	_, err := repo.Insert(context.Background(), old)
 	require.NoError(t, err)
 
 	complete := pgHistorySnapshot(uuid.NewString(), userID, portfolioID, currentEpoch, now.Add(-2*time.Hour), KindTransition)
-	complete.RankedIndex = 110
+	complete.RankedIndex = testIndex("110")
 	_, err = repo.Insert(context.Background(), complete)
 	require.NoError(t, err)
 
 	stale := pgHistorySnapshot(uuid.NewString(), userID, portfolioID, currentEpoch, now.Add(-time.Hour), KindTransition)
-	stale.RankedIndex = 150
+	stale.RankedIndex = testIndex("150")
 	stale.DataQualityStatus = QualityStale
 	_, err = repo.Insert(context.Background(), stale)
 	require.NoError(t, err)

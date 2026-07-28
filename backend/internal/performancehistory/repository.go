@@ -6,13 +6,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 )
 
 type Repository interface {
 	Insert(ctx context.Context, snapshot Snapshot) (bool, error)
 	List(ctx context.Context, userID string, from, to time.Time) ([]Snapshot, error)
-	IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error)
+	IndexAtOrBefore(ctx context.Context, userID string, cutoff, epoch time.Time) (money.IndexValue, time.Time, bool, error)
 	Latest(ctx context.Context, userID, portfolioID string, epoch time.Time) (Snapshot, bool, error)
 	LatestTrustedCapturedAt(ctx context.Context, userID, portfolioID string, epoch time.Time) (time.Time, bool, error)
 	StatusAtOrBefore(ctx context.Context, portfolioID string, epoch, at time.Time) (performance.Status, bool, error)
@@ -92,14 +93,14 @@ func (r *InMemoryRepository) List(_ context.Context, userID string, from, to tim
 	return out, nil
 }
 
-func (r *InMemoryRepository) IndexAtOrBefore(_ context.Context, userID string, cutoff, epoch time.Time) (float64, time.Time, bool, error) {
+func (r *InMemoryRepository) IndexAtOrBefore(_ context.Context, userID string, cutoff, epoch time.Time) (money.IndexValue, time.Time, bool, error) {
 	points, _ := r.List(context.Background(), userID, epoch, cutoff)
 	for i := len(points) - 1; i >= 0; i-- {
 		if points[i].DataQualityStatus == QualityComplete && points[i].TrackingStartedAt.Equal(epoch) {
 			return points[i].RankedIndex, points[i].CapturedAt, true, nil
 		}
 	}
-	return 0, time.Time{}, false, nil
+	return money.ZeroIndexValue(), time.Time{}, false, nil
 }
 
 func (r *InMemoryRepository) Latest(_ context.Context, userID, portfolioID string, epoch time.Time) (Snapshot, bool, error) {

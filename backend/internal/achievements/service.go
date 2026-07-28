@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
@@ -178,11 +179,10 @@ func (s *Service) benchmarkEvaluation(
 
 func rankedReturn(window performancehistory.Window) (float64, error) {
 	start, end := window.StartSnapshot.RankedIndex, window.EndSnapshot.RankedIndex
-	if start <= 0 || end <= 0 || math.IsNaN(start) || math.IsNaN(end) ||
-		math.IsInf(start, 0) || math.IsInf(end, 0) {
+	if start.Sign() <= 0 || end.Sign() <= 0 {
 		return 0, performancehistory.ErrInvalidSnapshot
 	}
-	return (end/start - 1) * 100, nil
+	return performancehistory.TimeframeReturnPercent(start, end)
 }
 
 func (s *Service) progress(
@@ -246,7 +246,7 @@ func (s *Service) progress(
 		progress.Reason = benchmarkReasonFor(progress.State)
 		return progress
 	}
-	benchmarkReturn := benchResult.ReturnPercentage
+	benchmarkReturn := benchResult.ReturnPercentage.Float64()
 	progress.EffectiveStartAt = aligned.StartSnapshot.CapturedAt.Format(time.RFC3339)
 	progress.EffectiveEndAt = aligned.EndSnapshot.CapturedAt.Format(time.RFC3339)
 	progress.StartDate = benchResult.EffectiveStart.Format("2006-01-02")
@@ -375,6 +375,7 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 			continue
 		}
 		portfolioReturn, err := rankedReturn(aligned)
+		benchReturnPct, err := strconv.ParseFloat(benchResult.ReturnPercentage.String(), 64)
 		if err != nil {
 			continue
 		}
@@ -383,7 +384,7 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 			StartDate:          benchResult.EffectiveStart.Format("2006-01-02"),
 			EndDate:            benchResult.EffectiveEnd.Format("2006-01-02"),
 			PortfolioReturnPct: portfolioReturn,
-			BenchmarkReturnPct: benchResult.ReturnPercentage,
+			BenchmarkReturnPct: benchReturnPct,
 		})
 		if err != nil || !result.Unlocked || result.Evidence == nil {
 			continue
@@ -402,8 +403,8 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 		evidence.EvaluationModel = "ranked_snapshot_benchmark_aligned_v2"
 		evidence.EvidenceVersion = 3
 		evidence.TrackingEpoch = aligned.StartSnapshot.TrackingStartedAt.Format(time.RFC3339Nano)
-		evidence.StartRankedIndex = aligned.StartSnapshot.RankedIndex
-		evidence.EndRankedIndex = aligned.EndSnapshot.RankedIndex
+		evidence.StartRankedIndex = aligned.StartSnapshot.RankedIndex.Float64()
+		evidence.EndRankedIndex = aligned.EndSnapshot.RankedIndex.Float64()
 		evidence.StartSnapshotAt = aligned.StartSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.EndSnapshotAt = aligned.EndSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.ActiveCoveragePct = round(window.ActiveCoverage * 100)

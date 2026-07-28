@@ -9,7 +9,7 @@ import (
 func TestCalculatePositionSummary(t *testing.T) {
 	pos := &Position{
 		ID: "p1", Symbol: "AAPL", AssetType: "stock",
-		Quantity: 10, AverageBuyPrice: 180, Currency: "USD",
+		Quantity: testQuantity("10"), AverageBuyPrice: testPrice("180"), Currency: "USD",
 	}
 
 	// USD position: base values equal local values.
@@ -30,7 +30,7 @@ func TestCalculatePositionSummary(t *testing.T) {
 func TestCalculatePositionSummary_PercentageUsesBaseCurrencyValues(t *testing.T) {
 	pos := &Position{
 		ID: "p1", Symbol: "AAPL", AssetType: "stock",
-		Quantity: 10, AverageBuyPrice: 180, Currency: "TRY",
+		Quantity: testQuantity("10"), AverageBuyPrice: testPrice("180"), Currency: "TRY",
 	}
 
 	// Purchase basis is TRY while the quote is USD. Local subtraction would be

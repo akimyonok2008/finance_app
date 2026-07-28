@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Timeframe identifiers accepted by the canonical ranked-history endpoint.
@@ -65,14 +67,23 @@ func TimeframeWindow(timeframe string) (time.Duration, bool) {
 // It is deliberately NOT `ending - 100`: a timeframe rarely starts at index 100,
 // and subtracting 100 would silently report the since-inception return instead
 // of the selected period's return.
-func TimeframeReturnPercent(startingIndex, endingIndex float64) (float64, error) {
-	if startingIndex <= 0 || math.IsNaN(startingIndex) || math.IsInf(startingIndex, 0) {
+func TimeframeReturnRatio(startingIndex, endingIndex money.IndexValue) (money.Ratio, error) {
+	if startingIndex.Sign() <= 0 || endingIndex.Sign() < 0 {
+		return money.ZeroRatio(), ErrNoStartingIndex
+	}
+	ratio, err := endingIndex.DivExact(startingIndex, money.ScaleIndex+money.ScaleWeight)
+	if err != nil {
+		return money.ZeroRatio(), ErrNoStartingIndex
+	}
+	return ratio.Sub(money.MustRatio("1")).Mul(money.MustRatio("100")), nil
+}
+
+func TimeframeReturnPercent(startingIndex, endingIndex money.IndexValue) (float64, error) {
+	ratio, err := TimeframeReturnRatio(startingIndex, endingIndex)
+	if err != nil {
 		return 0, ErrNoStartingIndex
 	}
-	if math.IsNaN(endingIndex) || math.IsInf(endingIndex, 0) {
-		return 0, ErrNoStartingIndex
-	}
-	return (endingIndex/startingIndex - 1) * 100, nil
+	return ratio.Float64(), nil
 }
 
 // DrawdownSeriesPercent converts a ranked-index series into the running
@@ -186,8 +197,8 @@ func (s *Service) RankedHistory(ctx context.Context, userID, rawTimeframe string
 	indexes := make([]float64, 0, len(points))
 	riskPoints := make([]indexPoint, 0, len(points))
 	for _, p := range points {
-		indexes = append(indexes, p.RankedIndex)
-		riskPoints = append(riskPoints, indexPoint{at: p.CapturedAt.UTC(), index: p.RankedIndex})
+		indexes = append(indexes, p.RankedIndex.Float64())
+		riskPoints = append(riskPoints, indexPoint{at: p.CapturedAt.UTC(), index: p.RankedIndex.Float64()})
 	}
 	out.Risk = CalculateRiskConsistency(riskPoints, to)
 	out.Benchmark = s.benchmarkComparison(ctx, points)
@@ -197,19 +208,19 @@ func (s *Service) RankedHistory(ctx context.Context, userID, rawTimeframe string
 
 	for i, p := range points {
 		ret := 0.0
-		if value, err := TimeframeReturnPercent(starting, indexes[i]); err == nil {
+		if value, err := TimeframeReturnPercent(points[0].RankedIndex, p.RankedIndex); err == nil {
 			ret = value
 		}
 		out.Points = append(out.Points, RankedHistoryPoint{
 			CapturedAt:         p.CapturedAt.UTC().Format(time.RFC3339),
-			RankedIndex:        round4(p.RankedIndex),
+			RankedIndex:        round4(p.RankedIndex.Float64()),
 			ReturnPercentage:   round4(ret),
 			DrawdownPercentage: round4(drawdowns[i]),
 			RankingStatus:      string(p.RankingStatus),
 		})
 	}
 
-	timeframeReturn, err := TimeframeReturnPercent(starting, ending)
+	timeframeReturn, err := TimeframeReturnPercent(points[0].RankedIndex, points[len(points)-1].RankedIndex)
 	if err != nil {
 		out.Reason = reasonNoSnapshots
 		return out, nil

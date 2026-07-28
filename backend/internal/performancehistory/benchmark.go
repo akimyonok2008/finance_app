@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // BenchmarkReturn is the result of evaluating a benchmark over a requested
@@ -146,7 +148,7 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 	from := result.EffectiveStart.UTC()
 	to := result.EffectiveEnd.UTC()
 	comparison, err := CompareWithBenchmarkCloses(
-		points, from, to, result.ReturnPercentage,
+		points, from, to, money.RatioFromFloat64(result.ReturnPercentage),
 	)
 	if err != nil {
 		out.Reason = reasonBenchmarkNoOverlap
@@ -154,8 +156,8 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 	}
 
 	benchmarkReturn := round4(result.ReturnPercentage)
-	portfolio := round4(comparison.PortfolioReturnPercentage)
-	difference := round4(comparison.EdgePercentagePoints)
+	portfolio := round4(comparison.PortfolioReturnPercentage.Float64())
+	difference := round4(comparison.EdgePercentagePoints.Float64())
 	out.Available = true
 	out.VerificationStatus = "preview"
 	if result.Quality == "verified" && !result.Synthetic {

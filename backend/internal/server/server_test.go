@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
@@ -101,7 +103,11 @@ func (a achievementPerformanceProvider) GetPortfolioIndexSeries(ctx context.Cont
 		if err != nil || captured.Before(start) || captured.After(end) {
 			continue
 		}
-		out = append(out, benchmark.IndexPoint{Date: captured.UTC().Format("2006-01-02"), Index: p.PortfolioIndex})
+		idx, err := money.ParseIndexValue(strconv.FormatFloat(p.PortfolioIndex, 'f', -1, 64))
+		if err != nil {
+			continue
+		}
+		out = append(out, benchmark.IndexPoint{Date: captured.UTC().Format("2006-01-02"), Index: idx})
 	}
 	return out, nil
 }

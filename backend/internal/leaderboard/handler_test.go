@@ -14,6 +14,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 type stubUsers struct{ users []auth.User }
@@ -35,8 +36,8 @@ func newEnv() (http.Handler, *auth.TokenManager) {
 		{ID: "u2", Email: "bull@example.com", DisplayName: "SilentBull_77", AvatarKey: "bull", PasswordHash: "hash2"},
 	}}
 	sums := stubSummaries{byUser: map[string]leaderboard.RankedPerformance{
-		"u1": {RankedReturnPercentage: 12.4, RankedIndex: 112.4},
-		"u2": {RankedReturnPercentage: 8.1, RankedIndex: 108.1},
+		"u1": {RankedReturnPercentage: money.MustRatio("12.4"), RankedIndex: money.MustIndexValue("112.4")},
+		"u2": {RankedReturnPercentage: money.MustRatio("8.1"), RankedIndex: money.MustIndexValue("108.1")},
 	}}
 	svc := leaderboard.NewService(users, sums)
 	h := leaderboard.NewHandler(svc)

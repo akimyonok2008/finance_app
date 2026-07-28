@@ -16,15 +16,13 @@ func TestEligibleQuantity_ReconstructsHistoricalQuantityTransformations(t *testi
 	require.NoError(t, err)
 	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	instrumentID := "11111111-1111-1111-1111-111111111111"
-	q := func(v float64) *float64 { return &v }
-
 	repo.mu.Lock()
 	agg := repo.aggregates[pf.ID]
 	agg.activities = append(agg.activities,
-		Activity{Type: ActivityOpeningBalance, Symbol: "OLD", InstrumentID: instrumentID, Quantity: q(10), OccurredAt: base},
-		Activity{Type: ActivityBuy, Symbol: "OLD", InstrumentID: instrumentID, Quantity: q(5), OccurredAt: base.AddDate(0, 0, 1)},
-		Activity{Type: ActivitySell, Symbol: "OLD", InstrumentID: instrumentID, Quantity: q(3), OccurredAt: base.AddDate(0, 0, 2)},
-		Activity{Type: ActivityReinvestedDividend, Symbol: "NEW", InstrumentID: instrumentID, Quantity: q(2), OccurredAt: base.AddDate(0, 0, 3)},
+		Activity{Type: ActivityOpeningBalance, Symbol: "OLD", InstrumentID: instrumentID, Quantity: testQuantityPtr("10"), OccurredAt: base},
+		Activity{Type: ActivityBuy, Symbol: "OLD", InstrumentID: instrumentID, Quantity: testQuantityPtr("5"), OccurredAt: base.AddDate(0, 0, 1)},
+		Activity{Type: ActivitySell, Symbol: "OLD", InstrumentID: instrumentID, Quantity: testQuantityPtr("3"), OccurredAt: base.AddDate(0, 0, 2)},
+		Activity{Type: ActivityReinvestedDividend, Symbol: "NEW", InstrumentID: instrumentID, Quantity: testQuantityPtr("2"), OccurredAt: base.AddDate(0, 0, 3)},
 		Activity{Type: ActivityStockSplit, Symbol: "NEW", InstrumentID: instrumentID, OccurredAt: base.AddDate(0, 0, 4), Metadata: map[string]any{"ratio_numerator": 2.0, "ratio_denominator": 1.0}},
 		Activity{Type: ActivityStockDividend, Symbol: "NEW", InstrumentID: instrumentID, OccurredAt: base.AddDate(0, 0, 5), Metadata: map[string]any{"ratio_numerator": 1.0, "ratio_denominator": 10.0}},
 		Activity{Type: ActivityReverseSplit, Symbol: "NEW", InstrumentID: instrumentID, OccurredAt: base.AddDate(0, 0, 6), Metadata: map[string]any{"ratio_numerator": 1.0, "ratio_denominator": 2.0}},
@@ -34,7 +32,7 @@ func TestEligibleQuantity_ReconstructsHistoricalQuantityTransformations(t *testi
 
 	got, err := svc.EligibleQuantity(context.Background(), "u1", instrumentID, "NEW", base.AddDate(0, 0, 7))
 	require.NoError(t, err)
-	assert.InDelta(t, 15.4, got, 1e-9)
+	assertQuantityEqual(t, "15.4", got)
 }
 
 func TestEligibleQuantity_UsesStableIdentityAcrossHistoricalTickerAlias(t *testing.T) {
@@ -44,7 +42,7 @@ func TestEligibleQuantity_UsesStableIdentityAcrossHistoricalTickerAlias(t *testi
 	require.NoError(t, err)
 	at := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
 	instrumentID := "22222222-2222-2222-2222-222222222222"
-	qty := 12.0
+	qty := testQuantity("12")
 
 	repo.mu.Lock()
 	repo.aggregates[pf.ID].activities = append(repo.aggregates[pf.ID].activities,
@@ -53,7 +51,7 @@ func TestEligibleQuantity_UsesStableIdentityAcrossHistoricalTickerAlias(t *testi
 
 	got, err := svc.EligibleQuantity(context.Background(), "u1", instrumentID, "NEW", at.Add(time.Hour))
 	require.NoError(t, err)
-	assert.Equal(t, 12.0, got)
+	assertQuantityEqual(t, "12", got)
 }
 
 func TestIncomeDiscovery_PreservesRecentProviderAliasesForStableInstrument(t *testing.T) {

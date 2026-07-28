@@ -12,6 +12,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/httpx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // AchievementEvaluator lets the portfolio handler trigger achievement checks
@@ -66,23 +67,23 @@ func (h *Handler) SetCorporateActionView(r CorporateActionViewReader) {
 // detected and applied income event. The owner may see their own amounts; these
 // figures must never appear on any public surface.
 type IncomeEventView struct {
-	ID            string  `json:"id"`
-	EventType     string  `json:"event_type"`
-	Symbol        string  `json:"symbol"`
-	Currency      string  `json:"currency"`
-	GrossAmount   float64 `json:"gross_amount"`
-	Withholding   float64 `json:"withholding_amount"`
-	FeeAmount     float64 `json:"fee_amount"`
-	NetAmount     float64 `json:"net_amount"`
-	ReinvestedQty float64 `json:"reinvestment_quantity,omitempty"`
-	Estimated     bool    `json:"estimated"`
-	Status        string  `json:"status"`
-	Provider      string  `json:"provider"`
-	Explanation   string  `json:"explanation"`
-	Correctable   bool    `json:"correctable"`
-	PaymentDate   string  `json:"payment_date,omitempty"`
-	AppliedAt     string  `json:"applied_at,omitempty"`
-	System        bool    `json:"system_generated"`
+	ID            string         `json:"id"`
+	EventType     string         `json:"event_type"`
+	Symbol        string         `json:"symbol"`
+	Currency      string         `json:"currency"`
+	GrossAmount   money.Amount   `json:"gross_amount"`
+	Withholding   money.Amount   `json:"withholding_amount"`
+	FeeAmount     money.Amount   `json:"fee_amount"`
+	NetAmount     money.Amount   `json:"net_amount"`
+	ReinvestedQty money.Quantity `json:"reinvestment_quantity,omitempty"`
+	Estimated     bool           `json:"estimated"`
+	Status        string         `json:"status"`
+	Provider      string         `json:"provider"`
+	Explanation   string         `json:"explanation"`
+	Correctable   bool           `json:"correctable"`
+	PaymentDate   string         `json:"payment_date,omitempty"`
+	AppliedAt     string         `json:"applied_at,omitempty"`
+	System        bool           `json:"system_generated"`
 }
 
 // IncomeCorrectionInput is a constrained, account-specific correction to an
@@ -93,11 +94,11 @@ type IncomeCorrectionInput struct {
 	PortfolioID             string
 	Kind                    string
 	RequestID               string
-	ActualNet               float64
-	ActualWithholding       float64
-	ActualFee               float64
-	ActualReinvestmentQty   float64
-	ActualReinvestmentPrice float64
+	ActualNet               money.Amount
+	ActualWithholding       money.Amount
+	ActualFee               money.Amount
+	ActualReinvestmentQty   money.Quantity
+	ActualReinvestmentPrice money.Price
 }
 
 // IncomeEventViewReader supplies a user's read-only income views and the
@@ -142,66 +143,66 @@ type portfolioView struct {
 // locked at add time (today's market price) — there is no average buy price in
 // the product.
 type positionView struct {
-	ID                string  `json:"id"`
-	Symbol            string  `json:"symbol"`
-	InstrumentID      string  `json:"instrument_id,omitempty"`
-	AssetType         string  `json:"asset_type"`
-	Quantity          float64 `json:"quantity"`
-	BaselinePrice     float64 `json:"baseline_price"`
-	Currency          string  `json:"currency"`
-	Status            string  `json:"status"`
-	PositionEpisodeID string  `json:"position_episode_id"`
-	OpenedAt          string  `json:"opened_at"`
+	ID                string         `json:"id"`
+	Symbol            string         `json:"symbol"`
+	InstrumentID      string         `json:"instrument_id,omitempty"`
+	AssetType         string         `json:"asset_type"`
+	Quantity          money.Quantity `json:"quantity"`
+	BaselinePrice     money.Price    `json:"baseline_price"`
+	Currency          string         `json:"currency"`
+	Status            string         `json:"status"`
+	PositionEpisodeID string         `json:"position_episode_id"`
+	OpenedAt          string         `json:"opened_at"`
 }
 
 // positionRequest is the create payload: no price, no currency — the baseline
 // is locked server-side at the current market quote.
 type positionRequest struct {
-	Symbol    string  `json:"symbol"`
-	AssetType string  `json:"asset_type"`
-	Quantity  float64 `json:"quantity"`
+	Symbol    string         `json:"symbol"`
+	AssetType string         `json:"asset_type"`
+	Quantity  money.Quantity `json:"quantity"`
 }
 
 // updatePositionRequest allows quantity changes only; the symbol and locked
 // baseline price are immutable after creation.
 type updatePositionRequest struct {
-	Quantity float64 `json:"quantity"`
+	Quantity money.Quantity `json:"quantity"`
 }
 
 type cashFlowRequest struct {
-	Currency   string  `json:"currency"`
-	Amount     float64 `json:"amount"`
-	OccurredAt string  `json:"occurred_at,omitempty"`
+	Currency   string       `json:"currency"`
+	Amount     money.Amount `json:"amount"`
+	OccurredAt string       `json:"occurred_at,omitempty"`
 }
 
 type buyRequest struct {
-	Symbol       string  `json:"symbol"`
-	ExchangeCode string  `json:"exchange_code,omitempty"`
-	MIC          string  `json:"mic,omitempty"`
-	AssetType    string  `json:"asset_type"`
-	Quantity     float64 `json:"quantity"`
+	Symbol       string         `json:"symbol"`
+	ExchangeCode string         `json:"exchange_code,omitempty"`
+	MIC          string         `json:"mic,omitempty"`
+	AssetType    string         `json:"asset_type"`
+	Quantity     money.Quantity `json:"quantity"`
 	// Optional real execution details. Omitted price/fee/date default to the
 	// latest tracked quote / zero / now and are labelled as estimates.
-	ExecutionPrice float64 `json:"execution_price,omitempty"`
-	Fee            float64 `json:"fee,omitempty"`
-	EffectiveAt    string  `json:"effective_at,omitempty"`
+	ExecutionPrice money.Price  `json:"execution_price,omitempty"`
+	Fee            money.Amount `json:"fee,omitempty"`
+	EffectiveAt    string       `json:"effective_at,omitempty"`
 }
 
 type sellRequest struct {
-	PositionID     string  `json:"position_id,omitempty"`
-	Symbol         string  `json:"symbol,omitempty"`
-	Quantity       float64 `json:"quantity"`
-	ExecutionPrice float64 `json:"execution_price,omitempty"`
-	Fee            float64 `json:"fee,omitempty"`
-	EffectiveAt    string  `json:"effective_at,omitempty"`
+	PositionID     string         `json:"position_id,omitempty"`
+	Symbol         string         `json:"symbol,omitempty"`
+	Quantity       money.Quantity `json:"quantity"`
+	ExecutionPrice money.Price    `json:"execution_price,omitempty"`
+	Fee            money.Amount   `json:"fee,omitempty"`
+	EffectiveAt    string         `json:"effective_at,omitempty"`
 }
 
 type activityMutationView struct {
-	Position         *positionView `json:"position,omitempty"`
-	Activity         *ActivityView `json:"activity,omitempty"`
-	PortfolioVersion int64         `json:"portfolio_version"`
-	RankedIndex      float64       `json:"ranked_index"`
-	RankingStatus    string        `json:"ranking_status"`
+	Position         *positionView    `json:"position,omitempty"`
+	Activity         *ActivityView    `json:"activity,omitempty"`
+	PortfolioVersion int64            `json:"portfolio_version"`
+	RankedIndex      money.IndexValue `json:"ranked_index"`
+	RankingStatus    string           `json:"ranking_status"`
 }
 
 func toPositionView(p *Position) positionView {
@@ -561,7 +562,7 @@ func mutationView(res MutationResult) activityMutationView {
 			ID: res.Activity.ID, Type: res.Activity.Type, Symbol: res.Activity.Symbol, InstrumentID: res.Activity.InstrumentID,
 			AssetType: res.Activity.AssetType, Currency: res.Activity.Currency,
 			Quantity: res.Activity.Quantity, UnitPrice: res.Activity.UnitPrice,
-			GrossAmount:                round2(res.Activity.GrossAmount),
+			GrossAmount:                res.Activity.GrossAmount,
 			CostBasisAllocated:         res.Activity.CostBasisAllocated,
 			RealizedGainLossBase:       res.Activity.RealizedGainLossBase,
 			RealizedGainLossPercentage: res.Activity.RealizedGainLossPercentage,

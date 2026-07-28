@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 type tableSeriesProvider struct {
@@ -73,7 +75,7 @@ func virtualEngine(t *testing.T, policy RebalancingPolicy, points map[string][]P
 }
 
 func pp(date string, value float64) PricePoint {
-	return PricePoint{Date: date, AdjustedClose: value}
+	return PricePoint{Date: date, AdjustedClose: money.PriceFromFloat64(value)}
 }
 
 func evaluateVirtual(t *testing.T, engine *BenchmarkConstructionService, start, end string) BenchmarkReturnResult {
@@ -96,11 +98,11 @@ func TestVirtualPortfolio_SingleAssetMatchesEndpointForEveryPolicy(t *testing.T)
 		RebalancePeriodicMonthly, RebalanceFilingSnapshot,
 	} {
 		t.Run(string(policy), func(t *testing.T) {
-			engine := virtualEngine(t, policy, points, []AssetAllocation{{Symbol: "SPY", Weight: 1}})
+			engine := virtualEngine(t, policy, points, []AssetAllocation{{Symbol: "SPY", Weight: money.MustWeight("1")}})
 			result := evaluateVirtual(t, engine, "2026-01-02", "2026-01-06")
-			assert.InDelta(t, 21, result.ReturnPercentage, 0.0001)
-			assert.Equal(t, 100.0, result.StartNAV)
-			assert.InDelta(t, 121, result.EndNAV, 1e-9)
+			assert.InDelta(t, 21, result.ReturnPercentage.Float64(), 0.0001)
+			assert.Equal(t, "100", result.StartNAV.String())
+			assert.InDelta(t, 121, result.EndNAV.Float64(), 1e-9)
 		})
 	}
 }
@@ -110,29 +112,29 @@ func TestVirtualPortfolio_BuyAndHoldDiffersFromDailyTargetWeightRegression(t *te
 		"A": {pp("2026-01-02", 100), pp("2026-01-05", 200), pp("2026-01-06", 100)},
 		"B": {pp("2026-01-02", 100), pp("2026-01-05", 50), pp("2026-01-06", 100)},
 	}
-	components := []AssetAllocation{{Symbol: "A", Weight: .5}, {Symbol: "B", Weight: .5}}
+	components := []AssetAllocation{{Symbol: "A", Weight: money.MustWeight("0.5")}, {Symbol: "B", Weight: money.MustWeight("0.5")}}
 	hold := evaluateVirtual(t, virtualEngine(t, RebalanceBuyAndHold, points, components), "2026-01-02", "2026-01-06")
 	daily := evaluateVirtual(t, virtualEngine(t, RebalanceDailyTargetWeight, points, components), "2026-01-02", "2026-01-06")
 
-	assert.InDelta(t, 0, hold.ReturnPercentage, 0.0001)
-	assert.InDelta(t, 56.25, daily.ReturnPercentage, 0.0001)
+	assert.InDelta(t, 0, hold.ReturnPercentage.Float64(), 0.0001)
+	assert.InDelta(t, 56.25, daily.ReturnPercentage.Float64(), 0.0001)
 	assert.Empty(t, hold.DataMetadata.RebalanceDates)
 	assert.Equal(t, []string{"2026-01-05", "2026-01-06"}, daily.DataMetadata.RebalanceDates)
 	assert.NotEqual(t, hold.Fingerprint, daily.Fingerprint)
 }
 
 func TestVirtualPortfolio_InitialUnitsAndRebalancePreserveNAV(t *testing.T) {
-	state := BenchmarkPortfolioState{NAV: 100, Holdings: map[string]float64{}}
-	prices := map[string]map[string]float64{
-		"A": {"2026-01-02": 20}, "B": {"2026-01-02": 10},
+	state := BenchmarkPortfolioState{NAV: money.MustIndexValue("100"), Cash: money.ZeroAmount(), Holdings: map[string]money.Quantity{}}
+	prices := map[string]map[string]money.Price{
+		"A": {"2026-01-02": money.MustPrice("20")}, "B": {"2026-01-02": money.MustPrice("10")},
 	}
-	components := []AssetAllocation{{Symbol: "A", Weight: .6}, {Symbol: "B", Weight: .4}}
+	components := []AssetAllocation{{Symbol: "A", Weight: money.MustWeight("0.6")}, {Symbol: "B", Weight: money.MustWeight("0.4")}}
 	require.NoError(t, allocateAtNAV(&state, components, prices, "2026-01-02"))
-	assert.InDelta(t, 3, state.Holdings["A"], 1e-12)
-	assert.InDelta(t, 4, state.Holdings["B"], 1e-12)
+	assert.InDelta(t, 3, state.Holdings["A"].Float64(), 1e-12)
+	assert.InDelta(t, 4, state.Holdings["B"].Float64(), 1e-12)
 	nav, err := valueState(state, prices, "2026-01-02")
 	require.NoError(t, err)
-	assert.InDelta(t, 100, nav, 1e-12)
+	assert.InDelta(t, 100, nav.Float64(), 1e-12)
 }
 
 func TestVirtualPortfolio_MonthlyUsesFinalCommonTradingDate(t *testing.T) {
@@ -141,10 +143,10 @@ func TestVirtualPortfolio_MonthlyUsesFinalCommonTradingDate(t *testing.T) {
 		"B": {pp("2026-01-02", 100), pp("2026-01-30", 80), pp("2026-02-02", 70)},
 	}
 	engine := virtualEngine(t, RebalancePeriodicMonthly, points,
-		[]AssetAllocation{{Symbol: "A", Weight: .5}, {Symbol: "B", Weight: .5}})
+		[]AssetAllocation{{Symbol: "A", Weight: money.MustWeight("0.5")}, {Symbol: "B", Weight: money.MustWeight("0.5")}})
 	result := evaluateVirtual(t, engine, "2026-01-02", "2026-02-02")
 	assert.Equal(t, []string{"2026-01-30"}, result.DataMetadata.RebalanceDates)
-	assert.InDelta(t, 100, result.Points[1].Index, 1e-9)
+	assert.InDelta(t, 100, result.Points[1].Index.Float64(), 1e-9)
 }
 
 func TestVirtualPortfolio_FilingUsesConservativeNextTradingDate(t *testing.T) {
@@ -154,7 +156,7 @@ func TestVirtualPortfolio_FilingUsesConservativeNextTradingDate(t *testing.T) {
 		SourceURL: "https://example.test/a", SourceAccession: "a",
 		ReportPeriodEnd: timePointer(mustTime("2025-09-30")), MappingCoverage: floatPointer(1),
 		RebalancingPolicy: RebalanceFilingSnapshot,
-		Components:        []AssetAllocation{{Symbol: "A", Weight: 1}},
+		Components:        []AssetAllocation{{Symbol: "A", Weight: money.MustWeight("1")}},
 	}
 	versionB := versionA
 	versionB.VersionID = "B"
@@ -162,7 +164,7 @@ func TestVirtualPortfolio_FilingUsesConservativeNextTradingDate(t *testing.T) {
 	versionB.EffectiveFrom = versionB.PubliclyKnownAt
 	versionB.SourceAccession = "b"
 	versionB.ReportPeriodEnd = timePointer(mustTime("2025-12-31"))
-	versionB.Components = []AssetAllocation{{Symbol: "B", Weight: 1}}
+	versionB.Components = []AssetAllocation{{Symbol: "B", Weight: money.MustWeight("1")}}
 	store, err := NewVersionedRecipeStore([]BenchmarkRecipeVersion{versionA, versionB})
 	require.NoError(t, err)
 	provider := tableSeriesProvider{
@@ -179,7 +181,7 @@ func TestVirtualPortfolio_FilingUsesConservativeNextTradingDate(t *testing.T) {
 	require.Len(t, result.DataMetadata.ActivatedVersions, 2)
 	assert.Equal(t, "2026-01-05", result.DataMetadata.ActivatedVersions[1].ActivationDate)
 	assert.Equal(t, []string{"2026-01-05"}, result.DataMetadata.RebalanceDates)
-	assert.InDelta(t, 240, result.EndNAV, 1e-9) // A reaches 120, then B doubles.
+	assert.InDelta(t, 240, result.EndNAV.Float64(), 1e-9) // A reaches 120, then B doubles.
 }
 
 func TestVirtualPortfolio_HistoricalFXChangesResultAndFingerprint(t *testing.T) {
@@ -188,19 +190,19 @@ func TestVirtualPortfolio_HistoricalFXChangesResultAndFingerprint(t *testing.T) 
 		currency: map[string]string{"EU": "EUR"},
 	}
 	engine := virtualEngine(t, RebalanceBuyAndHold, provider.points,
-		[]AssetAllocation{{Symbol: "EU", Weight: 1}})
+		[]AssetAllocation{{Symbol: "EU", Weight: money.MustWeight("1")}})
 	engine.series = provider
 	engine.SetHistoricalFXProvider(tableFXProvider{rates: map[string]float64{
 		"EUR/USD/2026-01-02": 1, "EUR/USD/2026-01-05": 1.1,
 	}})
 	first := evaluateVirtual(t, engine, "2026-01-02", "2026-01-05")
-	assert.InDelta(t, 10, first.ReturnPercentage, 0.0001)
+	assert.InDelta(t, 10, first.ReturnPercentage.Float64(), 0.0001)
 
 	engine.SetHistoricalFXProvider(tableFXProvider{rates: map[string]float64{
 		"EUR/USD/2026-01-02": 1, "EUR/USD/2026-01-05": 1.2,
 	}})
 	second := evaluateVirtual(t, engine, "2026-01-02", "2026-01-05")
-	assert.InDelta(t, 20, second.ReturnPercentage, 0.0001)
+	assert.InDelta(t, 20, second.ReturnPercentage.Float64(), 0.0001)
 	assert.NotEqual(t, first.Fingerprint, second.Fingerprint)
 }
 
@@ -210,7 +212,7 @@ func TestVirtualPortfolio_MissingHistoricalFXFailsClosed(t *testing.T) {
 		currency: map[string]string{"EU": "EUR"},
 	}
 	engine := virtualEngine(t, RebalanceBuyAndHold, provider.points,
-		[]AssetAllocation{{Symbol: "EU", Weight: 1}})
+		[]AssetAllocation{{Symbol: "EU", Weight: money.MustWeight("1")}})
 	engine.series = provider
 	_, err := engine.CalculateReturn(context.Background(), "TEST",
 		mustTime("2026-01-02"), mustTime("2026-01-05"), RequirementForAwards())
@@ -220,7 +222,7 @@ func TestVirtualPortfolio_MissingHistoricalFXFailsClosed(t *testing.T) {
 func TestVirtualPortfolio_UnsupportedPolicyFailsExplicitly(t *testing.T) {
 	engine := virtualEngine(t, RebalancingPolicy("surprise"), map[string][]PricePoint{
 		"A": {pp("2026-01-02", 100), pp("2026-01-05", 101)},
-	}, []AssetAllocation{{Symbol: "A", Weight: 1}})
+	}, []AssetAllocation{{Symbol: "A", Weight: money.MustWeight("1")}})
 	_, err := engine.CalculateReturn(context.Background(), "TEST",
 		mustTime("2026-01-02"), mustTime("2026-01-05"), RequirementForAwards())
 	assert.ErrorIs(t, err, ErrUnsupportedRebalancingPolicy)
@@ -229,7 +231,7 @@ func TestVirtualPortfolio_UnsupportedPolicyFailsExplicitly(t *testing.T) {
 func TestVirtualPortfolio_DeterministicPointsReturnAndFingerprint(t *testing.T) {
 	engine := virtualEngine(t, RebalanceBuyAndHold, map[string][]PricePoint{
 		"A": {pp("2026-01-02", 100), pp("2026-01-05", 105)},
-	}, []AssetAllocation{{Symbol: "A", Weight: 1}})
+	}, []AssetAllocation{{Symbol: "A", Weight: money.MustWeight("1")}})
 	first := evaluateVirtual(t, engine, "2026-01-02", "2026-01-05")
 	second := evaluateVirtual(t, engine, "2026-01-02", "2026-01-05")
 	assert.Equal(t, first.Points, second.Points)

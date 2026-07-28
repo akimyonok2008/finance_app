@@ -9,6 +9,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // These tests use a real disposable Redis database. They are skipped unless
@@ -35,8 +37,8 @@ func realRedisCache(t *testing.T) (*RedisLeaderboardCache, *redis.Client) {
 func TestRedisIntegration_GlobalMembershipAndConcurrentUpdates(t *testing.T) {
 	cache, _ := realRedisCache(t)
 	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "u1", 5))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "u2", 10))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "u1", testRatio("5")))
+	require.NoError(t, cache.UpsertGlobalScore(ctx, "u2", testRatio("10")))
 	require.NoError(t, cache.RemoveGlobalScore(ctx, "missing"))
 	require.NoError(t, cache.RemoveGlobalScore(ctx, "u2"))
 
@@ -50,7 +52,7 @@ func TestRedisIntegration_GlobalMembershipAndConcurrentUpdates(t *testing.T) {
 		wg.Add(1)
 		go func(score float64) {
 			defer wg.Done()
-			assert.NoError(t, cache.UpsertGlobalScore(ctx, "u1", score))
+			assert.NoError(t, cache.UpsertGlobalScore(ctx, "u1", money.RatioFromFloat64(score)))
 		}(float64(i))
 	}
 	wg.Wait()

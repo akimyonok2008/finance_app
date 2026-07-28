@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // SymbolHolder identifies a portfolio holding a symbol and when it was acquired
@@ -103,18 +105,18 @@ func (s *Service) ApplyIncomeEvent(ctx context.Context, userID, requestID string
 //
 // This is portfolio tracking, not a tax lot engine: it assumes a single default
 // portfolio per user and per-symbol netting.
-func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error) {
+func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error) {
 	// A high explicit limit: the Postgres reader caps a non-positive limit at 100,
 	// but eligibility must consider the full history.
 	activities, err := s.repo.ListActivities(ctx, userID, 100000)
 	if err != nil {
-		return 0, err
+		return money.ZeroQuantity(), err
 	}
 	// Oldest-first so ratio adjustments apply to the quantity accumulated before
 	// the corporate action.
 	sortActivitiesOldestFirst(activities)
 	sym := normalizeSymbol(symbol)
-	var qty float64
+	qty := money.ZeroQuantity()
 	for _, a := range activities {
 		matches := instrumentID != "" && a.InstrumentID == instrumentID
 		if !matches && instrumentID == "" {
@@ -129,43 +131,59 @@ func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, sy
 		switch a.Type {
 		case ActivityBuy, ActivityOpeningBalance, ActivityReinvestedDividend:
 			if a.Quantity != nil {
-				qty += *a.Quantity
+				qty = qty.Add(*a.Quantity)
 			}
 		case ActivitySell:
 			if a.Quantity != nil {
-				qty -= *a.Quantity
+				qty = qty.Sub(*a.Quantity)
 			}
 		case ActivityStockSplit, ActivityStockDividend:
-			if f := ratioFactor(a); f > 0 {
-				qty *= f
+			if f := ratioFactor(a); f.Sign() > 0 {
+				qty = qty.MulRatio(f)
 			}
 		case ActivityReverseSplit:
-			if f := ratioFactor(a); f > 0 {
-				qty *= f
+			if f := ratioFactor(a); f.Sign() > 0 {
+				qty = qty.MulRatio(f)
 			}
 		case ActivityWriteOff:
-			qty = 0
+			qty = money.ZeroQuantity()
 		}
 	}
-	if qty < 0 {
-		qty = 0
+	if qty.Sign() < 0 {
+		qty = money.ZeroQuantity()
 	}
-	return qty, nil
+	return money.QuantizeQuantity(qty), nil
 }
 
 // ratioFactor extracts the multiplicative factor a split / stock-dividend
 // activity applied to quantity. Splits store numerator/denominator; a stock
 // dividend stores the additive ratio (factor = 1 + num/den).
-func ratioFactor(a Activity) float64 {
-	num, _ := a.Metadata["ratio_numerator"].(float64)
-	den, _ := a.Metadata["ratio_denominator"].(float64)
-	if num <= 0 || den <= 0 {
-		return 0
+func ratioFactor(a Activity) money.Ratio {
+	num, numOK := metadataRatio(a.Metadata["ratio_numerator"])
+	den, denOK := metadataRatio(a.Metadata["ratio_denominator"])
+	if !numOK || !denOK || num.Sign() <= 0 || den.Sign() <= 0 {
+		return money.ZeroRatio()
+	}
+	fraction, err := num.DivExact(den, money.ScaleQuantity)
+	if err != nil {
+		return money.ZeroRatio()
 	}
 	if a.Type == ActivityStockDividend {
-		return 1 + num/den
+		return money.MustRatio("1").Add(fraction)
 	}
-	return num / den
+	return fraction
+}
+
+func metadataRatio(value any) (money.Ratio, bool) {
+	switch v := value.(type) {
+	case string:
+		r, err := money.ParseRatio(v)
+		return r, err == nil
+	case float64: // legacy JSON metadata written before exact-decimal migration
+		return money.RatioFromFloat64(v), true
+	default:
+		return money.ZeroRatio(), false
+	}
 }
 
 func normalizeSymbol(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }

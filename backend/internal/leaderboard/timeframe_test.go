@@ -28,8 +28,8 @@ func TestParseTimeframe(t *testing.T) {
 func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(20, 120), // current index 120
-		"u2": summary(5, 105),  // current index 105
+		"u1": summary("20", "120"), // current index 120
+		"u2": summary("5", "105"),  // current index 105
 	}}
 	svc := NewService(users, sums)
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -38,8 +38,8 @@ func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 	store := NewInMemorySnapshotStore()
 	svc.SetSnapshotStore(store)
 	weekAgo := now.Add(-7 * 24 * time.Hour)
-	require.NoError(t, store.Record(context.Background(), "u1", 110, weekAgo))
-	require.NoError(t, store.Record(context.Background(), "u2", 104, weekAgo))
+	require.NoError(t, store.Record(context.Background(), "u1", testIndex("110"), weekAgo))
+	require.NoError(t, store.Record(context.Background(), "u2", testIndex("104"), weekAgo))
 
 	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
 	require.NoError(t, err)
@@ -57,7 +57,7 @@ func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 // user.
 func TestBuildTimeframe_ExcludesUserWhenSnapshotGapExceedsMaxAge(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("20", "120")}}
 	svc := NewService(users, sums)
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
@@ -67,7 +67,7 @@ func TestBuildTimeframe_ExcludesUserWhenSnapshotGapExceedsMaxAge(t *testing.T) {
 	// Timeframe1W cutoff = now - 7d. Record a snapshot 2 days further back
 	// than that — a 48h gap, beyond the 36h default tolerance.
 	tooOld := now.Add(-7 * 24 * time.Hour).Add(-2 * 24 * time.Hour)
-	require.NoError(t, store.Record(context.Background(), "u1", 110, tooOld))
+	require.NoError(t, store.Record(context.Background(), "u1", testIndex("110"), tooOld))
 
 	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
 	require.NoError(t, err)
@@ -78,7 +78,7 @@ func TestBuildTimeframe_ExcludesUserWhenSnapshotGapExceedsMaxAge(t *testing.T) {
 // a snapshot slightly before cutoff (within tolerance) must still count.
 func TestBuildTimeframe_IncludesUserWithinMaxAgeTolerance(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("20", "120")}}
 	svc := NewService(users, sums)
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
@@ -87,7 +87,7 @@ func TestBuildTimeframe_IncludesUserWithinMaxAgeTolerance(t *testing.T) {
 
 	// 1 hour before cutoff — well within the 36h default tolerance.
 	closeEnough := now.Add(-7 * 24 * time.Hour).Add(-time.Hour)
-	require.NoError(t, store.Record(context.Background(), "u1", 110, closeEnough))
+	require.NoError(t, store.Record(context.Background(), "u1", testIndex("110"), closeEnough))
 
 	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestBuildTimeframe_IncludesUserWithinMaxAgeTolerance(t *testing.T) {
 // configurable rather than hardcoded.
 func TestSetMaxSnapshotAge_OverridesDefault(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("20", "120")}}
 	svc := NewService(users, sums)
 	svc.SetMaxSnapshotAge(48 * time.Hour) // wider than the 36h default
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -109,7 +109,7 @@ func TestSetMaxSnapshotAge_OverridesDefault(t *testing.T) {
 	// A 40h gap: excluded by the 36h default, but allowed by the wider 48h
 	// tolerance configured above.
 	gap := now.Add(-7 * 24 * time.Hour).Add(-40 * time.Hour)
-	require.NoError(t, store.Record(context.Background(), "u1", 110, gap))
+	require.NoError(t, store.Record(context.Background(), "u1", testIndex("110"), gap))
 
 	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestSetMaxSnapshotAge_OverridesDefault(t *testing.T) {
 
 func TestBuildTimeframe_ExcludesUsersWithoutOldEnoughSnapshot(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(20, 120)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("20", "120")}}
 	svc := NewService(users, sums)
 	svc.SetSnapshotStore(NewInMemorySnapshotStore()) // empty history
 
@@ -130,8 +130,8 @@ func TestBuildTimeframe_ExcludesUsersWithoutOldEnoughSnapshot(t *testing.T) {
 func TestBuild_ExcludesPausedUsers(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": {RankedIndex: 130, RankedReturnPercentage: 30},
-		"u2": {RankedIndex: 150, RankedReturnPercentage: 50, Paused: true}, // empty portfolio
+		"u1": {RankedIndex: testIndex("130"), RankedReturnPercentage: testRatio("30")},
+		"u2": {RankedIndex: testIndex("150"), RankedReturnPercentage: testRatio("50"), Paused: true}, // empty portfolio
 	}}
 	svc := NewService(users, sums)
 
@@ -146,7 +146,7 @@ func TestBuildTimeframe_IgnoresPreEpochSnapshots(t *testing.T) {
 	epoch := now.Add(-3 * 24 * time.Hour) // ranking epoch 3 days ago
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": {RankedIndex: 120, RankedReturnPercentage: 20, TrackingStartedAt: epoch},
+		"u1": {RankedIndex: testIndex("120"), RankedReturnPercentage: testRatio("20"), TrackingStartedAt: epoch},
 	}}
 	svc := NewService(users, sums)
 	svc.now = func() time.Time { return now }
@@ -154,7 +154,7 @@ func TestBuildTimeframe_IgnoresPreEpochSnapshots(t *testing.T) {
 	store := NewInMemorySnapshotStore()
 	svc.SetSnapshotStore(store)
 	// Only a legacy snapshot from before the epoch exists (a week ago).
-	require.NoError(t, store.Record(context.Background(), "u1", 300, now.Add(-7*24*time.Hour)))
+	require.NoError(t, store.Record(context.Background(), "u1", testIndex("300"), now.Add(-7*24*time.Hour)))
 
 	board, err := svc.BuildTimeframe(context.Background(), Timeframe1W)
 	require.NoError(t, err)
@@ -164,8 +164,8 @@ func TestBuildTimeframe_IgnoresPreEpochSnapshots(t *testing.T) {
 func TestBuild_EnrichesPublicProfilesOnly(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(10, 110),
-		"u2": summary(5, 105),
+		"u1": summary("10", "110"),
+		"u2": summary("5", "105"),
 	}}
 	svc := NewService(users, sums)
 	svc.SetProfileProvider(fakeProfiles{byUser: map[string]ProfilePublicInfo{
@@ -193,7 +193,7 @@ func TestBuild_EnrichesPublicProfilesOnly(t *testing.T) {
 
 func TestBuild_WeightsHiddenWhenShowWeightsFalse(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(10, 110)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("10", "110")}}
 	svc := NewService(users, sums)
 	svc.SetProfileProvider(fakeProfiles{byUser: map[string]ProfilePublicInfo{
 		"u1": {Handle: "alpha", StrategyTag: "growth", IsPublic: true, ShowWeights: false,
@@ -211,9 +211,9 @@ func TestBuild_WeightsHiddenWhenShowWeightsFalse(t *testing.T) {
 func TestUserStanding(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta"), user("u3", "Gamma")}}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary(8, 108),
-		"u2": summary(12, 112),
-		"u3": summary(-3, 97),
+		"u1": summary("8", "108"),
+		"u2": summary("12", "112"),
+		"u3": summary("-3", "97"),
 	}}
 	svc := NewService(users, sums)
 
@@ -242,7 +242,7 @@ func TestUserStanding(t *testing.T) {
 
 func TestUserStanding_WindowedIneligibleWhenHistoryMissing(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(8, 108)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("8", "108")}}
 	svc := NewService(users, sums)
 	svc.SetSnapshotStore(NewInMemorySnapshotStore())
 
@@ -256,11 +256,11 @@ func TestUserStanding_WindowedIneligibleWhenHistoryMissing(t *testing.T) {
 func TestUserStanding_PausedOverridesAnyCachedRankAndPreservesIndex(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	paused := RankedPerformance{
-		RankedIndex: 112, RankedReturnPercentage: 12, Paused: true,
+		RankedIndex: testIndex("112"), RankedReturnPercentage: testRatio("12"), Paused: true,
 	}
 	svc := NewService(users, fakeRanked{byUser: map[string]RankedPerformance{"u1": paused}})
 	cache := newTestCache(t)
-	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", 12))
+	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", testRatio("12")))
 	svc.SetCache(cache)
 
 	st, err := svc.UserStanding(context.Background(), "u1", TimeframeAll)
@@ -275,11 +275,11 @@ func TestUserStanding_PausedOverridesAnyCachedRankAndPreservesIndex(t *testing.T
 func TestGetUserRank_PausedStateEvictsStaleCachedRank(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	paused := RankedPerformance{
-		RankedIndex: 112, RankedReturnPercentage: 12, Paused: true,
+		RankedIndex: testIndex("112"), RankedReturnPercentage: testRatio("12"), Paused: true,
 	}
 	svc := NewService(users, fakeRanked{byUser: map[string]RankedPerformance{"u1": paused}})
 	cache := newTestCache(t)
-	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", 12))
+	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", testRatio("12")))
 	svc.SetCache(cache)
 
 	rank, err := svc.GetUserRank(context.Background(), "u1")
@@ -292,7 +292,7 @@ func TestGetUserRank_PausedStateEvictsStaleCachedRank(t *testing.T) {
 
 func TestRefreshCache_DoesNotWriteIndependentSnapshotHistory(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
-	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary(15, 115)}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{"u1": summary("15", "115")}}
 	svc := NewService(users, sums)
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
@@ -306,5 +306,5 @@ func TestRefreshCache_DoesNotWriteIndependentSnapshotHistory(t *testing.T) {
 	idx, _, found, err := store.IndexAtOrBefore(context.Background(), "u1", now, time.Time{})
 	require.NoError(t, err)
 	assert.False(t, found, "canonical ranked-snapshot worker owns history writes")
-	assert.Zero(t, idx)
+	assert.Equal(t, 0, idx.Cmp(testIndex("0")))
 }

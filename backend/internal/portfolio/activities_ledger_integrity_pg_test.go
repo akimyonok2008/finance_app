@@ -106,17 +106,17 @@ func TestPG_ReturnOfCapitalPersistsAndReconciles(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: 1000})
+	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("1000")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "T", AssetType: AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "T", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	_, err = svc.RecordIncome(ctx, userID, "div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "T", Currency: "USD", Amount: 20,
+		Subtype: IncomeCashDividend, Symbol: "T", Currency: "USD", Amount: testAmount("20"),
 	})
 	require.NoError(t, err)
 	_, err = svc.RecordIncome(ctx, userID, "roc", IncomeInput{
-		Subtype: IncomeReturnOfCapitalSub, Symbol: "T", Currency: "USD", Amount: 50,
+		Subtype: IncomeReturnOfCapitalSub, Symbol: "T", Currency: "USD", Amount: testAmount("50"),
 	})
 	require.NoError(t, err)
 
@@ -144,9 +144,9 @@ func TestPG_StockDividendZeroGrossPersistsAndPreservesBasis(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: 5000})
+	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("5000")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "DIV", AssetType: AssetTypeStock, Quantity: 10})
+	_, err = svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "DIV", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	before, err := svc.Summary(ctx, userID)
@@ -154,7 +154,7 @@ func TestPG_StockDividendZeroGrossPersistsAndPreservesBasis(t *testing.T) {
 
 	res, err := svc.Mutate(ctx, MutationRequest{
 		Kind: MutationStockDividend, UserID: userID, RequestID: "sd",
-		Income: IncomeInput{Symbol: "DIV", StockRatioNum: 1, StockRatioDen: 10},
+		Income: IncomeInput{Symbol: "DIV", StockRatioNum: testRatio("1"), StockRatioDen: testRatio("10")},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
@@ -183,22 +183,22 @@ func TestPG_PartialAndFinalSaleShareOneClosedEpisode(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	buyRes, err := svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "NFLX", AssetType: AssetTypeStock, Quantity: 10})
+	buyRes, err := svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "NFLX", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 	episodeID := buyRes.Position.ID
 
 	quotes.Set("NFLX", 110, "USD")
 	partial, err := svc.SellPosition(ctx, userID, "sell1", SellInput{
-		PositionID: episodeID, Symbol: "NFLX", Quantity: 4, ExecutionPrice: 110,
+		PositionID: episodeID, Symbol: "NFLX", Quantity: testQuantity("4"), ExecutionPrice: testPrice("110"),
 	})
 	require.NoError(t, err)
 	require.Nil(t, partial.Closed)
 
 	quotes.Set("NFLX", 130, "USD")
 	final, err := svc.SellPosition(ctx, userID, "sell2", SellInput{
-		PositionID: episodeID, Symbol: "NFLX", Quantity: 6, ExecutionPrice: 130,
+		PositionID: episodeID, Symbol: "NFLX", Quantity: testQuantity("6"), ExecutionPrice: testPrice("130"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, final.Closed)
@@ -233,19 +233,19 @@ func TestPG_RebuyAfterClosureCreatesNewEpisode(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	firstBuy, err := svc.BuyPosition(ctx, userID, "buy1", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: 5})
+	firstBuy, err := svc.BuyPosition(ctx, userID, "buy1", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: testQuantity("5")})
 	require.NoError(t, err)
 
 	quotes.Set("GME", 25, "USD")
 	closeRes, err := svc.SellPosition(ctx, userID, "sellall", SellInput{
-		PositionID: firstBuy.Position.ID, Symbol: "GME", Quantity: 5, ExecutionPrice: 25,
+		PositionID: firstBuy.Position.ID, Symbol: "GME", Quantity: testQuantity("5"), ExecutionPrice: testPrice("25"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, closeRes.Closed)
 
-	secondBuy, err := svc.BuyPosition(ctx, userID, "buy2", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: 3})
+	secondBuy, err := svc.BuyPosition(ctx, userID, "buy2", BuyInput{Symbol: "GME", AssetType: AssetTypeStock, Quantity: testQuantity("3")})
 	require.NoError(t, err)
 	assert.NotEqual(t, firstBuy.Position.ID, secondBuy.Position.ID)
 }
@@ -261,13 +261,13 @@ func TestPG_SaleFeeIdempotentRetryDoesNotDuplicate(t *testing.T) {
 	svc := NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 
-	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "dep", CashFlowInput{Currency: "USD", Amount: testAmount("10000")})
 	require.NoError(t, err)
-	buyRes, err := svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	buyRes, err := svc.BuyPosition(ctx, userID, "buy", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
 
 	quotes.Set("AAPL", 120, "USD")
-	sellInput := SellInput{PositionID: buyRes.Position.ID, Symbol: "AAPL", Quantity: 10, ExecutionPrice: 120, Fee: 15}
+	sellInput := SellInput{PositionID: buyRes.Position.ID, Symbol: "AAPL", Quantity: testQuantity("10"), ExecutionPrice: testPrice("120"), Fee: testAmount("15")}
 	first, err := svc.SellPosition(ctx, userID, "sell-retry", sellInput)
 	require.NoError(t, err)
 	require.NotNil(t, first.Closed)

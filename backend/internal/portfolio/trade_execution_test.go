@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 type fixedTrustedBoundary struct{ at time.Time }
@@ -21,10 +23,10 @@ func (b fixedTrustedBoundary) LatestTrustedSnapshotAt(context.Context, string, s
 // previews, idempotency, atomicity, and the conservative historical-transaction
 // policy.
 
-func seedCash(t *testing.T, svc *Service, user, currency string, amount float64) {
+func seedCash(t *testing.T, svc *Service, user, currency, amount string) {
 	t.Helper()
 	_, err := svc.DepositCash(ctx(), user, "seed-"+user+"-"+currency, CashFlowInput{
-		Currency: currency, Amount: amount,
+		Currency: currency, Amount: testAmount(amount),
 	})
 	require.NoError(t, err)
 }
@@ -67,7 +69,7 @@ func sameDayBackdate(ago time.Duration) time.Time {
 	return when
 }
 
-func cashOf(t *testing.T, repo *InMemoryRepository, user, currency string) float64 {
+func cashOf(t *testing.T, repo *InMemoryRepository, user, currency string) money.Amount {
 	t.Helper()
 	balances, err := repo.ListCashBalances(ctx(), user)
 	require.NoError(t, err)
@@ -76,7 +78,7 @@ func cashOf(t *testing.T, repo *InMemoryRepository, user, currency string) float
 			return b.Amount
 		}
 	}
-	return 0
+	return testAmount("0")
 }
 
 // 1. Buy with no cash at all → the whole purchase is funded automatically.
@@ -84,7 +86,7 @@ func TestBuy_NoCash_FullAutomaticFunding(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 
 	res, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, Fee: 5,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), Fee: testAmount("5"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res.Activity)
@@ -93,7 +95,7 @@ func TestBuy_NoCash_FullAutomaticFunding(t *testing.T) {
 	funding := autoFundingActivities(list)
 	require.Len(t, funding, 1)
 	// 2 x 430 + 5 fee = 865, none of it available.
-	assert.InDelta(t, 865.0, funding[0].GrossAmount, 1e-9)
+	assertAmountEqual(t, "865", funding[0].GrossAmount)
 	assert.Equal(t, "USD", funding[0].Currency, "funding uses the instrument's quote currency")
 	assert.Equal(t, true, funding[0].Metadata["automatic"])
 
@@ -115,10 +117,10 @@ func TestBuy_NoCash_FullAutomaticFunding(t *testing.T) {
 	assert.NotEmpty(t, buy.Metadata["recorded_at"])
 
 	// Cash is exactly drained, never negative.
-	assert.InDelta(t, 0.0, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertAmountEqual(t, "0", cashOf(t, repo, "u1", "USD"))
 
 	// Ranked: the funding and allocation are neutral; only the fee is a return.
-	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore,
+	assert.Less(t, res.RankedIndexAfter.Cmp(res.RankedIndexBefore), 0,
 		"the purchase fee is the only return-bearing part of the buy")
 }
 
@@ -126,61 +128,61 @@ func TestBuy_NoCash_FullAutomaticFunding(t *testing.T) {
 func TestBuy_NoCashNoFee_IsRankedNeutral(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	res, err := svc.BuyPosition(ctx(), "u1", "buy-neutral", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, res.RankedIndexBefore, res.RankedIndexAfter, 1e-9)
+	assertIndexValuesEqual(t, res.RankedIndexBefore, res.RankedIndexAfter)
 }
 
 // 2. Buy with partial cash → existing cash is used first, the rest is funded.
 func TestBuy_PartialCash_SplitsCorrectly(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 500)
+	seedCash(t, svc, "u1", "USD", "500")
 
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-partial", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, // 860 required
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), // 860 required
 	})
 	require.NoError(t, err)
 
 	funding := autoFundingActivities(activitiesOf(t, repo, "u1"))
 	require.Len(t, funding, 1)
-	assert.InDelta(t, 360.0, funding[0].GrossAmount, 1e-9, "860 required - 500 available")
-	assert.InDelta(t, 0.0, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertAmountEqual(t, "360", funding[0].GrossAmount, "860 required - 500 available")
+	assertAmountEqual(t, "0", cashOf(t, repo, "u1", "USD"))
 }
 
 // 3. Buy with sufficient cash → no funding activity at all.
 func TestBuy_SufficientCash_NoFundingActivity(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 2000)
+	seedCash(t, svc, "u1", "USD", "2000")
 
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-funded", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
 
 	list := activitiesOf(t, repo, "u1")
 	assert.Empty(t, autoFundingActivities(list))
-	assert.InDelta(t, 1140.0, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertAmountEqual(t, "1140", cashOf(t, repo, "u1", "USD"))
 }
 
 // Entered execution price and fee are honoured verbatim, with user provenance.
 func TestBuy_UserEnteredExecutionDetails(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 5000)
+	seedCash(t, svc, "u1", "USD", "5000")
 	when := sameDayBackdate(90 * time.Minute)
 
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-entered", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4,
-		ExecutionPrice: 400, Fee: 12, EffectiveAt: &when,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("4"),
+		ExecutionPrice: testPrice("400"), Fee: testAmount("12"), EffectiveAt: &when,
 	})
 	require.NoError(t, err)
 
 	buy, ok := findActivity(activitiesOf(t, repo, "u1"), ActivityBuy)
 	require.True(t, ok)
 	require.NotNil(t, buy.UnitPrice)
-	assert.InDelta(t, 400.0, *buy.UnitPrice, 1e-9)
-	assert.InDelta(t, 1600.0, buy.GrossAmount, 1e-9)
-	assert.InDelta(t, 12.0, buy.FeeAmount, 1e-9)
+	assertPriceEqual(t, "400", *buy.UnitPrice)
+	assertAmountEqual(t, "1600", buy.GrossAmount)
+	assertAmountEqual(t, "12", buy.FeeAmount)
 	assert.Equal(t, PriceSourceUserRecorded, buy.Metadata["execution_price_source"])
 	assert.Equal(t, FeeSourceUserRecorded, buy.Metadata["fee_source"])
 	assert.True(t, buy.OccurredAt.Equal(when), "effective_at is the real-world trade time")
@@ -190,50 +192,50 @@ func TestBuy_UserEnteredExecutionDetails(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 403.0, positions[0].AverageBuyPrice, 1e-9)
-	assert.InDelta(t, 3388.0, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertPriceEqual(t, "403", positions[0].AverageBuyPrice)
+	assertAmountEqual(t, "3388", cashOf(t, repo, "u1", "USD"))
 }
 
 // 7. Weighted-average basis across two buys (fees included).
 func TestBuy_WeightedAverageBasisAcrossTwoBuys(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 10000)
+	seedCash(t, svc, "u1", "USD", "10000")
 
 	_, err := svc.BuyPosition(ctx(), "u1", "wa-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx(), "u1", "wa-2", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 3, ExecutionPrice: 500, Fee: 10,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("3"), ExecutionPrice: testPrice("500"), Fee: testAmount("10"),
 	})
 	require.NoError(t, err)
 
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 5.0, positions[0].Quantity, 1e-9)
+	assertQuantityEqual(t, "5", positions[0].Quantity)
 	// (2*400 + 3*500 + 10) / 5 = 462
-	assert.InDelta(t, 462.0, positions[0].AverageBuyPrice, 1e-9)
+	assertPriceEqual(t, "462", positions[0].AverageBuyPrice)
 }
 
 // 8. A rebuy after a full sale opens a NEW episode via the new buy path.
 func TestBuy_RebuyAfterCloseCreatesNewEpisode(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 10000)
+	seedCash(t, svc, "u1", "USD", "10000")
 
 	first, err := svc.BuyPosition(ctx(), "u1", "ep-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
 	firstEpisode := first.Position.ID
 
 	_, err = svc.SellPosition(ctx(), "u1", "ep-sell", SellInput{
-		PositionID: firstEpisode, Quantity: 2,
+		PositionID: firstEpisode, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
 
 	second, err := svc.BuyPosition(ctx(), "u1", "ep-2", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	assert.NotEqual(t, firstEpisode, second.Position.ID, "a rebuy starts a new episode")
@@ -248,7 +250,7 @@ func TestBuy_RebuyAfterCloseCreatesNewEpisode(t *testing.T) {
 // 4. Buy preview is non-mutating and reports the funding split correctly.
 func TestBuyPreview_NonMutatingAndCorrect(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 500)
+	seedCash(t, svc, "u1", "USD", "500")
 
 	before := activitiesOf(t, repo, "u1")
 	beforeCash := cashOf(t, repo, "u1", "USD")
@@ -257,7 +259,7 @@ func TestBuyPreview_NonMutatingAndCorrect(t *testing.T) {
 	beforePortfolio, err := repo.GetPortfolioByUser(ctx(), "u1")
 	require.NoError(t, err)
 
-	in := BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, Fee: 5}
+	in := BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), Fee: testAmount("5")}
 	first, err := svc.PreviewBuy(ctx(), "u1", in)
 	require.NoError(t, err)
 	second, err := svc.PreviewBuy(ctx(), "u1", in)
@@ -280,7 +282,7 @@ func TestBuyPreview_NonMutatingAndCorrect(t *testing.T) {
 	first.EffectiveAt, second.EffectiveAt = "", ""
 	assert.Equal(t, first, second)
 	assert.Equal(t, len(before), len(activitiesOf(t, repo, "u1")))
-	assert.InDelta(t, beforeCash, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertAmountValuesEqual(t, beforeCash, cashOf(t, repo, "u1", "USD"))
 	afterPositions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	assert.Equal(t, len(beforePositions), len(afterPositions))
@@ -292,14 +294,14 @@ func TestBuyPreview_NonMutatingAndCorrect(t *testing.T) {
 
 func TestBuyPreview_ExtendsExistingEpisode(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 10000)
+	seedCash(t, svc, "u1", "USD", "10000")
 	res, err := svc.BuyPosition(ctx(), "u1", "pv-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
 
 	preview, err := svc.PreviewBuy(ctx(), "u1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 500,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("500"),
 	})
 	require.NoError(t, err)
 	assert.False(t, preview.CreatesNewEpisode)
@@ -314,11 +316,11 @@ func TestBuy_IdempotentRetryHasSingleEffect(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 
 	first, err := svc.BuyPosition(ctx(), "u1", "idem-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, Fee: 5,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), Fee: testAmount("5"),
 	})
 	require.NoError(t, err)
 	retry, err := svc.BuyPosition(ctx(), "u1", "idem-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, Fee: 5,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), Fee: testAmount("5"),
 	})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
@@ -341,22 +343,22 @@ func TestBuy_IdempotentRetryHasSingleEffect(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 2.0, positions[0].Quantity, 1e-9)
+	assertQuantityEqual(t, "2", positions[0].Quantity)
 }
 
 func TestSell_IdempotentRetryHasSingleEffect(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "sell-idem-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("4"),
 	})
 	require.NoError(t, err)
 
 	first, err := svc.SellPosition(ctx(), "u1", "idem-sell", SellInput{
-		PositionID: buy.Position.ID, Quantity: 2, Fee: 3,
+		PositionID: buy.Position.ID, Quantity: testQuantity("2"), Fee: testAmount("3"),
 	})
 	require.NoError(t, err)
 	retry, err := svc.SellPosition(ctx(), "u1", "idem-sell", SellInput{
-		PositionID: buy.Position.ID, Quantity: 2, Fee: 3,
+		PositionID: buy.Position.ID, Quantity: testQuantity("2"), Fee: testAmount("3"),
 	})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
@@ -373,7 +375,7 @@ func TestSell_IdempotentRetryHasSingleEffect(t *testing.T) {
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 2.0, positions[0].Quantity, 1e-9)
+	assertQuantityEqual(t, "2", positions[0].Quantity)
 }
 
 // 6. Atomicity: a failure partway through a multi-activity automatically-funded
@@ -390,7 +392,7 @@ func TestBuy_RollbackCommitsNothing(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			svc, repo, _, _ := newTxTestService()
-			seedCash(t, svc, "u1", "USD", 100)
+			seedCash(t, svc, "u1", "USD", "100")
 			cashBefore := cashOf(t, repo, "u1", "USD")
 			activitiesBefore := len(activitiesOf(t, repo, "u1"))
 			pfBefore, err := repo.GetPortfolioByUser(ctx(), "u1")
@@ -398,7 +400,7 @@ func TestBuy_RollbackCommitsNothing(t *testing.T) {
 
 			repo.SetFaults(faults)
 			_, err = svc.BuyPosition(ctx(), "u1", "atomic-buy", BuyInput{
-				Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, Fee: 5,
+				Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), Fee: testAmount("5"),
 			})
 			require.Error(t, err)
 			repo.SetFaults(Faults{})
@@ -406,7 +408,7 @@ func TestBuy_RollbackCommitsNothing(t *testing.T) {
 			positions, err := svc.ListPositions(ctx(), "u1")
 			require.NoError(t, err)
 			assert.Empty(t, positions, "no position committed")
-			assert.InDelta(t, cashBefore, cashOf(t, repo, "u1", "USD"), 1e-9, "no cash committed")
+			assertAmountValuesEqual(t, cashBefore, cashOf(t, repo, "u1", "USD"), "no cash committed")
 			assert.Equal(t, activitiesBefore, len(activitiesOf(t, repo, "u1")),
 				"no activity (buy, fee, or automatic funding) committed")
 			pfAfter, err := repo.GetPortfolioByUser(ctx(), "u1")
@@ -421,7 +423,7 @@ func TestSell_UserEnteredExecutionDetails(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	bought := sameDayBackdate(2 * time.Hour)
 	_, err := svc.BuyPosition(ctx(), "u1", "s-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("4"), ExecutionPrice: testPrice("400"),
 		EffectiveAt: &bought,
 	})
 	require.NoError(t, err)
@@ -429,7 +431,7 @@ func TestSell_UserEnteredExecutionDetails(t *testing.T) {
 	when := sameDayBackdate(30 * time.Minute)
 
 	_, err = svc.SellPosition(ctx(), "u1", "s-sell", SellInput{
-		Symbol: "MSFT", Quantity: 2, ExecutionPrice: 450, Fee: 7, EffectiveAt: &when,
+		Symbol: "MSFT", Quantity: testQuantity("2"), ExecutionPrice: testPrice("450"), Fee: testAmount("7"), EffectiveAt: &when,
 	})
 	require.NoError(t, err)
 
@@ -439,22 +441,22 @@ func TestSell_UserEnteredExecutionDetails(t *testing.T) {
 	assert.Equal(t, FeeSourceUserRecorded, sell.Metadata["fee_source"])
 	assert.True(t, sell.OccurredAt.Equal(when))
 	// gross = 2*450 = 900; net = 900 - 7 = 893; basis = 2*400 = 800; P&L = 93.
-	assert.InDelta(t, 900.0, sell.GrossAmount, 1e-9)
-	assert.InDelta(t, 893.0, sell.NetAmount, 1e-9)
+	assertAmountEqual(t, "900", sell.GrossAmount)
+	assertAmountEqual(t, "893", sell.NetAmount)
 	require.NotNil(t, sell.RealizedGainLossBase)
-	assert.InDelta(t, 93.0, *sell.RealizedGainLossBase, 1e-9)
-	assert.InDelta(t, cashAfterBuy+893.0, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertAmountEqual(t, "93", *sell.RealizedGainLossBase)
+	assertAmountValuesEqual(t, cashAfterBuy.Add(testAmount("893")), cashOf(t, repo, "u1", "USD"))
 }
 
 // 10. Sell with no entered price falls back to the provider estimate.
 func TestSell_DefaultPriceIsLabelledProviderEstimate(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "est-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
 	_, err = svc.SellPosition(ctx(), "u1", "est-sell", SellInput{
-		PositionID: buy.Position.ID, Quantity: 1,
+		PositionID: buy.Position.ID, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 
@@ -463,26 +465,26 @@ func TestSell_DefaultPriceIsLabelledProviderEstimate(t *testing.T) {
 	assert.Equal(t, PriceSourceProviderEstimate, sell.Metadata["execution_price_source"])
 	assert.Equal(t, FeeSourceDefaultZero, sell.Metadata["fee_source"])
 	require.NotNil(t, sell.UnitPrice)
-	assert.InDelta(t, 430.0, *sell.UnitPrice, 1e-9)
+	assertPriceEqual(t, "430", *sell.UnitPrice)
 }
 
 // 11. Selling every remaining unit closes the episode with no explicit flag.
 func TestSell_FullSaleAutoDetectsClosure(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "close-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 3,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("3"),
 	})
 	require.NoError(t, err)
 
 	partial, err := svc.SellPosition(ctx(), "u1", "close-sell-1", SellInput{
-		PositionID: buy.Position.ID, Quantity: 1,
+		PositionID: buy.Position.ID, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 	assert.Nil(t, partial.Closed, "a partial sale does not close the episode")
 
 	// One and the same sell action; closure is inferred from the remainder.
 	full, err := svc.SellPosition(ctx(), "u1", "close-sell-2", SellInput{
-		PositionID: buy.Position.ID, Quantity: 2,
+		PositionID: buy.Position.ID, Quantity: testQuantity("2"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, full.Closed, "selling the remainder closes the episode automatically")
@@ -499,13 +501,13 @@ func TestSell_FullSaleAutoDetectsClosure(t *testing.T) {
 func TestSellPreview_ReportsProvenanceAndClosure(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "sp-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
 	pfBefore, err := repo.GetPortfolioByUser(ctx(), "u1")
 	require.NoError(t, err)
 
-	in := SellInput{PositionID: buy.Position.ID, Quantity: 2, ExecutionPrice: 450, Fee: 10}
+	in := SellInput{PositionID: buy.Position.ID, Quantity: testQuantity("2"), ExecutionPrice: testPrice("450"), Fee: testAmount("10")}
 	first, err := svc.PreviewSell(ctx(), "u1", in)
 	require.NoError(t, err)
 	second, err := svc.PreviewSell(ctx(), "u1", in)
@@ -540,16 +542,16 @@ func TestSellPreview_ReportsProvenanceAndClosure(t *testing.T) {
 func TestSellPreview_ResolvesBySymbolLikeTheCommittedSell(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	buy, err := svc.BuyPosition(ctx(), "u1", "sp-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
 
 	bySymbol, err := svc.PreviewSell(ctx(), "u1", SellInput{
-		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 450, Fee: 10,
+		Symbol: "MSFT", Quantity: testQuantity("1"), ExecutionPrice: testPrice("450"), Fee: testAmount("10"),
 	})
 	require.NoError(t, err, "a symbol-only preview must resolve the open position, not report it missing")
 	byID, err := svc.PreviewSell(ctx(), "u1", SellInput{
-		PositionID: buy.Position.ID, Quantity: 1, ExecutionPrice: 450, Fee: 10,
+		PositionID: buy.Position.ID, Quantity: testQuantity("1"), ExecutionPrice: testPrice("450"), Fee: testAmount("10"),
 	})
 	require.NoError(t, err)
 
@@ -559,7 +561,7 @@ func TestSellPreview_ResolvesBySymbolLikeTheCommittedSell(t *testing.T) {
 	// The committed sell accepts the identical symbol-only request and must
 	// resolve to the same position the preview just forecast.
 	committed, err := svc.SellPosition(ctx(), "u1", "sp-sell-by-symbol", SellInput{
-		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 450, Fee: 10,
+		Symbol: "MSFT", Quantity: testQuantity("1"), ExecutionPrice: testPrice("450"), Fee: testAmount("10"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, committed.Position)
@@ -571,7 +573,7 @@ func TestSellPreview_ResolvesBySymbolLikeTheCommittedSell(t *testing.T) {
 // than some other error once the fallback lookup is in place.
 func TestSellPreview_SymbolNotHeldReturnsPositionNotFound(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
-	_, err := svc.PreviewSell(ctx(), "u1", SellInput{Symbol: "MSFT", Quantity: 1})
+	_, err := svc.PreviewSell(ctx(), "u1", SellInput{Symbol: "MSFT", Quantity: testQuantity("1")})
 	assert.ErrorIs(t, err, ErrPositionNotFound)
 }
 
@@ -583,25 +585,25 @@ func TestHistorical_SellRejectedWhenHistoricalQuantityInsufficient(t *testing.T)
 	// 5 units bought 10 days ago...
 	early := base
 	_, err := svc.BuyPosition(ctx(), "u1", "hist-buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 5, ExecutionPrice: 400, EffectiveAt: &early,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("5"), ExecutionPrice: testPrice("400"), EffectiveAt: &early,
 	})
 	require.NoError(t, err)
 	// ...and 20 more bought today.
 	_, err = svc.BuyPosition(ctx(), "u1", "hist-buy-2", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 20,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("20"),
 	})
 	require.NoError(t, err)
 
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	require.InDelta(t, 25.0, positions[0].Quantity, 1e-9)
+	requireQuantityEqual(t, "25", positions[0].Quantity)
 
 	// Backdated to a day when only 5 units were held: selling 10 must fail even
 	// though 25 are held right now.
 	backdated := base.Add(24 * time.Hour)
 	_, err = svc.SellPosition(ctx(), "u1", "hist-sell-bad", SellInput{
-		PositionID: positions[0].ID, Quantity: 10, ExecutionPrice: 400, EffectiveAt: &backdated,
+		PositionID: positions[0].ID, Quantity: testQuantity("10"), ExecutionPrice: testPrice("400"), EffectiveAt: &backdated,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
@@ -610,7 +612,7 @@ func TestHistorical_SellRejectedWhenHistoricalQuantityInsufficient(t *testing.T)
 	// Nothing was mutated by the rejection.
 	after, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, 25.0, after[0].Quantity, 1e-9)
+	assertQuantityEqual(t, "25", after[0].Quantity)
 	sells := 0
 	for _, a := range activitiesOf(t, repo, "u1") {
 		if a.Type == ActivitySell {
@@ -628,14 +630,14 @@ func TestHistorical_BuyBeforeTrustedBoundaryIsRejected(t *testing.T) {
 
 	// Establish a trusted ranked checkpoint by mutating now.
 	_, err := svc.BuyPosition(ctx(), "u1", "boundary-setup", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 1,
+		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("1"),
 	})
 	require.NoError(t, err)
 
 	// No "new symbol" exception is permitted before trusted history.
 	when := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	_, err = svc.BuyPosition(ctx(), "u1", "hist-rejected", BuyInput{
-		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 100, EffectiveAt: &when,
+		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("100"), EffectiveAt: &when,
 	})
 	require.ErrorIs(t, err, ErrHistoricalRankedConflict)
 	for _, a := range activitiesOf(t, repo, "u1") {
@@ -652,7 +654,7 @@ func TestHistorical_TransactionCorruptingRankedHistoryIsRejected(t *testing.T) {
 	svc.Coordinator().SetTrustedSnapshotBoundary(fixedTrustedBoundary{at: time.Now().UTC()})
 
 	_, err := svc.BuyPosition(ctx(), "u1", "corrupt-setup", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("4"),
 	})
 	require.NoError(t, err)
 
@@ -673,7 +675,7 @@ func TestHistorical_TransactionCorruptingRankedHistoryIsRejected(t *testing.T) {
 	// already captured.
 	when := time.Now().UTC().Add(-7 * 24 * time.Hour)
 	_, err = svc.BuyPosition(ctx(), "u1", "corrupt-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 400, EffectiveAt: &when,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), ExecutionPrice: testPrice("400"), EffectiveAt: &when,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalRankedConflict)
 	assert.Contains(t, err.Error(), "requires reconciliation")
@@ -703,7 +705,7 @@ func TestHistorical_BackdatedSaleBeforeBoundaryIsRejected(t *testing.T) {
 
 	bought := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	buy, err := svc.BuyPosition(ctx(), "u1", "hist-sale-buy", BuyInput{
-		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: 10, ExecutionPrice: 100, EffectiveAt: &bought,
+		Symbol: "NVDA", AssetType: AssetTypeStock, Quantity: testQuantity("10"), ExecutionPrice: testPrice("100"), EffectiveAt: &bought,
 	})
 	require.NoError(t, err)
 	svc.Coordinator().SetTrustedSnapshotBoundary(fixedTrustedBoundary{at: time.Now().UTC()})
@@ -715,7 +717,7 @@ func TestHistorical_BackdatedSaleBeforeBoundaryIsRejected(t *testing.T) {
 	// problem — it is refused purely because it predates trusted ranked history.
 	when := time.Now().UTC().Add(-5 * 24 * time.Hour)
 	_, err = svc.SellPosition(ctx(), "u1", "hist-sale", SellInput{
-		PositionID: buy.Position.ID, Quantity: 1, ExecutionPrice: 100, EffectiveAt: &when,
+		PositionID: buy.Position.ID, Quantity: testQuantity("1"), ExecutionPrice: testPrice("100"), EffectiveAt: &when,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalRankedConflict)
 
@@ -724,14 +726,14 @@ func TestHistorical_BackdatedSaleBeforeBoundaryIsRejected(t *testing.T) {
 	assert.Equal(t, pfBefore.Version, pfAfter.Version)
 	positions, err := svc.ListPositions(ctx(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, 10.0, positions[0].Quantity, 1e-9)
+	assertQuantityEqual(t, "10", positions[0].Quantity)
 }
 
 func TestHistorical_BackdatedTradeRequiresExplicitExecutionPrice(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	when := time.Now().UTC().Add(-24 * time.Hour)
 	_, err := svc.BuyPosition(ctx(), "u1", "historical-price-required", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, EffectiveAt: &when,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), EffectiveAt: &when,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalExecutionPriceRequired)
 }
@@ -742,22 +744,22 @@ func TestHistorical_SaleQuantityIsScopedToSelectedEpisode(t *testing.T) {
 	secondAt := firstAt.Add(24 * time.Hour)
 	first, err := svc.BuyPosition(ctx(), "u1", "episode-a", BuyInput{
 		Symbol: "MSFT", InstrumentID: "instrument-a", AssetType: AssetTypeStock,
-		Quantity: 2, ExecutionPrice: 400, EffectiveAt: &firstAt,
+		Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"), EffectiveAt: &firstAt,
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx(), "u1", "episode-b", BuyInput{
 		Symbol: "MSFT", InstrumentID: "instrument-b", AssetType: AssetTypeStock,
-		Quantity: 100, ExecutionPrice: 400, EffectiveAt: &secondAt,
+		Quantity: testQuantity("100"), ExecutionPrice: testPrice("400"), EffectiveAt: &secondAt,
 	})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx(), "u1", "episode-a-later", BuyInput{
 		Symbol: "MSFT", InstrumentID: "instrument-a", AssetType: AssetTypeStock,
-		Quantity: 5, ExecutionPrice: 400,
+		Quantity: testQuantity("5"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
 	saleAt := secondAt.Add(time.Hour)
 	_, err = svc.SellPosition(ctx(), "u1", "episode-a-sale", SellInput{
-		PositionID: first.Position.ID, Quantity: 3, ExecutionPrice: 400, EffectiveAt: &saleAt,
+		PositionID: first.Position.ID, Quantity: testQuantity("3"), ExecutionPrice: testPrice("400"), EffectiveAt: &saleAt,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
 }
@@ -766,13 +768,13 @@ func TestHistorical_SaleBeforeSelectedEpisodeOpenedIsRejected(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	openedAt := time.Now().UTC().Add(-5 * 24 * time.Hour)
 	buy, err := svc.BuyPosition(ctx(), "u1", "episode-open", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
-		ExecutionPrice: 400, EffectiveAt: &openedAt,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
+		ExecutionPrice: testPrice("400"), EffectiveAt: &openedAt,
 	})
 	require.NoError(t, err)
 	saleAt := openedAt.Add(-time.Hour)
 	_, err = svc.SellPosition(ctx(), "u1", "before-open", SellInput{
-		PositionID: buy.Position.ID, Quantity: 1, ExecutionPrice: 400, EffectiveAt: &saleAt,
+		PositionID: buy.Position.ID, Quantity: testQuantity("1"), ExecutionPrice: testPrice("400"), EffectiveAt: &saleAt,
 	})
 	assert.ErrorIs(t, err, ErrHistoricalEpisodeNotOpen)
 }
@@ -781,15 +783,15 @@ func TestHistorical_EpisodeDatesUseEffectiveAt(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	openedAt := time.Now().UTC().Add(-5 * 24 * time.Hour).Truncate(time.Second)
 	buy, err := svc.BuyPosition(ctx(), "u1", "dated-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
-		ExecutionPrice: 400, EffectiveAt: &openedAt,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
+		ExecutionPrice: testPrice("400"), EffectiveAt: &openedAt,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, openedAt, buy.Position.CreatedAt)
 
 	closedAt := openedAt.Add(24 * time.Hour)
 	sale, err := svc.SellPosition(ctx(), "u1", "dated-sale", SellInput{
-		PositionID: buy.Position.ID, Quantity: 2, ExecutionPrice: 410, EffectiveAt: &closedAt,
+		PositionID: buy.Position.ID, Quantity: testQuantity("2"), ExecutionPrice: testPrice("410"), EffectiveAt: &closedAt,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, sale.Closed)
@@ -799,32 +801,32 @@ func TestHistorical_EpisodeDatesUseEffectiveAt(t *testing.T) {
 // 15. Multi-currency: a USD purchase never touches a GBP balance.
 func TestBuy_MultiCurrencyNeverAutoConvertsFX(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "GBP", 5000)
+	seedCash(t, svc, "u1", "GBP", "5000")
 
 	_, err := svc.BuyPosition(ctx(), "u1", "fx-buy", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, // USD instrument
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), // USD instrument
 	})
 	require.NoError(t, err)
 
-	assert.InDelta(t, 5000.0, cashOf(t, repo, "u1", "GBP"), 1e-9,
+	assertAmountEqual(t, "5000", cashOf(t, repo, "u1", "GBP"),
 		"GBP cash is untouched — Alarvest never auto-converts currency")
-	assert.InDelta(t, 0.0, cashOf(t, repo, "u1", "USD"), 1e-9)
+	assertAmountEqual(t, "0", cashOf(t, repo, "u1", "USD"))
 
 	funding := autoFundingActivities(activitiesOf(t, repo, "u1"))
 	require.Len(t, funding, 1)
 	assert.Equal(t, "USD", funding[0].Currency)
-	assert.InDelta(t, 860.0, funding[0].GrossAmount, 1e-9)
+	assertAmountEqual(t, "860", funding[0].GrossAmount)
 }
 
 func TestBuy_ValidatesExecutionDetails(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	_, err := svc.BuyPosition(ctx(), "u1", "bad-price", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: -1,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), ExecutionPrice: testPrice("-1"),
 	})
 	assert.ErrorIs(t, err, ErrInvalidBuyPrice)
 
 	_, err = svc.BuyPosition(ctx(), "u1", "bad-fee", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, Fee: -5,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), Fee: testAmount("-5"),
 	})
 	assert.ErrorIs(t, err, ErrInvalidBuyFee)
 }
@@ -837,12 +839,12 @@ func TestBuy_ValidatesExecutionDetails(t *testing.T) {
 func TestBuy_RejectsImplausibleLiveExecutionPrice(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	_, err := svc.BuyPosition(ctx(), "u1", "too-cheap", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 1,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), ExecutionPrice: testPrice("1"),
 	})
 	assert.ErrorIs(t, err, ErrImplausibleExecutionPrice)
 
 	_, err = svc.BuyPosition(ctx(), "u1", "too-expensive", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 100000,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), ExecutionPrice: testPrice("100000"),
 	})
 	assert.ErrorIs(t, err, ErrImplausibleExecutionPrice)
 }
@@ -856,13 +858,13 @@ func TestBuy_RejectsImplausibleLiveExecutionPrice(t *testing.T) {
 func TestBuy_AllowsOrdinaryLiveDeviationAndBackdatedFabrication(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	_, err := svc.BuyPosition(ctx(), "u1", "ordinary-deviation", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 450,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), ExecutionPrice: testPrice("450"),
 	})
 	require.NoError(t, err, "a modest deviation from the live quote is ordinary volatility, not fabrication")
 
 	past := time.Now().UTC().Add(-72 * time.Hour)
 	_, err = svc.BuyPosition(ctx(), "u2", "backdated-far-off-price", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 1, ExecutionPrice: 100,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("1"), ExecutionPrice: testPrice("100"),
 		EffectiveAt: &past,
 	})
 	require.NoError(t, err, "a backdated trade has no live comparator and must not be rejected on price alone")
@@ -874,19 +876,19 @@ func TestSell_RejectsImplausibleLiveExecutionPriceButAllowsBackdated(t *testing.
 	svc, _, _, _ := newTxTestService()
 	bought := sameDayBackdate(2 * time.Hour)
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 4, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("4"), ExecutionPrice: testPrice("400"),
 		EffectiveAt: &bought,
 	})
 	require.NoError(t, err)
 
 	_, err = svc.SellPosition(ctx(), "u1", "sell-too-expensive", SellInput{
-		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 100000,
+		Symbol: "MSFT", Quantity: testQuantity("1"), ExecutionPrice: testPrice("100000"),
 	})
 	assert.ErrorIs(t, err, ErrImplausibleExecutionPrice)
 
 	sold := sameDayBackdate(30 * time.Minute)
 	_, err = svc.SellPosition(ctx(), "u1", "sell-backdated", SellInput{
-		Symbol: "MSFT", Quantity: 1, ExecutionPrice: 100000, EffectiveAt: &sold,
+		Symbol: "MSFT", Quantity: testQuantity("1"), ExecutionPrice: testPrice("100000"), EffectiveAt: &sold,
 	})
 	require.NoError(t, err, "a backdated sell has no live comparator and must not be rejected on price alone")
 }
@@ -901,7 +903,7 @@ func TestSetAutoFundPurchases_DisabledRejectsFundingBuy(t *testing.T) {
 	require.NoError(t, svc.SetAutoFundPurchases(ctx(), "u1", false))
 
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, // no cash deposited
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), // no cash deposited
 	})
 
 	assert.ErrorIs(t, err, ErrInsufficientCash)
@@ -912,7 +914,7 @@ func TestSetAutoFundPurchases_EnabledIsUnaffected(t *testing.T) {
 	require.NoError(t, svc.SetAutoFundPurchases(ctx(), "u1", true)) // explicit, matches the default
 
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"),
 	})
 
 	require.NoError(t, err, "auto-funding must still work when explicitly left enabled")
@@ -939,7 +941,7 @@ func TestSetAutoFundPurchases_CreatesPortfolioForFirstTimeUser(t *testing.T) {
 func TestSummary_FlagsSelfReportedExecutionPrice_WhenUserSuppliesPrice(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400,
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400"),
 	})
 	require.NoError(t, err)
 
@@ -951,7 +953,7 @@ func TestSummary_FlagsSelfReportedExecutionPrice_WhenUserSuppliesPrice(t *testin
 func TestSummary_DoesNotFlagSelfReportedExecutionPrice_WhenProviderEstimated(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	_, err := svc.BuyPosition(ctx(), "u1", "buy-1", BuyInput{
-		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, // no ExecutionPrice
+		Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), // no ExecutionPrice
 	})
 	require.NoError(t, err)
 
@@ -967,12 +969,12 @@ func TestSummary_DoesNotFlagSelfReportedExecutionPrice_WhenProviderEstimated(t *
 // produces Summary's economic fields.
 func TestPublicWeightsSummary_MatchesSummaryOnPositionsAndCash(t *testing.T) {
 	svc, _, _, pp := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 100000)
-	seedCash(t, svc, "u1", "TRY", 100000)
+	seedCash(t, svc, "u1", "USD", "100000")
+	seedCash(t, svc, "u1", "TRY", "100000")
 
-	_, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: 10})
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-aapl", BuyInput{Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("10")})
 	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx(), "u1", "buy-thyao", BuyInput{Symbol: "THYAO.IS", AssetType: AssetTypeStock, Quantity: 50})
+	_, err = svc.BuyPosition(ctx(), "u1", "buy-thyao", BuyInput{Symbol: "THYAO.IS", AssetType: AssetTypeStock, Quantity: testQuantity("50")})
 	require.NoError(t, err)
 	pp.Set("AAPL", 214.5, "USD")     // +10% since baseline
 	pp.Set("THYAO.IS", 324.5, "TRY") // +10% since baseline
@@ -1010,10 +1012,10 @@ func TestPublicWeightsSummary_MatchesSummaryOnPositionsAndCash(t *testing.T) {
 // contribute to CurrentValue, matching Summary's own contract.
 func TestPublicWeightsSummary_ExcludesClosedPositions(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
-	seedCash(t, svc, "u1", "USD", 100000)
-	_, err := svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: 2, ExecutionPrice: 400})
+	seedCash(t, svc, "u1", "USD", "100000")
+	_, err := svc.BuyPosition(ctx(), "u1", "buy-msft", BuyInput{Symbol: "MSFT", AssetType: AssetTypeStock, Quantity: testQuantity("2"), ExecutionPrice: testPrice("400")})
 	require.NoError(t, err)
-	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: 2, ExecutionPrice: 450})
+	_, err = svc.SellPosition(ctx(), "u1", "sell-msft", SellInput{Symbol: "MSFT", Quantity: testQuantity("2"), ExecutionPrice: testPrice("450")})
 	require.NoError(t, err)
 
 	cheap, err := svc.PublicWeightsSummary(ctx(), "u1")
