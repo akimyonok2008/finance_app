@@ -67,23 +67,23 @@ func (h *Handler) SetCorporateActionView(r CorporateActionViewReader) {
 // detected and applied income event. The owner may see their own amounts; these
 // figures must never appear on any public surface.
 type IncomeEventView struct {
-	ID            string  `json:"id"`
-	EventType     string  `json:"event_type"`
-	Symbol        string  `json:"symbol"`
-	Currency      string  `json:"currency"`
-	GrossAmount   float64 `json:"gross_amount"`
-	Withholding   float64 `json:"withholding_amount"`
-	FeeAmount     float64 `json:"fee_amount"`
-	NetAmount     float64 `json:"net_amount"`
-	ReinvestedQty float64 `json:"reinvestment_quantity,omitempty"`
-	Estimated     bool    `json:"estimated"`
-	Status        string  `json:"status"`
-	Provider      string  `json:"provider"`
-	Explanation   string  `json:"explanation"`
-	Correctable   bool    `json:"correctable"`
-	PaymentDate   string  `json:"payment_date,omitempty"`
-	AppliedAt     string  `json:"applied_at,omitempty"`
-	System        bool    `json:"system_generated"`
+	ID            string         `json:"id"`
+	EventType     string         `json:"event_type"`
+	Symbol        string         `json:"symbol"`
+	Currency      string         `json:"currency"`
+	GrossAmount   money.Amount   `json:"gross_amount"`
+	Withholding   money.Amount   `json:"withholding_amount"`
+	FeeAmount     money.Amount   `json:"fee_amount"`
+	NetAmount     money.Amount   `json:"net_amount"`
+	ReinvestedQty money.Quantity `json:"reinvestment_quantity,omitempty"`
+	Estimated     bool           `json:"estimated"`
+	Status        string         `json:"status"`
+	Provider      string         `json:"provider"`
+	Explanation   string         `json:"explanation"`
+	Correctable   bool           `json:"correctable"`
+	PaymentDate   string         `json:"payment_date,omitempty"`
+	AppliedAt     string         `json:"applied_at,omitempty"`
+	System        bool           `json:"system_generated"`
 }
 
 // IncomeCorrectionInput is a constrained, account-specific correction to an
@@ -94,11 +94,11 @@ type IncomeCorrectionInput struct {
 	PortfolioID             string
 	Kind                    string
 	RequestID               string
-	ActualNet               float64
-	ActualWithholding       float64
-	ActualFee               float64
-	ActualReinvestmentQty   float64
-	ActualReinvestmentPrice float64
+	ActualNet               money.Amount
+	ActualWithholding       money.Amount
+	ActualFee               money.Amount
+	ActualReinvestmentQty   money.Quantity
+	ActualReinvestmentPrice money.Price
 }
 
 // IncomeEventViewReader supplies a user's read-only income views and the

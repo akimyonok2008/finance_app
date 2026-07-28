@@ -14,6 +14,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/db"
 	"github.com/ardakimyonok/finance_app/internal/income"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // These integration tests run only when DATABASE_URL_TEST points at a disposable
@@ -53,7 +54,7 @@ func seedIncUserPortfolio(t *testing.T, pool *pgxpool.Pool) (userID, portfolioID
 func incEvent(id string) income.IncomeEvent {
 	return income.IncomeEvent{
 		ID: id, Provider: "manual_dev", ProviderEventID: id, Type: income.TypeCashDividend,
-		Instrument: income.InstrumentReference{Symbol: "AAPL"}, AmountPerUnit: 0.25, Currency: "USD",
+		Instrument: income.InstrumentReference{Symbol: "AAPL"}, AmountPerUnit: money.MustPrice("0.25"), Currency: "USD",
 		PaymentDate: time.Now().UTC(), Status: income.StatusScheduled, Quality: income.QualityVerified,
 		RawFingerprint: "fp-1", RetrievedAt: time.Now().UTC(),
 	}
@@ -75,7 +76,7 @@ func TestPG_IncomeEventUniquenessAndCorrection(t *testing.T) {
 
 	ev := incEvent(id)
 	ev.RawFingerprint = "fp-2"
-	ev.AmountPerUnit = 0.30 // provider revised the amount
+	ev.AmountPerUnit = money.MustPrice("0.30") // provider revised the amount
 	changed, err = store.UpsertEvent(ctx, ev)
 	require.NoError(t, err)
 	assert.True(t, changed, "changed fingerprint is a correction")
@@ -83,7 +84,7 @@ func TestPG_IncomeEventUniquenessAndCorrection(t *testing.T) {
 	got, ok, err := store.GetEvent(ctx, id)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.InDelta(t, 0.30, got.AmountPerUnit, 1e-9) // decimal precision preserved
+	assert.Equal(t, 0, money.MustPrice("0.30").Cmp(got.AmountPerUnit)) // decimal precision preserved
 
 	var count int
 	require.NoError(t, pool.QueryRow(ctx,
@@ -138,7 +139,8 @@ func TestPG_IncomeApplicationStoresSeparatedAmounts(t *testing.T) {
 
 	require.NoError(t, store.CompleteApplication(ctx, income.Application{
 		IncomeEventID: id, PortfolioID: portfolioID, UserID: userID, Status: income.ApplicationApplied,
-		EligibleQuantity: 100, GrossAmount: 100, WithholdingAmount: 15, NetAmount: 85,
+		EligibleQuantity: money.MustQuantity("100"), GrossAmount: money.MustAmount("100"),
+		WithholdingAmount: money.MustAmount("15"), NetAmount: money.MustAmount("85"),
 		CashCurrency: "USD", Estimated: true,
 	}))
 
@@ -146,8 +148,8 @@ func TestPG_IncomeApplicationStoresSeparatedAmounts(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	// Gross / withholding / net stored distinctly (never one ambiguous amount).
-	assert.InDelta(t, 100, got.GrossAmount, 1e-9)
-	assert.InDelta(t, 15, got.WithholdingAmount, 1e-9)
-	assert.InDelta(t, 85, got.NetAmount, 1e-9)
+	assert.True(t, money.MustAmount("100").EqualAmount(got.GrossAmount))
+	assert.True(t, money.MustAmount("15").EqualAmount(got.WithholdingAmount))
+	assert.True(t, money.MustAmount("85").EqualAmount(got.NetAmount))
 	assert.Equal(t, income.ApplicationApplied, got.Status)
 }

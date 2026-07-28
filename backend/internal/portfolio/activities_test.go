@@ -46,7 +46,7 @@ func TestCashDividend_IncreasesCashAndRankedReturn(t *testing.T) {
 	require.NoError(t, err)
 
 	res, err := svc.RecordIncome(ctx(), "u1", "div-1", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 	// Return-bearing: the index must RISE (not be neutralized).
@@ -75,7 +75,7 @@ func TestDividend_DoesNotResetCheckpoint(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
 	_, err := svc.RecordIncome(ctx(), "u1", "div-1", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 
@@ -92,7 +92,7 @@ func TestETFDistributionAndInterest_AreReturnBearing(t *testing.T) {
 	for _, sub := range []IncomeSubtype{IncomeETFDistribution, IncomeInterest} {
 		svc, _, _, _ := newTxTestService()
 		fundedPortfolio(t, svc, "u1")
-		in := IncomeInput{Subtype: sub, Symbol: "AAPL", Currency: "USD", Amount: 50}
+		in := IncomeInput{Subtype: sub, Symbol: "AAPL", Currency: "USD", Amount: testAmount("50")}
 		if sub == IncomeInterest {
 			in.Symbol = "" // interest may be recorded without a symbol
 		}
@@ -106,7 +106,7 @@ func TestForeignCurrencyDividend_StaysInDeclaredCurrency(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
 	_, err := svc.RecordIncome(ctx(), "u1", "eur-div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "EUR", Amount: 30,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "EUR", Amount: testAmount("30"),
 	})
 	require.NoError(t, err)
 	cash, err := repo.ListCashBalances(ctx(), "u1")
@@ -129,7 +129,7 @@ func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
 	quotes.Set("AAPL", 200, "USD") // reinvest at 200
 	res, err := svc.RecordIncome(ctx(), "u1", "reinv-1", IncomeInput{
 		Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock,
-		Currency: "USD", Amount: 400,
+		Currency: "USD", Amount: testAmount("400"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
@@ -161,9 +161,9 @@ func TestReinvestedDividend_IncomeOncePlusNeutralBuy(t *testing.T) {
 func TestDividend_DuplicatePrevented(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	first, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100})
+	first, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
-	retry, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100})
+	retry, err := svc.RecordIncome(ctx(), "u1", "same-div", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
 	assert.Equal(t, first.PortfolioVersion, retry.PortfolioVersion)
@@ -172,9 +172,9 @@ func TestDividend_DuplicatePrevented(t *testing.T) {
 func TestIncome_RejectsInvalidAmountAndType(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordIncome(ctx(), "u1", "bad-amt", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 0})
+	_, err := svc.RecordIncome(ctx(), "u1", "bad-amt", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("0")})
 	require.ErrorIs(t, err, ErrInvalidIncomeAmount)
-	_, err = svc.RecordIncome(ctx(), "u1", "bad-cur", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "JPY", Amount: 10})
+	_, err = svc.RecordIncome(ctx(), "u1", "bad-cur", IncomeInput{Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "JPY", Amount: testAmount("10")})
 	require.ErrorIs(t, err, ErrUnsupportedCurrency)
 }
 
@@ -184,7 +184,7 @@ func TestManagementFee_ReducesCashAndRankedReturn(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
 	before := readRankedIndex(t, svc, "u1")
-	res, err := svc.RecordFee(ctx(), "u1", "fee-1", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 100})
+	res, err := svc.RecordFee(ctx(), "u1", "fee-1", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("100")})
 	require.NoError(t, err)
 	assert.Less(t, res.RankedIndexAfter, res.RankedIndexBefore)
 	after := readRankedIndex(t, svc, "u1")
@@ -194,14 +194,14 @@ func TestManagementFee_ReducesCashAndRankedReturn(t *testing.T) {
 func TestFee_InsufficientCashRejected(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1") // 1950 USD cash left
-	_, err := svc.RecordFee(ctx(), "u1", "big-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 99999})
+	_, err := svc.RecordFee(ctx(), "u1", "big-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("99999")})
 	require.ErrorIs(t, err, ErrInsufficientCashForFee)
 }
 
 func TestFee_NeverCreatesNegativeCash(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordFee(ctx(), "u1", "f", FeeInput{Subtype: FeeCustody, Currency: "USD", Amount: 1950})
+	_, err := svc.RecordFee(ctx(), "u1", "f", FeeInput{Subtype: FeeCustody, Currency: "USD", Amount: testAmount("1950")})
 	require.NoError(t, err)
 	cash, err := repo.ListCashBalances(ctx(), "u1")
 	require.NoError(t, err)
@@ -213,9 +213,9 @@ func TestFee_NeverCreatesNegativeCash(t *testing.T) {
 func TestFee_DuplicatePrevented(t *testing.T) {
 	svc, _, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: 25})
+	_, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
-	retry, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: 25})
+	retry, err := svc.RecordFee(ctx(), "u1", "same-fee", FeeInput{Subtype: FeeOther, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
 	assert.True(t, retry.Duplicate)
 }
@@ -351,7 +351,7 @@ func TestWriteOff_DuplicateRejected(t *testing.T) {
 func TestActivityMetadata_RecordsEffectAndProvenance(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	fundedPortfolio(t, svc, "u1")
-	_, err := svc.RecordFee(ctx(), "u1", "fee-meta", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 10})
+	_, err := svc.RecordFee(ctx(), "u1", "fee-meta", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("10")})
 	require.NoError(t, err)
 	acts, err := repo.ListActivities(ctx(), "u1", 50)
 	require.NoError(t, err)

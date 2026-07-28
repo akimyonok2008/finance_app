@@ -112,11 +112,11 @@ func TestPG_ReturnOfCapitalPersistsAndReconciles(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = svc.RecordIncome(ctx, userID, "div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "T", Currency: "USD", Amount: 20,
+		Subtype: IncomeCashDividend, Symbol: "T", Currency: "USD", Amount: testAmount("20"),
 	})
 	require.NoError(t, err)
 	_, err = svc.RecordIncome(ctx, userID, "roc", IncomeInput{
-		Subtype: IncomeReturnOfCapitalSub, Symbol: "T", Currency: "USD", Amount: 50,
+		Subtype: IncomeReturnOfCapitalSub, Symbol: "T", Currency: "USD", Amount: testAmount("50"),
 	})
 	require.NoError(t, err)
 
@@ -154,7 +154,7 @@ func TestPG_StockDividendZeroGrossPersistsAndPreservesBasis(t *testing.T) {
 
 	res, err := svc.Mutate(ctx, MutationRequest{
 		Kind: MutationStockDividend, UserID: userID, RequestID: "sd",
-		Income: IncomeInput{Symbol: "DIV", StockRatioNum: 1, StockRatioDen: 10},
+		Income: IncomeInput{Symbol: "DIV", StockRatioNum: testRatio("1"), StockRatioDen: testRatio("10")},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)

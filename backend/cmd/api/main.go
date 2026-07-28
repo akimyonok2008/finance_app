@@ -923,7 +923,7 @@ func main() {
 		incomeSvc.SetPreferences(income.Preferences{
 			ReinvestByDefault: cfg.IncomeReinvestByDefault,
 			UseEstimatedGross: cfg.IncomeUseEstimatedGross,
-			Withholding:       income.WithholdingProfile{DefaultRate: cfg.IncomeWithholdingDefault},
+			Withholding:       income.WithholdingProfile{DefaultRate: money.RatioFromFloat64(cfg.IncomeWithholdingDefault)},
 		})
 		incomeView = incomeViewAdapter{svc: incomeSvc}
 		if optionalJobs {

@@ -48,7 +48,7 @@ func TestConcurrent_FeeAndWithdrawalContendForCash(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, results[0] = svc.RecordFee(ctx(), "u1", "fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 80})
+		_, results[0] = svc.RecordFee(ctx(), "u1", "fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("80")})
 	}()
 	go func() {
 		defer wg.Done()
@@ -84,7 +84,7 @@ func TestConcurrent_ReinvestmentAndWithdrawal(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		_, _ = svc.RecordIncome(ctx(), "u1", "reinv", IncomeInput{
-			Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD", Amount: 195,
+			Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD", Amount: testAmount("195"),
 		})
 	}()
 	go func() {
@@ -221,12 +221,12 @@ func TestConcurrent_DividendAndFeeSerialize(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		_, _ = svc.RecordIncome(ctx(), "u1", "div", IncomeInput{
-			Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 50,
+			Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("50"),
 		})
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = svc.RecordFee(ctx(), "u1", "fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 10})
+		_, _ = svc.RecordFee(ctx(), "u1", "fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("10")})
 	}()
 	wg.Wait()
 

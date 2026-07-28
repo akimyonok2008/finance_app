@@ -15,13 +15,13 @@ import (
 // records activity for tracking only.
 
 type feeRequest struct {
-	Type             string  `json:"type"`
-	Currency         string  `json:"currency"`
-	Amount           float64 `json:"amount"`
-	Symbol           string  `json:"symbol"`
-	LinkedActivityID string  `json:"linked_activity_id"`
-	Description      string  `json:"description"`
-	OccurredAt       string  `json:"effective_at"`
+	Type             string       `json:"type"`
+	Currency         string       `json:"currency"`
+	Amount           money.Amount `json:"amount"`
+	Symbol           string       `json:"symbol"`
+	LinkedActivityID string       `json:"linked_activity_id"`
+	Description      string       `json:"description"`
+	OccurredAt       string       `json:"effective_at"`
 }
 
 // ListIncomeEvents handles GET /portfolio/income-events. Ordinary income
@@ -77,12 +77,12 @@ func (h *Handler) GetIncomeEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 type incomeCorrectionRequest struct {
-	Kind                    string  `json:"kind"`
-	ActualNet               float64 `json:"actual_net"`
-	ActualWithholding       float64 `json:"actual_withholding"`
-	ActualFee               float64 `json:"actual_fee"`
-	ActualReinvestmentQty   float64 `json:"actual_reinvestment_quantity"`
-	ActualReinvestmentPrice float64 `json:"actual_reinvestment_price"`
+	Kind                    string         `json:"kind"`
+	ActualNet               money.Amount   `json:"actual_net"`
+	ActualWithholding       money.Amount   `json:"actual_withholding"`
+	ActualFee               money.Amount   `json:"actual_fee"`
+	ActualReinvestmentQty   money.Quantity `json:"actual_reinvestment_quantity"`
+	ActualReinvestmentPrice money.Price    `json:"actual_reinvestment_price"`
 }
 
 // CorrectIncomeEvent handles POST /portfolio/income-events/{id}/correction. It

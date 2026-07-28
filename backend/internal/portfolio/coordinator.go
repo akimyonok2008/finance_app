@@ -1388,10 +1388,13 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 	if err := validateIncomeAmounts(req.Income); err != nil {
 		return mutationPlan{}, err
 	}
-	net := round2(req.Income.NetCash())
+	net, err := money.QuantizeCash(req.Income.NetCash(), currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	now := val.ObservedAt
 	current, _ := cashAmount(oldCash, currency)
-	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(money.AmountFromFloat64(net)), UpdatedAt: now, CreatedAt: now}
+	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(net), UpdatedAt: now, CreatedAt: now}
 	if existing, ok := cashBalance(oldCash, currency); ok {
 		balance.CreatedAt = existing.CreatedAt
 	}
@@ -1411,7 +1414,7 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
 		Type: incomeActivityType(req.Income.Subtype), Symbol: req.Income.Symbol,
 		InstrumentID: instrumentID, AssetType: assetType,
-		Currency: currency, GrossAmount: money.AmountFromFloat64(net), OccurredAt: occurredAt(req.Income.OccurredAt, now),
+		Currency: currency, GrossAmount: net, OccurredAt: occurredAt(req.Income.OccurredAt, now),
 		CreatedAt: now, PositionEpisodeID: episodeID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, req.Income.Provenance,
 			incomeMetadata(req.Income, net)),
@@ -1427,13 +1430,13 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 // deductions, or deductions that exceed the gross amount (which would fabricate
 // a negative income).
 func validateIncomeAmounts(in IncomeInput) error {
-	if !finitePositive(in.Amount) {
+	if in.Amount.Sign() <= 0 {
 		return ErrInvalidIncomeAmount
 	}
-	if !isFinite(in.Withholding) || in.Withholding < 0 || !isFinite(in.Fee) || in.Fee < 0 {
+	if in.Withholding.Sign() < 0 || in.Fee.Sign() < 0 {
 		return ErrInvalidIncomeAmount
 	}
-	if in.Withholding+in.Fee > in.Amount+1e-9 {
+	if in.Withholding.Add(in.Fee).Cmp(in.Amount) > 0 {
 		return ErrInvalidIncomeAmount
 	}
 	return nil
@@ -1441,17 +1444,17 @@ func validateIncomeAmounts(in IncomeInput) error {
 
 // incomeMetadata builds the auditable, separated income breakdown stored on the
 // immutable ledger activity: gross, withholding, fee, and net are distinct.
-func incomeMetadata(in IncomeInput, net float64) map[string]any {
+func incomeMetadata(in IncomeInput, net money.Amount) map[string]any {
 	m := map[string]any{
 		"income_subtype": string(in.Subtype),
-		"gross_amount":   round2(in.Amount),
-		"net_amount":     net,
+		"gross_amount":   in.Amount.String(),
+		"net_amount":     net.String(),
 	}
-	if in.Withholding > 0 {
-		m["withholding_amount"] = round2(in.Withholding)
+	if in.Withholding.Sign() > 0 {
+		m["withholding_amount"] = in.Withholding.String()
 	}
-	if in.Fee > 0 {
-		m["income_fee_amount"] = round2(in.Fee)
+	if in.Fee.Sign() > 0 {
+		m["income_fee_amount"] = in.Fee.String()
 	}
 	if in.Estimated {
 		m["estimated"] = true
@@ -1486,23 +1489,24 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 	}
 	// The buy leg reinvests the NET income (after withholding/fees), so ranked
 	// performance reflects the income exactly once.
-	net := round2(req.Income.NetCash())
-	netAmt := money.AmountFromFloat64(net)
+	netAmt, err := money.QuantizeCash(req.Income.NetCash(), quote.Currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	// Reinvestment price hierarchy: an explicit broker/DRIP execution price when
 	// supplied, otherwise the current tracked market price (estimated).
-	price := quote.Price
+	priceAmt := money.PriceFromFloat64(quote.Price)
 	method := "market_close_on_payment_date"
-	if finitePositive(req.Income.ReinvestPrice) {
-		price = req.Income.ReinvestPrice
+	if req.Income.ReinvestPrice.Sign() > 0 {
+		priceAmt = req.Income.ReinvestPrice
 		method = "broker_reported"
 	}
 	if req.Income.PriceMethod != "" {
 		method = req.Income.PriceMethod
 	}
-	if !finitePositive(price) {
+	if priceAmt.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidReinvestment
 	}
-	priceAmt := money.PriceFromFloat64(price)
 	now := val.ObservedAt
 	// Reinvest the net income at the chosen price, exact decimal division to
 	// the policy quantity precision.
@@ -1546,12 +1550,12 @@ func (c *MutationCoordinator) planReinvestedDividend(req MutationRequest, pf *Po
 		}
 	}
 	groupID := uuid.NewString()
-	incomeMeta := incomeMetadata(req.Income, net)
+	incomeMeta := incomeMetadata(req.Income, netAmt)
 	incomeMeta["income_subtype"] = string(IncomeReinvestedDiv)
 	incomeMeta["activity_group_id"] = groupID
 	incomeMeta["component"] = "income"
 	incomeMeta["reinvestment_price_method"] = method
-	incomeMeta["reinvestment_quantity"] = qty.Float64()
+	incomeMeta["reinvestment_quantity"] = qty.String()
 	incomeMeta["reinvestment_estimated"] = estimated
 	incomeActivity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
@@ -1608,8 +1612,10 @@ func (c *MutationCoordinator) planReturnOfCapital(req MutationRequest, pf *Portf
 	if existing == nil {
 		return mutationPlan{}, ErrInstrumentNotFound
 	}
-	net := round2(req.Income.NetCash())
-	netAmt := money.AmountFromFloat64(net)
+	netAmt, err := money.QuantizeCash(req.Income.NetCash(), currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	now := val.ObservedAt
 
 	// Reduce remaining basis by the net distribution, floored at zero (cost
@@ -1638,10 +1644,10 @@ func (c *MutationCoordinator) planReturnOfCapital(req MutationRequest, pf *Portf
 		balance.CreatedAt = existingCash.CreatedAt
 	}
 
-	meta := incomeMetadata(req.Income, net)
+	meta := incomeMetadata(req.Income, netAmt)
 	meta["income_subtype"] = string(IncomeReturnOfCapitalSub)
-	meta["basis_reduction"] = basisReduction.Float64()
-	meta["excess_over_basis"] = excessOverBasis.Float64()
+	meta["basis_reduction"] = basisReduction.String()
+	meta["excess_over_basis"] = excessOverBasis.String()
 	meta["accounting_policy"] = "return_of_capital_basis_reduction"
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,
@@ -1674,15 +1680,18 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 		return mutationPlan{}, ErrInstrumentNotFound
 	}
 	num, den := req.Income.StockRatioNum, req.Income.StockRatioDen
-	if !finitePositive(num) || !finitePositive(den) {
+	if num.Sign() <= 0 || den.Sign() <= 0 {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
-	factor := 1 + num/den
-	if !finitePositive(factor) || factor <= 1 {
+	fraction, err := num.DivExact(den, money.ScaleQuantity)
+	if err != nil {
+		return mutationPlan{}, ErrInvalidSplitRatio
+	}
+	factorRatio := money.MustRatio("1").Add(fraction)
+	if factorRatio.Cmp(money.MustRatio("1")) <= 0 {
 		return mutationPlan{}, ErrInvalidSplitRatio
 	}
 	now := val.ObservedAt
-	factorRatio := money.RatioFromFloat64(factor)
 	updated := *existing
 	updated.Quantity = money.QuantizeQuantity(existing.Quantity.MulRatio(factorRatio))
 	// Average cost can be a repeating decimal after a stock dividend. Carry
@@ -1704,8 +1713,8 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 		PositionEpisodeID: existing.ID,
 		Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, req.Income.Provenance, map[string]any{
 			"income_subtype":    string(IncomeStockDividendSub),
-			"ratio_numerator":   num,
-			"ratio_denominator": den,
+			"ratio_numerator":   num.String(),
+			"ratio_denominator": den.String(),
 			"income_event_id":   nonEmpty(req.Income.IncomeEventID),
 		}),
 	}
@@ -1726,7 +1735,10 @@ func (c *MutationCoordinator) planFee(req MutationRequest, pf *Portfolio, oldOpe
 		return mutationPlan{}, ErrUnsupportedCurrency
 	}
 	current, found := cashAmount(oldCash, currency)
-	feeAmt := money.AmountFromFloat64(req.Fee.Amount)
+	feeAmt, err := money.QuantizeCash(req.Fee.Amount, currency)
+	if err != nil {
+		return mutationPlan{}, ErrUnsupportedCurrency
+	}
 	// Exact decimal comparison: no epsilon tolerance for the insufficient-cash
 	// check.
 	if !found || current.Cmp(feeAmt) < 0 {
@@ -2083,7 +2095,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Income.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Income.Amount) {
+		if req.Income.Amount.Sign() <= 0 {
 			return nil, ErrInvalidIncomeAmount
 		}
 		switch req.Income.Subtype {
@@ -2112,7 +2124,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Income.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Income.Amount) {
+		if req.Income.Amount.Sign() <= 0 {
 			return nil, ErrInvalidIncomeAmount
 		}
 		clean, err := validateAndNormalize(PositionInput{
@@ -2130,7 +2142,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Income.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Income.Amount) {
+		if req.Income.Amount.Sign() <= 0 {
 			return nil, ErrInvalidIncomeAmount
 		}
 		sym, err := prices.ValidateAndNormalizeSymbol(strings.ToUpper(strings.TrimSpace(req.Income.Symbol)))
@@ -2141,7 +2153,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		return nil, nil // the paying position is already held; only basis + cash change
 
 	case MutationStockDividend:
-		if !finitePositive(req.Income.StockRatioNum) || !finitePositive(req.Income.StockRatioDen) {
+		if req.Income.StockRatioNum.Sign() <= 0 || req.Income.StockRatioDen.Sign() <= 0 {
 			return nil, ErrInvalidSplitRatio
 		}
 		sym, err := prices.ValidateAndNormalizeSymbol(strings.ToUpper(strings.TrimSpace(req.Income.Symbol)))
@@ -2156,7 +2168,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.Fee.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.Fee.Amount) {
+		if req.Fee.Amount.Sign() <= 0 {
 			return nil, ErrInvalidFeeAmount
 		}
 		switch req.Fee.Subtype {

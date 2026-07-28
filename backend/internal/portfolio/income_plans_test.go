@@ -18,7 +18,7 @@ func TestIncome_WithholdingReducesNetCash(t *testing.T) {
 
 	_, err := svc.RecordIncome(ctx(), "u1", "div-wh", IncomeInput{
 		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD",
-		Amount: 100, Withholding: 15,
+		Amount: testAmount("100"), Withholding: testAmount("15"),
 	})
 	require.NoError(t, err)
 
@@ -40,7 +40,7 @@ func TestReturnOfCapital_ReducesBasisAndIsReturnBearing(t *testing.T) {
 	fundedPortfolio(t, svc, "u1")
 
 	res, err := svc.RecordIncome(ctx(), "u1", "roc-1", IncomeInput{
-		Subtype: IncomeReturnOfCapitalSub, Symbol: "AAPL", Currency: "USD", Amount: 50,
+		Subtype: IncomeReturnOfCapitalSub, Symbol: "AAPL", Currency: "USD", Amount: testAmount("50"),
 	})
 	require.NoError(t, err)
 	// Return-bearing: the cash credit raises the index.
@@ -71,7 +71,7 @@ func TestReturnOfCapital_BasisNeverBelowZero(t *testing.T) {
 	// A RoC larger than the entire basis (1950). Basis floors at zero; excess is
 	// recorded, not silently dropped.
 	_, err := svc.RecordIncome(ctx(), "u1", "roc-big", IncomeInput{
-		Subtype: IncomeReturnOfCapitalSub, Symbol: "AAPL", Currency: "USD", Amount: 3000,
+		Subtype: IncomeReturnOfCapitalSub, Symbol: "AAPL", Currency: "USD", Amount: testAmount("3000"),
 	})
 	require.NoError(t, err)
 
@@ -97,7 +97,7 @@ func TestStockDividend_PreservesBasisAndValueNeutral(t *testing.T) {
 
 	res, err := svc.RecordIncome(ctx(), "u1", "sd-1", IncomeInput{
 		Subtype: IncomeStockDividendSub, Symbol: "AAPL", Currency: "USD",
-		StockRatioNum: 1, StockRatioDen: 10, // 10% stock dividend
+		StockRatioNum: testRatio("1"), StockRatioDen: testRatio("10"), // 10% stock dividend
 	})
 	require.NoError(t, err)
 	// Neutral: the index is unchanged (no artificial ranked jump).
@@ -117,7 +117,7 @@ func TestIncome_RejectsWithholdingExceedingGross(t *testing.T) {
 
 	_, err := svc.RecordIncome(ctx(), "u1", "bad-1", IncomeInput{
 		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD",
-		Amount: 100, Withholding: 150, // deductions exceed gross
+		Amount: testAmount("100"), Withholding: testAmount("150"), // deductions exceed gross
 	})
 	assert.ErrorIs(t, err, ErrInvalidIncomeAmount)
 }

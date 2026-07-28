@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // CorrectionKind names the constrained, account-specific corrections a user may
@@ -30,11 +32,11 @@ type Correction struct {
 	Kind          CorrectionKind
 	RequestID     string
 
-	ActualNet               float64
-	ActualWithholding       float64
-	ActualFee               float64
-	ActualReinvestmentQty   float64
-	ActualReinvestmentPrice float64
+	ActualNet               money.Amount
+	ActualWithholding       money.Amount
+	ActualFee               money.Amount
+	ActualReinvestmentQty   money.Quantity
+	ActualReinvestmentPrice money.Price
 }
 
 // CorrectionAdjustment is the neutral compensating instruction handed to the
@@ -46,7 +48,7 @@ type CorrectionAdjustment struct {
 	Symbol        string
 	Currency      string
 	// Delta is the signed net-cash change: positive credits, negative debits.
-	Delta  float64
+	Delta  money.Amount
 	Reason string
 }
 
@@ -90,8 +92,11 @@ func (s *Service) applyCorrection(ctx context.Context, userID string, c Correcti
 	if err != nil {
 		return err
 	}
-	delta := round2(actualNet - app.NetAmount)
-	if delta != 0 {
+	delta, quantizeErr := money.QuantizeCash(actualNet.Sub(app.NetAmount), app.CashCurrency)
+	if quantizeErr != nil {
+		return ErrInvalidCorrection
+	}
+	if !delta.IsZero() {
 		adj := CorrectionAdjustment{
 			IncomeEventID: ev.ID, PortfolioID: c.PortfolioID, Symbol: ev.Instrument.Symbol,
 			Currency: app.CashCurrency, Delta: delta, Reason: reason,
@@ -106,8 +111,8 @@ func (s *Service) applyCorrection(ctx context.Context, userID string, c Correcti
 
 	corrected := app
 	corrected.Status = ApplicationCorrected
-	corrected.NetAmount = round2(actualNet)
-	corrected.WithholdingAmount = round2(withholdingAfter(app, c))
+	corrected.NetAmount = actualNet
+	corrected.WithholdingAmount = withholdingAfter(app, c)
 	corrected.Estimated = false
 	if err := s.store.CompleteApplication(ctx, corrected); err != nil {
 		return err
@@ -115,44 +120,44 @@ func (s *Service) applyCorrection(ctx context.Context, userID string, c Correcti
 	// Reflect the correction on the event without deleting history.
 	_ = s.store.SetEventStatus(ctx, ev.ID, StatusCorrected)
 	s.metrics.Inc("income_events_corrected_total")
-	s.metrics.Observe("income_reconciliation_difference", delta)
+	s.metrics.Observe("income_reconciliation_difference", delta.Float64())
 	return nil
 }
 
 // correctedNet computes the actual net cash after applying the correction and a
 // human-readable audit reason.
-func (s *Service) correctedNet(app Application, c Correction) (float64, string, error) {
+func (s *Service) correctedNet(app Application, c Correction) (money.Amount, string, error) {
 	switch c.Kind {
 	case CorrectionMarkNotReceived:
-		return 0, "marked not received", nil
+		return money.ZeroAmount(), "marked not received", nil
 	case CorrectionActualNet:
-		if c.ActualNet < 0 {
-			return 0, "", ErrInvalidCorrection
+		if c.ActualNet.Sign() < 0 {
+			return money.ZeroAmount(), "", ErrInvalidCorrection
 		}
 		return c.ActualNet, "corrected to actual net", nil
 	case CorrectionActualWithholding:
-		if c.ActualWithholding < 0 || c.ActualWithholding > app.GrossAmount {
-			return 0, "", ErrInvalidCorrection
+		if c.ActualWithholding.Sign() < 0 || c.ActualWithholding.Cmp(app.GrossAmount) > 0 {
+			return money.ZeroAmount(), "", ErrInvalidCorrection
 		}
-		return app.GrossAmount - c.ActualWithholding - app.FeeAmount, "corrected withholding", nil
+		return app.GrossAmount.Sub(c.ActualWithholding).Sub(app.FeeAmount), "corrected withholding", nil
 	case CorrectionActualFee:
-		if c.ActualFee < 0 || c.ActualFee > app.GrossAmount {
-			return 0, "", ErrInvalidCorrection
+		if c.ActualFee.Sign() < 0 || c.ActualFee.Cmp(app.GrossAmount) > 0 {
+			return money.ZeroAmount(), "", ErrInvalidCorrection
 		}
-		return app.GrossAmount - app.WithholdingAmount - c.ActualFee, "corrected broker fee", nil
+		return app.GrossAmount.Sub(app.WithholdingAmount).Sub(c.ActualFee), "corrected broker fee", nil
 	case CorrectionActualReinvestment:
 		// Reinvestment quantity/price corrections do not change net income; the
 		// net is preserved and only the recorded quantity changes.
-		if c.ActualReinvestmentQty < 0 {
-			return 0, "", ErrInvalidCorrection
+		if c.ActualReinvestmentQty.Sign() < 0 {
+			return money.ZeroAmount(), "", ErrInvalidCorrection
 		}
 		return app.NetAmount, "corrected reinvestment quantity", nil
 	default:
-		return 0, "", fmt.Errorf("%w: unknown kind %q", ErrInvalidCorrection, c.Kind)
+		return money.ZeroAmount(), "", fmt.Errorf("%w: unknown kind %q", ErrInvalidCorrection, c.Kind)
 	}
 }
 
-func withholdingAfter(app Application, c Correction) float64 {
+func withholdingAfter(app Application, c Correction) money.Amount {
 	if c.Kind == CorrectionActualWithholding {
 		return c.ActualWithholding
 	}

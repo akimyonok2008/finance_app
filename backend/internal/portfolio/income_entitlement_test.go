@@ -32,7 +32,7 @@ func TestEligibleQuantity_ReconstructsHistoricalQuantityTransformations(t *testi
 
 	got, err := svc.EligibleQuantity(context.Background(), "u1", instrumentID, "NEW", base.AddDate(0, 0, 7))
 	require.NoError(t, err)
-	assert.InDelta(t, 15.4, got, 1e-9)
+	assertQuantityEqual(t, "15.4", got)
 }
 
 func TestEligibleQuantity_UsesStableIdentityAcrossHistoricalTickerAlias(t *testing.T) {
@@ -51,7 +51,7 @@ func TestEligibleQuantity_UsesStableIdentityAcrossHistoricalTickerAlias(t *testi
 
 	got, err := svc.EligibleQuantity(context.Background(), "u1", instrumentID, "NEW", at.Add(time.Hour))
 	require.NoError(t, err)
-	assert.Equal(t, 12.0, got)
+	assertQuantityEqual(t, "12", got)
 }
 
 func TestIncomeDiscovery_PreservesRecentProviderAliasesForStableInstrument(t *testing.T) {

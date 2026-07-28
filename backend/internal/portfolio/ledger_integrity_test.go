@@ -129,14 +129,14 @@ func TestReturnOfCapital_ExcludedFromOrdinaryIncomeTotal(t *testing.T) {
 
 	// An ordinary dividend DOES count as ordinary income.
 	_, err = svc.RecordIncome(ctx(), userID, "div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "T", Currency: "USD", Amount: 20,
+		Subtype: IncomeCashDividend, Symbol: "T", Currency: "USD", Amount: testAmount("20"),
 	})
 	require.NoError(t, err)
 
 	// Return of capital credits cash and reduces basis, but must NOT inflate
 	// TotalIncomeBase.
 	_, err = svc.RecordIncome(ctx(), userID, "roc", IncomeInput{
-		Subtype: IncomeReturnOfCapitalSub, Symbol: "T", Currency: "USD", Amount: 50,
+		Subtype: IncomeReturnOfCapitalSub, Symbol: "T", Currency: "USD", Amount: testAmount("50"),
 	})
 	require.NoError(t, err)
 

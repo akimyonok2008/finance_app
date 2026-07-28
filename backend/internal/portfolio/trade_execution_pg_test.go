@@ -286,5 +286,5 @@ func TestPG_IncomeDiscoveryAndEntitlementMatchHistoricalLedger(t *testing.T) {
 
 	eligible, err := svc.EligibleQuantity(ctx, userID, in.ID, ticker, now.AddDate(0, 0, -5))
 	require.NoError(t, err)
-	assert.Equal(t, 10.0, eligible)
+	assertQuantityEqual(t, "10", eligible)
 }

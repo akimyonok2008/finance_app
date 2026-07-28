@@ -11,7 +11,11 @@
 // normalized model, never on any specific data provider.
 package income
 
-import "time"
+import (
+	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
+)
 
 // Type is the normalized income-event type.
 type Type string
@@ -122,8 +126,8 @@ type IncomeEventRequest struct {
 // ProviderComponent is one economic slice of a mixed distribution (e.g. an ETF
 // distribution split into ordinary income, capital gain and return of capital).
 type ProviderComponent struct {
-	Type          Type    `json:"type"`
-	AmountPerUnit float64 `json:"amount_per_unit"`
+	Type          Type        `json:"type"`
+	AmountPerUnit money.Price `json:"amount_per_unit"`
 }
 
 // ProviderIncomeEvent is a raw event as returned by a provider adapter, before
@@ -133,7 +137,7 @@ type ProviderIncomeEvent struct {
 	Type            Type
 	Instrument      InstrumentReference
 
-	AmountPerUnit float64
+	AmountPerUnit money.Price
 	Currency      string
 	// Components, when present, describe a mixed distribution. Their per-unit
 	// amounts should sum to AmountPerUnit.
@@ -161,7 +165,7 @@ type IncomeEvent struct {
 
 	Instrument InstrumentReference
 
-	AmountPerUnit float64
+	AmountPerUnit money.Price
 	Currency      string
 	Components    []ProviderComponent
 
@@ -215,13 +219,13 @@ type Application struct {
 	UserID        string
 	Status        ApplicationStatus
 
-	EligibleQuantity     float64
-	GrossAmount          float64
-	WithholdingAmount    float64
-	FeeAmount            float64
-	NetAmount            float64
+	EligibleQuantity     money.Quantity
+	GrossAmount          money.Amount
+	WithholdingAmount    money.Amount
+	FeeAmount            money.Amount
+	NetAmount            money.Amount
 	CashCurrency         string
-	ReinvestmentQuantity float64
+	ReinvestmentQuantity money.Quantity
 	Estimated            bool
 
 	PortfolioVersionBefore   int64

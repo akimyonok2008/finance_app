@@ -31,19 +31,19 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 
 	// Cash dividend (return-bearing) raises the index.
 	div, err := svc.RecordIncome(ctx, userID, "pg-div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 	assert.Greater(t, div.RankedIndexAfter, div.RankedIndexBefore)
 
 	// Reinvested dividend commits two grouped activity rows atomically.
 	_, err = svc.RecordIncome(ctx, userID, "pg-reinv", IncomeInput{
-		Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD", Amount: 195,
+		Subtype: IncomeReinvestedDiv, Symbol: "AAPL", AssetType: AssetTypeStock, Currency: "USD", Amount: testAmount("195"),
 	})
 	require.NoError(t, err)
 
 	// Management fee (return-bearing negative) lowers the index.
-	fee, err := svc.RecordFee(ctx, userID, "pg-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: 25})
+	fee, err := svc.RecordFee(ctx, userID, "pg-fee", FeeInput{Subtype: FeeManagement, Currency: "USD", Amount: testAmount("25")})
 	require.NoError(t, err)
 	assert.Less(t, fee.RankedIndexAfter, fee.RankedIndexBefore)
 
@@ -70,7 +70,7 @@ func TestPG_IncomeFeeCorporateActionsPersist(t *testing.T) {
 
 	// Idempotent replay of the dividend.
 	replay, err := svc.RecordIncome(ctx, userID, "pg-div", IncomeInput{
-		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: 100,
+		Subtype: IncomeCashDividend, Symbol: "AAPL", Currency: "USD", Amount: testAmount("100"),
 	})
 	require.NoError(t, err)
 	assert.True(t, replay.Duplicate)

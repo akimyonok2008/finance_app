@@ -155,7 +155,7 @@ func TestPositionSpecificIncomeKeepsInstrumentIdentityAndSymbolSnapshot(t *testi
 
 	income, err := svc.RecordIncome(ctx(), "u1", "identity-income", IncomeInput{
 		Subtype: IncomeCashDividend, Symbol: "MSFT", Currency: "USD",
-		Amount: 5, Provenance: ProvenanceProviderReported,
+		Amount: testAmount("5"), Provenance: ProvenanceProviderReported,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, income.Activity)

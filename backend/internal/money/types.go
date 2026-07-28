@@ -326,6 +326,7 @@ func (i IndexValue) DivExact(o IndexValue, places int32) (Ratio, error) {
 func (r Ratio) Mul(o Ratio) Ratio { return Ratio{r.Decimal.mul(o.Decimal)} }
 func (r Ratio) Add(o Ratio) Ratio { return Ratio{r.Decimal.add(o.Decimal)} }
 func (r Ratio) Sub(o Ratio) Ratio { return Ratio{r.Decimal.sub(o.Decimal)} }
+func (r Ratio) Cmp(o Ratio) int   { return r.Decimal.Cmp(o.Decimal) }
 
 // DivExact divides one ratio by another at the given precision
 // (round-half-even), for explicit-precision intermediate math (e.g. a

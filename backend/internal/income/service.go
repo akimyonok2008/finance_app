@@ -3,9 +3,10 @@ package income
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Holder is a portfolio that currently holds a symbol, with the acquisition time
@@ -36,13 +37,13 @@ type AppliedIncome struct {
 	AssetType         string
 	Currency          string
 	Reinvest          bool
-	Gross             float64
-	Withholding       float64
-	Fee               float64
-	ReinvestPrice     float64 // 0 → use current market price (estimated)
+	Gross             money.Amount
+	Withholding       money.Amount
+	Fee               money.Amount
+	ReinvestPrice     money.Price // 0 → use current market price (estimated)
 	PriceMethod       string
-	StockRatioNum     float64
-	StockRatioDen     float64
+	StockRatioNum     money.Ratio
+	StockRatioDen     money.Ratio
 	Estimated         bool
 	PaymentDate       time.Time
 	TaxClassification string
@@ -56,7 +57,7 @@ type PortfolioGateway interface {
 	HistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]Holder, error)
 	// EligibleQuantity reconstructs the user's holding of symbol as of asOf from
 	// the immutable ledger (historical entitlement, not current quantity).
-	EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error)
+	EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error)
 	// ApplyIncome credits (or reinvests) one income component idempotently by
 	// requestID, through the aggregate coordinator.
 	ApplyIncome(ctx context.Context, userID, requestID string, in AppliedIncome) error
@@ -302,7 +303,7 @@ func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) b
 		s.metrics.Inc("income_event_eligibility_failures_total")
 		return false
 	}
-	if !(eligible > 0) || math.IsInf(eligible, 0) || math.IsNaN(eligible) {
+	if eligible.Sign() <= 0 {
 		return false
 	}
 
@@ -316,7 +317,11 @@ func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) b
 
 	components := s.components(ev)
 	reinvest := s.prefs.reinvest(ev.Instrument.Symbol)
-	var totalGross, totalWithholding, totalNet, reinvestQty float64
+	totalGross := money.ZeroAmount()
+	totalWithholding := money.ZeroAmount()
+	totalFee := money.ZeroAmount()
+	totalNet := money.ZeroAmount()
+	reinvestQty := money.ZeroQuantity()
 	estimatedAny := false
 	for i, comp := range components {
 		in := s.buildApplied(ev, comp, h, eligible, reinvest, i)
@@ -326,14 +331,18 @@ func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) b
 			_ = s.store.FailApplication(ctx, ev.ID, h.PortfolioID, err.Error(), s.now().Add(s.retryIn))
 			return false
 		}
-		totalGross += in.Gross
-		totalWithholding += in.Withholding
-		totalNet += in.Gross - in.Withholding - in.Fee
+		totalGross = totalGross.Add(in.Gross)
+		totalWithholding = totalWithholding.Add(in.Withholding)
+		totalFee = totalFee.Add(in.Fee)
+		totalNet = totalNet.Add(in.Gross.Sub(in.Withholding).Sub(in.Fee))
 		if in.Estimated {
 			estimatedAny = true
 		}
-		if in.Reinvest && in.ReinvestPrice > 0 {
-			reinvestQty += (in.Gross - in.Withholding - in.Fee) / in.ReinvestPrice
+		if in.Reinvest && in.ReinvestPrice.Sign() > 0 {
+			qty, divErr := in.Gross.Sub(in.Withholding).Sub(in.Fee).DivByPrice(in.ReinvestPrice, money.ScaleQuantity)
+			if divErr == nil {
+				reinvestQty = reinvestQty.Add(qty)
+			}
 		}
 	}
 
@@ -341,9 +350,9 @@ func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) b
 	_ = s.store.CompleteApplication(ctx, Application{
 		IncomeEventID: ev.ID, PortfolioID: h.PortfolioID, UserID: h.UserID,
 		Status: ApplicationApplied, EligibleQuantity: eligible,
-		GrossAmount: round2(totalGross), WithholdingAmount: round2(totalWithholding),
-		NetAmount: round2(totalNet), CashCurrency: ev.Currency,
-		ReinvestmentQuantity: reinvestQty, Estimated: estimatedAny, AppliedAt: &now,
+		GrossAmount: totalGross, WithholdingAmount: totalWithholding, FeeAmount: totalFee,
+		NetAmount: totalNet, CashCurrency: ev.Currency,
+		ReinvestmentQuantity: money.QuantizeQuantity(reinvestQty), Estimated: estimatedAny, AppliedAt: &now,
 	})
 	s.metrics.Inc("income_events_applied_total")
 	s.metrics.Observe("income_event_application_lag_seconds", now.Sub(ev.PaymentDate).Seconds())
@@ -361,7 +370,7 @@ func (s *Service) components(ev IncomeEvent) []ProviderComponent {
 
 // buildApplied computes gross/withholding/net for one component and packages the
 // neutral instruction for the gateway.
-func (s *Service) buildApplied(ev IncomeEvent, comp ProviderComponent, h Holder, eligible float64, reinvest bool, idx int) AppliedIncome {
+func (s *Service) buildApplied(ev IncomeEvent, comp ProviderComponent, h Holder, eligible money.Quantity, reinvest bool, idx int) AppliedIncome {
 	compType := comp.Type
 	if compType == "" {
 		compType = ev.Type
@@ -374,16 +383,19 @@ func (s *Service) buildApplied(ev IncomeEvent, comp ProviderComponent, h Holder,
 	}
 	if class == ClassStockDividend {
 		// AmountPerUnit carries new-shares-per-held-share.
-		in.StockRatioNum = comp.AmountPerUnit
-		in.StockRatioDen = 1
+		in.StockRatioNum = money.MustRatio(comp.AmountPerUnit.String())
+		in.StockRatioDen = money.MustRatio("1")
 		return in
 	}
-	gross := round2(eligible * comp.AmountPerUnit)
+	gross, err := money.QuantizeCash(eligible.MulPrice(comp.AmountPerUnit), ev.Currency)
+	if err != nil {
+		return in
+	}
 	in.Gross = gross
 	// Withholding is an OPTIONAL account-level estimate; default credits gross.
 	rate := s.prefs.Withholding.Rate(compType, ev.Instrument.Symbol)
-	if rate > 0 {
-		in.Withholding = round2(gross * rate)
+	if rate.Sign() > 0 {
+		in.Withholding, _ = money.QuantizeCash(gross.MulRatio(rate), ev.Currency)
 	}
 	// Reinvestment only applies to ordinary cash income (never return of capital).
 	if reinvest && class == ClassOrdinary {
@@ -402,5 +414,3 @@ func (s *Service) buildApplied(ev IncomeEvent, comp ProviderComponent, h Holder,
 func (s *Service) HandleCorrection(ctx context.Context, userID string, c Correction) error {
 	return s.applyCorrection(ctx, userID, c)
 }
-
-func round2(v float64) float64 { return math.Round(v*100) / 100 }
