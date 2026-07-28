@@ -27,6 +27,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
@@ -162,7 +163,11 @@ func (a benchmarkHistoryAdapter) GetAdjustedCloseSeries(ctx context.Context, sym
 	}
 	out := make([]benchmark.PricePoint, 0, len(bars))
 	for _, bar := range bars {
-		out = append(out, benchmark.PricePoint{Date: bar.Date, RawClose: bar.Close})
+		price, err := money.ParsePrice(strconv.FormatFloat(bar.Close, 'f', -1, 64))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, benchmark.PricePoint{Date: bar.Date, RawClose: price})
 	}
 	return out, nil
 }
@@ -207,10 +212,14 @@ func (a benchmarkComparisonAdapter) ReturnOver(ctx context.Context, recipeID str
 	if err != nil {
 		return performancehistory.BenchmarkReturn{}, err
 	}
+	returnPct, err := strconv.ParseFloat(result.ReturnPercentage.String(), 64)
+	if err != nil {
+		return performancehistory.BenchmarkReturn{}, err
+	}
 	return performancehistory.BenchmarkReturn{
 		RecipeID:         recipeID,
 		Name:             a.recipes[recipeID].Name,
-		ReturnPercentage: result.ReturnPercentage,
+		ReturnPercentage: returnPct,
 		EffectiveStart:   result.EffectiveStart,
 		EffectiveEnd:     result.EffectiveEnd,
 		Quality:          string(result.DataMetadata.Quality),

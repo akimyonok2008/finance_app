@@ -2,9 +2,10 @@ package benchmark
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 func TestSnapshotResolverNormalizesWeights(t *testing.T) {
@@ -19,15 +20,15 @@ func TestSnapshotResolverNormalizesWeights(t *testing.T) {
 	if err := validateWeights(resolved.Components); err != nil {
 		t.Errorf("resolved 13F weights must be valid: %v", err)
 	}
-	total := 0.0
+	total := money.ZeroWeight()
 	for _, c := range resolved.Components {
 		if c.Symbol == "" {
 			t.Errorf("resolved 13F leg must be a concrete symbol, got recipeRef %q", c.RecipeRef)
 		}
-		total += c.Weight
+		total = total.Add(c.Weight)
 	}
-	if math.Abs(total-1) > 1e-9 {
-		t.Errorf("resolved weights must sum to 1, got %.6f", total)
+	if !total.Equal(money.MustWeight("1").Decimal) {
+		t.Errorf("resolved weights must sum to 1, got %s", total.String())
 	}
 }
 

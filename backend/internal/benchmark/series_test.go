@@ -3,25 +3,37 @@ package benchmark
 import (
 	"errors"
 	"math"
+	"strconv"
 	"testing"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 func seriesReturnPct(pts []PricePoint) float64 {
-	return (pts[len(pts)-1].AdjustedClose/pts[0].AdjustedClose - 1) * 100
+	ratio, err := pts[len(pts)-1].AdjustedClose.DivExact(pts[0].AdjustedClose, intermediatePrecision)
+	if err != nil {
+		panic(err)
+	}
+	pct := ratio.Sub(money.MustRatio("1")).Mul(money.MustRatio("100"))
+	f, err := strconv.ParseFloat(pct.String(), 64)
+	if err != nil {
+		panic(err)
+	}
+	return f
 }
 
 // TestSplitDoesNotCreateFalseReturn: a 2-for-1 split halves the raw price but is
 // economically neutral. Raw close shows -50%; the adjusted series must show 0%.
 func TestSplitDoesNotCreateFalseReturn(t *testing.T) {
 	raw := []PricePoint{
-		{Date: "2026-01-02", AdjustedClose: 100},
-		{Date: "2026-01-05", AdjustedClose: 50}, // post 2-for-1 split
+		{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")},
+		{Date: "2026-01-05", AdjustedClose: money.MustPrice("50")}, // post 2-for-1 split
 	}
 	if got := seriesReturnPct(raw); math.Abs(got-(-50)) > 1e-9 {
 		t.Fatalf("raw return should be -50%%, got %.4f", got)
 	}
 	adj, err := BuildTotalReturnSeries("AAPL", raw,
-		[]CorporateAction{{Date: "2026-01-05", SplitRatio: 2}},
+		[]CorporateAction{{Date: "2026-01-05", SplitRatio: money.MustRatio("2")}},
 		BenchmarkDataMetadata{Provider: "test"})
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -36,15 +48,15 @@ func TestSplitDoesNotCreateFalseReturn(t *testing.T) {
 // two must not be treated as equal.
 func TestDividendChangesTotalReturn(t *testing.T) {
 	raw := []PricePoint{
-		{Date: "2026-01-02", AdjustedClose: 100},
-		{Date: "2026-02-02", AdjustedClose: 98},
+		{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")},
+		{Date: "2026-02-02", AdjustedClose: money.MustPrice("98")},
 	}
 	rawReturn := seriesReturnPct(raw)
 	if math.Abs(rawReturn-(-2)) > 1e-9 {
 		t.Fatalf("raw return should be -2%%, got %.4f", rawReturn)
 	}
 	adj, err := BuildTotalReturnSeries("SCHD", raw,
-		[]CorporateAction{{Date: "2026-02-02", CashDividend: 5}},
+		[]CorporateAction{{Date: "2026-02-02", CashDividend: money.MustPrice("5")}},
 		BenchmarkDataMetadata{Provider: "test"})
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -81,7 +93,10 @@ func rawMeta() BenchmarkDataMetadata {
 }
 
 func twoPoints() []PricePoint {
-	return []PricePoint{{Date: "2026-01-02", AdjustedClose: 100}, {Date: "2026-01-05", AdjustedClose: 101}}
+	return []PricePoint{
+		{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")},
+		{Date: "2026-01-05", AdjustedClose: money.MustPrice("101")},
+	}
 }
 
 func TestValidateSeries_AdjustedAcceptedForAwards(t *testing.T) {
@@ -131,15 +146,17 @@ func TestValidateSeries_StaleRejectedForAwards(t *testing.T) {
 }
 
 func TestValidateSeries_RejectsBadValues(t *testing.T) {
+	// NaN/Inf cases are no longer representable: money.Price parsing rejects
+	// non-finite values at construction, so validateSeries can never observe
+	// one — that invariant is now enforced structurally rather than at
+	// validation time.
 	cases := map[string][]PricePoint{
-		"too few":   {{Date: "2026-01-02", AdjustedClose: 100}},
-		"negative":  {{Date: "2026-01-02", AdjustedClose: 100}, {Date: "2026-01-05", AdjustedClose: -1}},
-		"zero":      {{Date: "2026-01-02", AdjustedClose: 100}, {Date: "2026-01-05", AdjustedClose: 0}},
-		"nan":       {{Date: "2026-01-02", AdjustedClose: 100}, {Date: "2026-01-05", AdjustedClose: math.NaN()}},
-		"inf":       {{Date: "2026-01-02", AdjustedClose: 100}, {Date: "2026-01-05", AdjustedClose: math.Inf(1)}},
-		"unsorted":  {{Date: "2026-01-05", AdjustedClose: 100}, {Date: "2026-01-02", AdjustedClose: 101}},
-		"duplicate": {{Date: "2026-01-02", AdjustedClose: 100}, {Date: "2026-01-02", AdjustedClose: 101}},
-		"bad date":  {{Date: "nope", AdjustedClose: 100}, {Date: "2026-01-05", AdjustedClose: 101}},
+		"too few":   {{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")}},
+		"negative":  {{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")}, {Date: "2026-01-05", AdjustedClose: money.MustPrice("-1")}},
+		"zero":      {{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")}, {Date: "2026-01-05", AdjustedClose: money.MustPrice("0")}},
+		"unsorted":  {{Date: "2026-01-05", AdjustedClose: money.MustPrice("100")}, {Date: "2026-01-02", AdjustedClose: money.MustPrice("101")}},
+		"duplicate": {{Date: "2026-01-02", AdjustedClose: money.MustPrice("100")}, {Date: "2026-01-02", AdjustedClose: money.MustPrice("101")}},
+		"bad date":  {{Date: "nope", AdjustedClose: money.MustPrice("100")}, {Date: "2026-01-05", AdjustedClose: money.MustPrice("101")}},
 	}
 	for name, pts := range cases {
 		t.Run(name, func(t *testing.T) {

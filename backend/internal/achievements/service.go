@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
@@ -351,12 +352,16 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 		if err != nil {
 			continue
 		}
+		benchReturnPct, err := strconv.ParseFloat(benchResult.ReturnPercentage.String(), 64)
+		if err != nil {
+			continue
+		}
 		result, err := s.rules.Evaluate(benchmark.EvaluationContext{
 			Badge:              badge,
 			StartDate:          benchResult.EffectiveStart.Format("2006-01-02"),
 			EndDate:            benchResult.EffectiveEnd.Format("2006-01-02"),
 			PortfolioReturnPct: portfolioReturn,
-			BenchmarkReturnPct: benchResult.ReturnPercentage,
+			BenchmarkReturnPct: benchReturnPct,
 		})
 		if err != nil || !result.Unlocked || result.Evidence == nil {
 			continue

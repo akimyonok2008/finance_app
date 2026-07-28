@@ -2,9 +2,10 @@ package benchmark
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // CorporateAction is a raw dividend or split event used to construct a
@@ -12,9 +13,9 @@ import (
 // prices plus events let us build trustworthy data explicitly rather than
 // mislabeling raw close as adjusted.
 type CorporateAction struct {
-	Date         string  // YYYY-MM-DD, ex-date
-	CashDividend float64 // per-share cash distribution (>0 means a dividend)
-	SplitRatio   float64 // shares after / shares before (2.0 = 2-for-1); 0/1 means none
+	Date         string      // YYYY-MM-DD, ex-date
+	CashDividend money.Price // per-share cash distribution (>0 means a dividend)
+	SplitRatio   money.Ratio // shares after / shares before (2.0 = 2-for-1); 0/1 means none
 }
 
 // validateSeries checks a single component's series against the requirement and
@@ -48,11 +49,10 @@ func validateSeries(s BenchmarkPriceSeries, req SeriesRequirement) (DataQuality,
 				return DataQualityInvalid, fmt.Errorf("%w: %s duplicate date %s", ErrInvalidBenchmarkSeries, s.Symbol, p.Date)
 			}
 		}
+		// money.Decimal parsing already rejects NaN/Inf, so only the
+		// positivity check remains here.
 		value := pointValue(p, s.Metadata.PriceType)
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return DataQualityInvalid, fmt.Errorf("%w: %s non-finite price", ErrInvalidBenchmarkSeries, s.Symbol)
-		}
-		if value <= 0 {
+		if value.Sign() <= 0 {
 			return DataQualityInvalid, fmt.Errorf("%w: %s non-positive price", ErrInvalidBenchmarkSeries, s.Symbol)
 		}
 		prevDate = p.Date
@@ -98,11 +98,11 @@ func validateSeries(s BenchmarkPriceSeries, req SeriesRequirement) (DataQuality,
 	return DataQualityAcceptable, nil
 }
 
-func pointValue(p PricePoint, priceType PriceType) float64 {
+func pointValue(p PricePoint, priceType PriceType) money.Price {
 	if priceType == PriceTypeRawClose {
 		// Compatibility for legacy test/providers. New raw adapters populate
 		// RawClose and leave AdjustedClose empty.
-		if p.RawClose == 0 {
+		if p.RawClose.IsZero() {
 			return p.AdjustedClose
 		}
 		return p.RawClose
@@ -129,7 +129,7 @@ func BuildTotalReturnSeries(symbol string, raw []PricePoint, actions []Corporate
 	sort.Slice(pts, func(i, j int) bool { return pts[i].Date < pts[j].Date })
 
 	// Index raw close by date for dividend-relative computation.
-	closeByDate := make(map[string]float64, len(pts))
+	closeByDate := make(map[string]money.Price, len(pts))
 	for _, p := range pts {
 		closeByDate[p.Date] = p.AdjustedClose
 	}
@@ -139,36 +139,46 @@ func BuildTotalReturnSeries(symbol string, raw []PricePoint, actions []Corporate
 	acts := append([]CorporateAction(nil), actions...)
 	sort.Slice(acts, func(i, j int) bool { return acts[i].Date > acts[j].Date }) // newest first
 
-	factor := make([]float64, len(pts))
+	one := money.MustRatio("1")
+	factor := make([]money.Ratio, len(pts))
 	for i := range factor {
-		factor[i] = 1.0
+		factor[i] = one
 	}
 	for _, a := range acts {
-		f := 1.0
-		if a.SplitRatio > 0 && a.SplitRatio != 1 {
-			f *= 1.0 / a.SplitRatio
+		f := one
+		if a.SplitRatio.Sign() > 0 && !a.SplitRatio.Equal(one.Decimal) {
+			inv, err := one.DivExact(a.SplitRatio, intermediatePrecision)
+			if err != nil {
+				return BenchmarkPriceSeries{}, fmt.Errorf("%w: %s bad corporate action on %s", ErrInvalidBenchmarkSeries, symbol, a.Date)
+			}
+			f = f.Mul(inv)
 		}
-		if a.CashDividend > 0 {
+		if a.CashDividend.Sign() > 0 {
 			// Reference close is the trading day immediately before the ex-date.
 			prevClose := priorClose(pts, a.Date)
-			if prevClose > 0 {
-				f *= 1.0 - a.CashDividend/prevClose
+			if prevClose.Sign() > 0 {
+				divRatio, err := a.CashDividend.DivExact(prevClose, intermediatePrecision)
+				if err != nil {
+					return BenchmarkPriceSeries{}, fmt.Errorf("%w: %s bad corporate action on %s", ErrInvalidBenchmarkSeries, symbol, a.Date)
+				}
+				f = f.Mul(one.Sub(divRatio))
 			}
 		}
-		if f <= 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+		if f.Sign() <= 0 {
 			return BenchmarkPriceSeries{}, fmt.Errorf("%w: %s bad corporate action on %s", ErrInvalidBenchmarkSeries, symbol, a.Date)
 		}
 		// Apply to every point strictly before the ex-date.
 		for i, p := range pts {
 			if p.Date < a.Date {
-				factor[i] *= f
+				factor[i] = factor[i].Mul(f)
 			}
 		}
 	}
 
 	out := make([]PricePoint, len(pts))
 	for i, p := range pts {
-		out[i] = PricePoint{Date: p.Date, AdjustedClose: round(p.AdjustedClose*factor[i], 8)}
+		adjusted := money.QuantizePrice(p.AdjustedClose.MulRatio(factor[i]))
+		out[i] = PricePoint{Date: p.Date, AdjustedClose: adjusted}
 	}
 
 	meta := base
@@ -185,8 +195,8 @@ func BuildTotalReturnSeries(symbol string, raw []PricePoint, actions []Corporate
 }
 
 // priorClose returns the raw close on the latest date strictly before ref.
-func priorClose(sorted []PricePoint, ref string) float64 {
-	var last float64
+func priorClose(sorted []PricePoint, ref string) money.Price {
+	var last money.Price
 	for _, p := range sorted {
 		if p.Date < ref {
 			last = p.AdjustedClose

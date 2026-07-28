@@ -162,6 +162,17 @@ func ParseWeight(s string) (Weight, error) {
 	return Weight{d}, nil
 }
 
+// Must* constructors parse a literal decimal string and panic on failure. They
+// are intended for compile-time-constant literals (catalogue data, test
+// fixtures) where the string is known-good, never for untrusted input.
+func MustAmount(s string) Amount         { return Amount{mustNew(s)} }
+func MustQuantity(s string) Quantity     { return Quantity{mustNew(s)} }
+func MustPrice(s string) Price           { return Price{mustNew(s)} }
+func MustFXRate(s string) FXRate         { return FXRate{mustNew(s)} }
+func MustRatio(s string) Ratio           { return Ratio{mustNew(s)} }
+func MustIndexValue(s string) IndexValue { return IndexValue{mustNew(s)} }
+func MustWeight(s string) Weight         { return Weight{mustNew(s)} }
+
 // ---- Amount arithmetic ----
 
 // Cmp compares two Amounts: -1, 0, 1. Exact decimal comparison, no epsilon.
@@ -275,19 +286,81 @@ func (a Amount) DivByPrice(p Price, places int32) (Quantity, error) {
 	return Quantity{d}, nil
 }
 
+func (p Price) Add(o Price) Price      { return Price{p.Decimal.add(o.Decimal)} }
+func (p Price) Sub(o Price) Price      { return Price{p.Decimal.sub(o.Decimal)} }
+func (p Price) MulRatio(r Ratio) Price { return Price{p.Decimal.mul(r.Decimal)} }
+
+// DivExact divides one price by another, producing a dimensionless Ratio
+// (e.g. curr/prev for a period return), at the given precision
+// (round-half-even). It is not a posting-boundary rounding; callers
+// requantize at persistence time if the result is itself a Price/Index.
+func (p Price) DivExact(o Price, places int32) (Ratio, error) {
+	d, err := p.Decimal.divPrecise(o.Decimal, places)
+	if err != nil {
+		return Ratio{}, err
+	}
+	return Ratio{d}, nil
+}
+
 // ---- IndexValue / Ratio ----
 
 // MulRatio scales an index value by a ratio (e.g. checkpoint index *
 // current/segment-start ratio in ranked performance).
 func (i IndexValue) MulRatio(r Ratio) IndexValue { return IndexValue{i.Decimal.mul(r.Decimal)} }
 
+// Sub subtracts two index values, producing a dimensionless Ratio (e.g. an
+// index expressed against a 100-base yields percentage points directly).
+func (i IndexValue) Sub(o IndexValue) Ratio { return Ratio{i.Decimal.sub(o.Decimal)} }
+
+// DivExact divides one index value by another at the given precision
+// (round-half-even), producing a dimensionless Ratio (e.g. last/first for a
+// period return).
+func (i IndexValue) DivExact(o IndexValue, places int32) (Ratio, error) {
+	d, err := i.Decimal.divPrecise(o.Decimal, places)
+	if err != nil {
+		return Ratio{}, err
+	}
+	return Ratio{d}, nil
+}
+
 func (r Ratio) Mul(o Ratio) Ratio { return Ratio{r.Decimal.mul(o.Decimal)} }
 func (r Ratio) Add(o Ratio) Ratio { return Ratio{r.Decimal.add(o.Decimal)} }
 func (r Ratio) Sub(o Ratio) Ratio { return Ratio{r.Decimal.sub(o.Decimal)} }
 
+// DivExact divides one ratio by another at the given precision
+// (round-half-even), for explicit-precision intermediate math (e.g. a
+// fractional position within a series).
+func (r Ratio) DivExact(o Ratio, places int32) (Ratio, error) {
+	d, err := r.Decimal.divPrecise(o.Decimal, places)
+	if err != nil {
+		return Ratio{}, err
+	}
+	return Ratio{d}, nil
+}
+
 // ---- Weight ----
 
 func (w Weight) Add(o Weight) Weight { return Weight{w.Decimal.add(o.Decimal)} }
+func (w Weight) Sub(o Weight) Weight { return Weight{w.Decimal.sub(o.Decimal)} }
+
+// Mul multiplies two weights (e.g. a nested recipe leg's weight scaled by its
+// parent's weight), producing an effective Weight.
+func (w Weight) Mul(o Weight) Weight { return Weight{w.Decimal.mul(o.Decimal)} }
+
+// MulRatio scales a weight by a dimensionless ratio (e.g. a leg's weight
+// times its per-period return), producing a Ratio contribution.
+func (w Weight) MulRatio(r Ratio) Ratio { return Ratio{w.Decimal.mul(r.Decimal)} }
+
+// DivExact divides one weight by another at the given precision
+// (round-half-even), e.g. renormalizing a raw weight against the sum of all
+// raw weights so the result sums to exactly 1.
+func (w Weight) DivExact(o Weight, places int32) (Weight, error) {
+	d, err := w.Decimal.divPrecise(o.Decimal, places)
+	if err != nil {
+		return Weight{}, err
+	}
+	return Weight{d}, nil
+}
 
 // ---- Quantization helpers (posting/persistence boundary only) ----
 

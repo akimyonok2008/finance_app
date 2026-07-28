@@ -3,6 +3,8 @@ package benchmark
 import (
 	"errors"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // PriceType records what kind of price series a leg was built from. This is the
@@ -187,7 +189,10 @@ type BenchmarkEvaluationMetadata struct {
 // BenchmarkReturnResult is the full outcome of a benchmark evaluation: the
 // number plus everything needed to trust, audit and reproduce it.
 type BenchmarkReturnResult struct {
-	ReturnPercentage float64                     `json:"return_percentage"`
+	// ReturnPercentage is percentage points (e.g. 5.23 means +5.23%), derived
+	// exactly from the quantized index (index - 100 base). It is exact
+	// decimal, never a rounded float display value.
+	ReturnPercentage money.Ratio                 `json:"return_percentage"`
 	EffectiveStart   time.Time                   `json:"effective_start"`
 	EffectiveEnd     time.Time                   `json:"effective_end"`
 	RecipeVersion    RecipeVersionMetadata       `json:"recipe_version"`

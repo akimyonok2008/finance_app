@@ -2,9 +2,10 @@ package benchmark
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // MinMappingCoverage is the minimum fraction of a source portfolio's market
@@ -85,18 +86,24 @@ func (v BenchmarkRecipeVersion) Validate() error {
 	if len(v.Components) == 0 {
 		return fmt.Errorf("recipe version %s has no components", v.VersionID)
 	}
-	total := 0.0
+	total := money.ZeroWeight()
+	tolerance := money.MustWeight("0.0001")
+	one := money.MustWeight("1")
 	for _, c := range v.Components {
-		if c.Weight <= 0 || math.IsNaN(c.Weight) || math.IsInf(c.Weight, 0) {
+		if c.Weight.Sign() <= 0 {
 			return fmt.Errorf("recipe version %s: non-positive/non-finite weight", v.VersionID)
 		}
 		if (c.Symbol == "") == (c.RecipeRef == "") {
 			return fmt.Errorf("recipe version %s: each component needs exactly one of symbol/recipeRef", v.VersionID)
 		}
-		total += c.Weight
+		total = total.Add(c.Weight)
 	}
-	if math.Abs(total-1) >= 0.0001 {
-		return fmt.Errorf("recipe version %s: weights must sum to 1, got %.6f", v.VersionID, total)
+	deviation := total.Sub(one)
+	if deviation.Sign() < 0 {
+		deviation = money.ZeroWeight().Sub(deviation)
+	}
+	if deviation.Cmp(tolerance.Decimal) >= 0 {
+		return fmt.Errorf("recipe version %s: weights must sum to 1, got %s", v.VersionID, total.String())
 	}
 	if v.EffectiveUntil != nil && !v.EffectiveUntil.After(v.EffectiveFrom) {
 		return fmt.Errorf("recipe version %s: effective_until must be after effective_from", v.VersionID)
@@ -255,19 +262,19 @@ func berkshireVersions() []BenchmarkRecipeVersion {
 			EffectiveFrom:   filed2025,
 			EffectiveUntil:  &filed2026,
 			Components: normalizeWeights([]AssetAllocation{
-				{Symbol: "AAPL", Weight: 0.277953},
-				{Symbol: "AXP", Weight: 0.170140},
-				{Symbol: "KO", Weight: 0.119492},
-				{Symbol: "BAC", Weight: 0.109930},
-				{Symbol: "CVX", Weight: 0.082763},
-				{Symbol: "OXY", Weight: 0.054547},
-				{Symbol: "MCO", Weight: 0.047919},
-				{Symbol: "KHC", Weight: 0.041331},
-				{Symbol: "CB", Weight: 0.034052},
-				{Symbol: "DVA", Weight: 0.022422},
-				{Symbol: "VRSN", Weight: 0.014073},
-				{Symbol: "KR", Weight: 0.014117},
-				{Symbol: "SIRI", Weight: 0.011263},
+				{Symbol: "AAPL", Weight: money.MustWeight("0.277953")},
+				{Symbol: "AXP", Weight: money.MustWeight("0.170140")},
+				{Symbol: "KO", Weight: money.MustWeight("0.119492")},
+				{Symbol: "BAC", Weight: money.MustWeight("0.109930")},
+				{Symbol: "CVX", Weight: money.MustWeight("0.082763")},
+				{Symbol: "OXY", Weight: money.MustWeight("0.054547")},
+				{Symbol: "MCO", Weight: money.MustWeight("0.047919")},
+				{Symbol: "KHC", Weight: money.MustWeight("0.041331")},
+				{Symbol: "CB", Weight: money.MustWeight("0.034052")},
+				{Symbol: "DVA", Weight: money.MustWeight("0.022422")},
+				{Symbol: "VRSN", Weight: money.MustWeight("0.014073")},
+				{Symbol: "KR", Weight: money.MustWeight("0.014117")},
+				{Symbol: "SIRI", Weight: money.MustWeight("0.011263")},
 			}),
 			SourceType:             "sec_13f_hr",
 			SourceURL:              "https://www.sec.gov/Archives/edgar/data/1067983/000095012325005701/form13fInfoTable.xml",
@@ -292,21 +299,21 @@ func berkshireVersions() []BenchmarkRecipeVersion {
 			PubliclyKnownAt: filed2026,
 			EffectiveFrom:   filed2026,
 			Components: normalizeWeights([]AssetAllocation{
-				{Symbol: "AAPL", Weight: 0.227110},
-				{Symbol: "AXP", Weight: 0.180057},
-				{Symbol: "KO", Weight: 0.119438},
-				{Symbol: "BAC", Weight: 0.098311},
-				{Symbol: "CVX", Weight: 0.068543},
-				{Symbol: "OXY", Weight: 0.067616},
-				{Symbol: "GOOGL", Weight: 0.061251},
-				{Symbol: "CB", Weight: 0.043829},
-				{Symbol: "MCO", Weight: 0.042256},
-				{Symbol: "KHC", Weight: 0.028754},
-				{Symbol: "DVA", Weight: 0.018164},
-				{Symbol: "KR", Weight: 0.014205},
-				{Symbol: "SIRI", Weight: 0.011310},
-				{Symbol: "DAL", Weight: 0.010391},
-				{Symbol: "VRSN", Weight: 0.008766},
+				{Symbol: "AAPL", Weight: money.MustWeight("0.227110")},
+				{Symbol: "AXP", Weight: money.MustWeight("0.180057")},
+				{Symbol: "KO", Weight: money.MustWeight("0.119438")},
+				{Symbol: "BAC", Weight: money.MustWeight("0.098311")},
+				{Symbol: "CVX", Weight: money.MustWeight("0.068543")},
+				{Symbol: "OXY", Weight: money.MustWeight("0.067616")},
+				{Symbol: "GOOGL", Weight: money.MustWeight("0.061251")},
+				{Symbol: "CB", Weight: money.MustWeight("0.043829")},
+				{Symbol: "MCO", Weight: money.MustWeight("0.042256")},
+				{Symbol: "KHC", Weight: money.MustWeight("0.028754")},
+				{Symbol: "DVA", Weight: money.MustWeight("0.018164")},
+				{Symbol: "KR", Weight: money.MustWeight("0.014205")},
+				{Symbol: "SIRI", Weight: money.MustWeight("0.011310")},
+				{Symbol: "DAL", Weight: money.MustWeight("0.010391")},
+				{Symbol: "VRSN", Weight: money.MustWeight("0.008766")},
 			}),
 			SourceType:             "sec_13f_hr",
 			SourceURL:              "https://www.sec.gov/Archives/edgar/data/1067983/000119312526226661/53405.xml",
@@ -326,21 +333,25 @@ func berkshireVersions() []BenchmarkRecipeVersion {
 
 // normalizeWeights rescales positive weights to sum to exactly 1.
 func normalizeWeights(raw []AssetAllocation) []AssetAllocation {
-	total := 0.0
+	total := money.ZeroWeight()
 	for _, c := range raw {
-		if c.Weight > 0 {
-			total += c.Weight
+		if c.Weight.Sign() > 0 {
+			total = total.Add(c.Weight)
 		}
 	}
 	out := make([]AssetAllocation, 0, len(raw))
-	if total <= 0 {
+	if total.Sign() <= 0 {
 		return out
 	}
 	for _, c := range raw {
-		if c.Weight <= 0 {
+		if c.Weight.Sign() <= 0 {
 			continue
 		}
-		out = append(out, AssetAllocation{Symbol: c.Symbol, RecipeRef: c.RecipeRef, Weight: c.Weight / total})
+		normalized, err := c.Weight.DivExact(total, intermediatePrecision)
+		if err != nil {
+			continue
+		}
+		out = append(out, AssetAllocation{Symbol: c.Symbol, RecipeRef: c.RecipeRef, Weight: normalized})
 	}
 	return out
 }
