@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -806,13 +807,15 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 	case MutationDeposit, MutationWithdrawal:
 		currency := req.CashFlow.Currency
 		current, found := cashAmount(oldCash, currency)
-		if req.Kind == MutationWithdrawal && (!found || current+1e-9 < req.CashFlow.Amount) {
+		// Exact decimal comparison: no epsilon tolerance. A withdrawal that
+		// exceeds the held balance is rejected outright.
+		if req.Kind == MutationWithdrawal && (!found || current.Cmp(req.CashFlow.Amount) < 0) {
 			return mutationPlan{}, ErrInsufficientCash
 		}
-		nextAmount := current + req.CashFlow.Amount
+		nextAmount := current.Add(req.CashFlow.Amount)
 		activityType := ActivityDeposit
 		if req.Kind == MutationWithdrawal {
-			nextAmount = current - req.CashFlow.Amount
+			nextAmount = current.Sub(req.CashFlow.Amount)
 			activityType = ActivityWithdrawal
 		}
 		now := val.ObservedAt
@@ -837,7 +840,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		activity := &Activity{
 			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
 			UserID: req.UserID, Type: activityType, Currency: currency,
-			GrossAmount: req.CashFlow.Amount, OccurredAt: occurredAt,
+			GrossAmount: req.CashFlow.Amount.Float64(), OccurredAt: occurredAt,
 			CreatedAt: now, Metadata: metadata,
 		}
 		return mutationPlan{
@@ -882,32 +885,40 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 
 		gross := req.Buy.Quantity * executionPrice
 		totalRequired := gross + fee
+		// totalRequiredAmt/available are exact decimal cash amounts; gross/fee
+		// themselves stay float64 in this pass (Quantity/Price conversion is a
+		// separate, later sub-scope), so this is a documented boundary
+		// conversion, not a re-introduction of float64 cash arithmetic.
+		totalRequiredAmt := money.AmountFromFloat64(totalRequired)
 		available, _ := cashAmount(oldCash, quote.Currency)
 
-		// Automatic purchase funding. The user records a real purchase; Alarvest
-		// infers the funding consequence rather than blocking on a cash balance
-		// the user never asked to manage. Funding is created in the INSTRUMENT'S
-		// QUOTE CURRENCY only — cash in other currencies is never auto-converted.
-		funding := totalRequired - available
-		if funding < 1e-9 {
-			funding = 0
+		// Automatic purchase funding: funding = max(quantity*price + fee -
+		// available_cash, 0), computed with exact decimal arithmetic so no
+		// epsilon snapping is needed to land on exactly zero. Funding is
+		// created in the INSTRUMENT'S QUOTE CURRENCY only — cash in other
+		// currencies is never auto-converted.
+		fundingAmt := totalRequiredAmt.Sub(available)
+		if fundingAmt.Sign() < 0 {
+			fundingAmt = money.ZeroAmount()
 		}
-		if funding > 0 && !pf.AutoFundPurchases {
+		if fundingAmt.Sign() > 0 && !pf.AutoFundPurchases {
 			return mutationPlan{}, ErrInsufficientCash
 		}
-		cashUsed := math.Min(available, totalRequired)
-		nextCash := available + funding - totalRequired
-		if math.Abs(nextCash) < 1e-9 {
-			nextCash = 0
+		cashUsedAmt := totalRequiredAmt
+		if available.Cmp(totalRequiredAmt) < 0 {
+			cashUsedAmt = available
 		}
-		if nextCash < 0 {
+		nextCashAmt := available.Add(fundingAmt).Sub(totalRequiredAmt)
+		if nextCashAmt.Sign() < 0 {
 			return mutationPlan{}, ErrInsufficientCash
 		}
+		funding := fundingAmt.Float64()
+		cashUsed := cashUsedAmt.Float64()
 
 		balance, _ := cashBalance(oldCash, quote.Currency)
 		balance.PortfolioID = pf.ID
 		balance.Currency = quote.Currency
-		balance.Amount = nextCash
+		balance.Amount = nextCashAmt
 		balance.UpdatedAt = now
 		if balance.CreatedAt.IsZero() {
 			balance.CreatedAt = now
@@ -1080,7 +1091,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		balance, _ := cashBalance(oldCash, quote.Currency)
 		balance.PortfolioID = pf.ID
 		balance.Currency = quote.Currency
-		balance.Amount += netProceeds
+		balance.Amount = balance.Amount.Add(money.AmountFromFloat64(netProceeds))
 		balance.UpdatedAt = now
 		if balance.CreatedAt.IsZero() {
 			balance.CreatedAt = now
@@ -1272,14 +1283,14 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		}
 		nextCash := append([]CashBalance(nil), oldCash...)
 		for i := range nextCash {
-			nextCash[i].Amount = 0
+			nextCash[i].Amount = money.ZeroAmount()
 			nextCash[i].UpdatedAt = now
 		}
 		if targetCashBase > 0 {
 			usd, _ := cashBalance(nextCash, fx.BaseCurrency)
 			usd.PortfolioID = pf.ID
 			usd.Currency = fx.BaseCurrency
-			usd.Amount = targetCashBase
+			usd.Amount = money.AmountFromFloat64(targetCashBase)
 			usd.UpdatedAt = now
 			if usd.CreatedAt.IsZero() {
 				usd.CreatedAt = now
@@ -1341,7 +1352,7 @@ func (c *MutationCoordinator) planIncome(req MutationRequest, pf *Portfolio, old
 	net := round2(req.Income.NetCash())
 	now := val.ObservedAt
 	current, _ := cashAmount(oldCash, currency)
-	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current + net, UpdatedAt: now, CreatedAt: now}
+	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(money.AmountFromFloat64(net)), UpdatedAt: now, CreatedAt: now}
 	if existing, ok := cashBalance(oldCash, currency); ok {
 		balance.CreatedAt = existing.CreatedAt
 	}
@@ -1563,7 +1574,7 @@ func (c *MutationCoordinator) planReturnOfCapital(req MutationRequest, pf *Portf
 	updated.UpdatedAt = now
 
 	current, _ := cashAmount(oldCash, currency)
-	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current + net, UpdatedAt: now, CreatedAt: now}
+	balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current.Add(money.AmountFromFloat64(net)), UpdatedAt: now, CreatedAt: now}
 	if existingCash, ok := cashBalance(oldCash, currency); ok {
 		balance.CreatedAt = existingCash.CreatedAt
 	}
@@ -1647,14 +1658,17 @@ func (c *MutationCoordinator) planFee(req MutationRequest, pf *Portfolio, oldOpe
 		return mutationPlan{}, ErrUnsupportedCurrency
 	}
 	current, found := cashAmount(oldCash, currency)
-	if !found || current+1e-9 < req.Fee.Amount {
+	feeAmt := money.AmountFromFloat64(req.Fee.Amount)
+	// Exact decimal comparison: no epsilon tolerance for the insufficient-cash
+	// check.
+	if !found || current.Cmp(feeAmt) < 0 {
 		return mutationPlan{}, ErrInsufficientCashForFee
 	}
 	now := val.ObservedAt
 	balance, _ := cashBalance(oldCash, currency)
 	balance.PortfolioID = pf.ID
 	balance.Currency = currency
-	balance.Amount = current - req.Fee.Amount
+	balance.Amount = current.Sub(feeAmt)
 	balance.UpdatedAt = now
 	if balance.CreatedAt.IsZero() {
 		balance.CreatedAt = now
@@ -1899,7 +1913,9 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !supportedCurrency(req.CashFlow.Currency) {
 			return nil, ErrUnsupportedCurrency
 		}
-		if !finitePositive(req.CashFlow.Amount) {
+		// Decimal amounts cannot be NaN/Inf by construction; only the sign needs
+		// checking (exact, no epsilon).
+		if req.CashFlow.Amount.Sign() <= 0 {
 			return nil, ErrInvalidCashAmount
 		}
 		return nil, nil
@@ -2120,7 +2136,7 @@ func supportedCurrency(currency string) bool {
 	}
 }
 
-func cashAmount(balances []CashBalance, currency string) (float64, bool) {
+func cashAmount(balances []CashBalance, currency string) (money.Amount, bool) {
 	balance, ok := cashBalance(balances, currency)
 	return balance.Amount, ok
 }

@@ -1,6 +1,10 @@
 package money
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/shopspring/decimal"
+)
 
 // Each domain type below wraps Decimal so that values with different
 // economic meaning cannot be combined by accident (e.g. Amount + Quantity
@@ -29,6 +33,26 @@ type IndexValue struct{ Decimal }
 
 // Weight represents a benchmark component weight (expected to sum to 1).
 type Weight struct{ Decimal }
+
+// AmountFromFloat64 converts a legacy float64 cash value into an Amount,
+// exactly (via the float64's own decimal representation, not a truncated
+// string). It exists ONLY for interop with packages not yet migrated off
+// float64 (e.g. internal/fx, internal/performance) and must never be used to
+// silently re-introduce float64 arithmetic inside already-converted domain
+// code — convert once at the boundary, then use Amount arithmetic.
+func AmountFromFloat64(f float64) Amount {
+	return Amount{Decimal{d: decimal.NewFromFloat(f)}}
+}
+
+// Float64 converts an Amount back to float64, for interop with a legacy
+// float64 API at a package boundary (e.g. calling internal/fx.Convert).
+// Precision beyond float64's ~15-17 significant digits is lost; do not use
+// this for authoritative comparisons or further arithmetic within
+// already-converted decimal code.
+func (a Amount) Float64() float64 {
+	f, _ := a.Decimal.d.Float64()
+	return f
+}
 
 func mustNew(s string) Decimal {
 	d, err := newDecimal(s)
@@ -105,6 +129,12 @@ func ParseWeight(s string) (Weight, error) {
 }
 
 // ---- Amount arithmetic ----
+
+// Cmp compares two Amounts: -1, 0, 1. Exact decimal comparison, no epsilon.
+func (a Amount) Cmp(b Amount) int { return a.Decimal.Cmp(b.Decimal) }
+
+// EqualAmount reports exact equality between two Amounts (no epsilon).
+func (a Amount) EqualAmount(b Amount) bool { return a.Decimal.Equal(b.Decimal) }
 
 func (a Amount) Add(b Amount) Amount { return Amount{a.Decimal.add(b.Decimal)} }
 func (a Amount) Sub(b Amount) Amount { return Amount{a.Decimal.sub(b.Decimal)} }

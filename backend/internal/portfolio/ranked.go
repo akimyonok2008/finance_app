@@ -50,14 +50,17 @@ func (s *Service) PortfolioValueObservation(ctx context.Context, userID string) 
 		return performance.ValuationObservation{}, err
 	}
 	for _, balance := range cash {
-		if balance.Amount <= 0 {
+		if balance.Amount.Sign() <= 0 {
 			continue
 		}
 		rate, err := s.fx.GetRate(ctx, balance.Currency, fx.BaseCurrency)
 		if err != nil || !finitePositive(rate) {
 			return performance.ValuationObservation{}, ErrUnsupportedCurrency
 		}
-		value += balance.Amount * rate
+		// balance.Amount.Float64() is a documented boundary conversion: value
+		// and rate stay float64 because they feed internal/performance and
+		// internal/fx, out of scope for this section.
+		value += balance.Amount.Float64() * rate
 		hasActive = true
 	}
 	return performance.ValuationObservation{

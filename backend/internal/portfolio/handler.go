@@ -12,6 +12,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/httpx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // AchievementEvaluator lets the portfolio handler trigger achievement checks
@@ -415,7 +416,7 @@ func (h *Handler) cashFlow(w http.ResponseWriter, r *http.Request, kind Mutation
 		}
 		occurredAt = &parsed
 	}
-	input := CashFlowInput{Currency: req.Currency, Amount: req.Amount, OccurredAt: occurredAt}
+	input := CashFlowInput{Currency: req.Currency, Amount: money.AmountFromFloat64(req.Amount), OccurredAt: occurredAt}
 	requestID, ok := requiredIdempotencyKey(w, r)
 	if !ok {
 		return

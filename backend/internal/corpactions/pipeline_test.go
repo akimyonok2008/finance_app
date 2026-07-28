@@ -10,6 +10,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/corpactions"
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
@@ -58,7 +59,7 @@ func fundedService(t *testing.T, userID string) (*portfolio.Service, *portfolio.
 	repo := portfolio.NewInMemoryRepository()
 	svc := portfolio.NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
-	_, err := svc.DepositCash(ctx, userID, "dep-"+userID, portfolio.CashFlowInput{Currency: "USD", Amount: 10000})
+	_, err := svc.DepositCash(ctx, userID, "dep-"+userID, portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(10000)})
 	require.NoError(t, err)
 	_, err = svc.BuyPosition(ctx, userID, "buy-"+userID, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 10})
 	require.NoError(t, err)
@@ -234,7 +235,7 @@ func TestWorkerAppliesToMultiplePortfolios(t *testing.T) {
 	svc := portfolio.NewService(repo, quotes, fx.NewMockFXProvider())
 	ctx := context.Background()
 	for _, u := range []string{"u1", "u2"} {
-		_, err := svc.DepositCash(ctx, u, "d-"+u, portfolio.CashFlowInput{Currency: "USD", Amount: 5000})
+		_, err := svc.DepositCash(ctx, u, "d-"+u, portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(5000)})
 		require.NoError(t, err)
 		_, err = svc.BuyPosition(ctx, u, "b-"+u, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: 4})
 		require.NoError(t, err)

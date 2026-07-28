@@ -1,6 +1,10 @@
 package portfolio
 
-import "time"
+import (
+	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
+)
 
 // Asset types accepted for a position.
 const (
@@ -32,18 +36,18 @@ const (
 // always in Currency and is constrained to be non-negative in both the domain
 // and database.
 type CashBalance struct {
-	PortfolioID string    `json:"-"`
-	Currency    string    `json:"currency"`
-	Amount      float64   `json:"amount"`
-	CreatedAt   time.Time `json:"-"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	PortfolioID string       `json:"-"`
+	Currency    string       `json:"currency"`
+	Amount      money.Amount `json:"amount"`
+	CreatedAt   time.Time    `json:"-"`
+	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
 type CashBalanceView struct {
-	Currency         string  `json:"currency"`
-	Amount           float64 `json:"amount"`
-	ValueBase        float64 `json:"value_base"`
-	WeightPercentage float64 `json:"weight_percentage"`
+	Currency         string       `json:"currency"`
+	Amount           money.Amount `json:"amount"`
+	ValueBase        money.Amount `json:"value_base"`
+	WeightPercentage float64      `json:"weight_percentage"`
 }
 
 // Activity is an immutable owner-private record of a user-reported portfolio
@@ -167,7 +171,7 @@ type PositionInput struct {
 
 type CashFlowInput struct {
 	Currency   string
-	Amount     float64
+	Amount     money.Amount
 	OccurredAt *time.Time
 
 	// CorrectionOf/CorrectionReason optionally link this cash flow back to the
@@ -186,7 +190,7 @@ type CashFlowInput struct {
 // buy/sell instead.
 type ActivityCorrectionInput struct {
 	ActivityID   string
-	ActualAmount float64
+	ActualAmount money.Amount
 	Reason       string
 }
 

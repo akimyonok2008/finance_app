@@ -347,7 +347,10 @@ func buildComposition(summary *portfolio.PortfolioSummary) ([]PublicWeight, []Ex
 		})
 		assetTypes[portfolio.AssetTypeCash] += summary.TotalCashValueBase
 		for _, balance := range summary.CashBalances {
-			currencies[balance.Currency] += balance.ValueBase
+			// balance.ValueBase.Float64() is a documented boundary conversion:
+			// internal/profile is out of scope for this section's decimal
+			// migration.
+			currencies[balance.Currency] += balance.ValueBase.Float64()
 		}
 	}
 	sort.Slice(weights, func(i, j int) bool {

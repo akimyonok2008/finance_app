@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/instrument"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 )
@@ -169,19 +169,26 @@ func (s *Service) CorrectActivity(ctx context.Context, userID, requestID string,
 
 	switch original.Type {
 	case ActivityDeposit, ActivityWithdrawal:
-		if input.ActualAmount <= 0 {
+		if input.ActualAmount.Sign() <= 0 {
 			return MutationResult{}, ErrInvalidCashAmount
 		}
-		delta := input.ActualAmount - original.GrossAmount
-		if delta == 0 {
+		// original.GrossAmount is still float64 in this pass (Activity field
+		// conversion is a later sub-scope); AmountFromFloat64 is the documented
+		// boundary conversion into exact decimal cash arithmetic.
+		delta := input.ActualAmount.Sub(money.AmountFromFloat64(original.GrossAmount))
+		if delta.IsZero() {
 			return MutationResult{}, ErrNothingToCorrect
 		}
+		absDelta := delta
+		if delta.Sign() < 0 {
+			absDelta = delta.Neg()
+		}
 		cf := CashFlowInput{
-			Currency: original.Currency, Amount: math.Abs(delta),
+			Currency: original.Currency, Amount: absDelta,
 			CorrectionOf: original.ID, CorrectionReason: input.Reason,
 		}
-		depositDirection := (original.Type == ActivityDeposit && delta > 0) ||
-			(original.Type == ActivityWithdrawal && delta < 0)
+		depositDirection := (original.Type == ActivityDeposit && delta.Sign() > 0) ||
+			(original.Type == ActivityWithdrawal && delta.Sign() < 0)
 		if depositDirection {
 			return s.DepositCash(ctx, userID, requestID, cf)
 		}
@@ -218,13 +225,23 @@ func (s *Service) CashBalances(ctx context.Context, userID string) ([]CashBalanc
 	views := make([]CashBalanceView, 0, len(balances))
 	var total float64
 	for _, balance := range balances {
-		value, err := s.fx.Convert(ctx, balance.Amount, balance.Currency, fx.BaseCurrency)
+		// balance.Amount.Float64() is a documented boundary conversion: fx.Convert
+		// is not part of this section's scope and still takes/returns float64.
+		value, err := s.fx.Convert(ctx, balance.Amount.Float64(), balance.Currency, fx.BaseCurrency)
 		if err != nil {
 			return nil, 0, ErrUnsupportedCurrency
 		}
 		total += value
+		amountView, err := money.QuantizeCash(balance.Amount, balance.Currency)
+		if err != nil {
+			return nil, 0, err
+		}
+		valueView, err := money.QuantizeCash(money.AmountFromFloat64(value), fx.BaseCurrency)
+		if err != nil {
+			return nil, 0, err
+		}
 		views = append(views, CashBalanceView{
-			Currency: balance.Currency, Amount: round2(balance.Amount), ValueBase: round2(value),
+			Currency: balance.Currency, Amount: amountView, ValueBase: valueView,
 		})
 	}
 	return views, total, nil
@@ -434,22 +451,30 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 	if err != nil {
 		return BuyPreview{}, err
 	}
-	available := 0.0
+	availableAmt := money.ZeroAmount()
 	for _, balance := range balances {
 		if balance.Currency == currency {
-			available = balance.Amount
+			availableAmt = balance.Amount
 			break
 		}
 	}
-	funding := totalRequired - available
-	if funding < 1e-9 {
-		funding = 0
+	// Mirrors the committed buy path's exact-decimal funding formula
+	// (coordinator.go plan(), MutationBuy case): funding = max(total_required -
+	// available, 0), no epsilon snapping needed with exact decimal arithmetic.
+	totalRequiredAmt := money.AmountFromFloat64(totalRequired)
+	fundingAmt := totalRequiredAmt.Sub(availableAmt)
+	if fundingAmt.Sign() < 0 {
+		fundingAmt = money.ZeroAmount()
 	}
-	cashUsed := math.Min(available, totalRequired)
-	remaining := available + funding - totalRequired
-	if math.Abs(remaining) < 1e-9 {
-		remaining = 0
+	cashUsedAmt := totalRequiredAmt
+	if availableAmt.Cmp(totalRequiredAmt) < 0 {
+		cashUsedAmt = availableAmt
 	}
+	remainingAmt := availableAmt.Add(fundingAmt).Sub(totalRequiredAmt)
+	available := availableAmt.Float64()
+	funding := fundingAmt.Float64()
+	cashUsed := cashUsedAmt.Float64()
+	remaining := remainingAmt.Float64()
 
 	// Episode projection: an open episode in the same instrument/currency is
 	// extended; otherwise a new episode is created (including a rebuy after a
@@ -906,7 +931,7 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 	if summary.CurrentValue > 0 {
 		for i := range summary.CashBalances {
 			summary.CashBalances[i].WeightPercentage =
-				round2(summary.CashBalances[i].ValueBase / summary.CurrentValue * 100)
+				round2(summary.CashBalances[i].ValueBase.Float64() / summary.CurrentValue * 100)
 		}
 	}
 	summary.QuoteStatus = summarizeQuoteStatus(summaries)

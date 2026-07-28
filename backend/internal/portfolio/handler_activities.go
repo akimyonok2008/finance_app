@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/ardakimyonok/finance_app/internal/httpx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // These handlers record user-reported income, fees, and corporate actions. They
@@ -164,7 +165,7 @@ func (h *Handler) CorrectActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.svc.CorrectActivity(r.Context(), uid, requestID, ActivityCorrectionInput{
 		ActivityID:   chi.URLParam(r, "id"),
-		ActualAmount: req.ActualAmount,
+		ActualAmount: money.AmountFromFloat64(req.ActualAmount),
 		Reason:       req.Reason,
 	})
 	if err != nil {

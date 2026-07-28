@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
@@ -135,7 +136,7 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) fund(t *testing.T, user string, qty float64) {
 	t.Helper()
-	_, err := h.svc.DepositCash(context.Background(), user, "dep-"+user, portfolio.CashFlowInput{Currency: "USD", Amount: 100000})
+	_, err := h.svc.DepositCash(context.Background(), user, "dep-"+user, portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(100000)})
 	require.NoError(t, err)
 	_, err = h.svc.BuyPosition(context.Background(), user, "buy-"+user, portfolio.BuyInput{Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: qty})
 	require.NoError(t, err)
@@ -147,7 +148,7 @@ func (h *harness) cashUSD(t *testing.T, user string) float64 {
 	require.NoError(t, err)
 	for _, c := range balances {
 		if c.Currency == "USD" {
-			return c.Amount
+			return c.Amount.Float64()
 		}
 	}
 	return 0
@@ -253,7 +254,7 @@ func TestEligibility_FullySoldAfterExDateStillReceivesDividend(t *testing.T) {
 
 func TestEligibility_BuyAfterExDateReceivesNothing(t *testing.T) {
 	h := newHarness(t)
-	_, err := h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: 100000})
+	_, err := h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(100000)})
 	require.NoError(t, err)
 	buyAt := h.now.AddDate(0, 0, -2)
 	_, err = h.svc.BuyPosition(context.Background(), "u1", "late-buy", portfolio.BuyInput{
@@ -292,7 +293,7 @@ func TestProcessedNoEntitlement_ReevaluatesAfterBackdatedBuy(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, StatusProcessedNoEntitlement, ev.Status)
 
-	_, err = h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: 100000})
+	_, err = h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(100000)})
 	require.NoError(t, err)
 	buyAt := h.now.AddDate(0, 0, -10)
 	_, err = h.svc.BuyPosition(context.Background(), "u1", "backdated-buy", portfolio.BuyInput{

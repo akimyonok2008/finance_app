@@ -120,17 +120,23 @@ func (v *Valuation) ValueTracked(positions []*Position, cash []CashBalance) (flo
 		return 0, false, err
 	}
 	for _, balance := range cash {
-		if balance.Amount < 0 || !isFinite(balance.Amount) {
+		// Exact decimal sign check: cash balances must never be negative. No
+		// epsilon tolerance — decimal arithmetic makes exact comparison safe.
+		if balance.Amount.Sign() < 0 {
 			return 0, false, ErrInsufficientCash
 		}
-		if balance.Amount == 0 {
+		if balance.Amount.IsZero() {
 			continue
 		}
 		rate, ok := v.rates[balance.Currency]
 		if !ok {
 			return 0, false, ErrUnsupportedCurrency
 		}
-		total += balance.Amount * rate
+		// balance.Amount.Float64() is a documented boundary conversion: the
+		// running valuation total and FX rate remain float64 because they feed
+		// internal/performance and internal/fx, which are not part of this
+		// section's scope.
+		total += balance.Amount.Float64() * rate
 		active = true
 	}
 	if !isFinite(total) || total < 0 {
