@@ -8,21 +8,23 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 type rankedHistoryResponse struct {
-	Timeframe                 string   `json:"timeframe"`
-	Available                 bool     `json:"available"`
-	Reason                    string   `json:"reason"`
-	StartingIndex             *float64 `json:"starting_index"`
-	EndingIndex               *float64 `json:"ending_index"`
-	TimeframeReturnPercentage *float64 `json:"timeframe_return_percentage"`
-	MaxDrawdownPercentage     *float64 `json:"max_drawdown_percentage"`
+	Timeframe                 string            `json:"timeframe"`
+	Available                 bool              `json:"available"`
+	Reason                    string            `json:"reason"`
+	StartingIndex             *money.IndexValue `json:"starting_index"`
+	EndingIndex               *money.IndexValue `json:"ending_index"`
+	TimeframeReturnPercentage *float64          `json:"timeframe_return_percentage"`
+	MaxDrawdownPercentage     *float64          `json:"max_drawdown_percentage"`
 	Points                    []struct {
-		CapturedAt         string  `json:"captured_at"`
-		RankedIndex        float64 `json:"ranked_index"`
-		ReturnPercentage   float64 `json:"return_percentage"`
-		DrawdownPercentage float64 `json:"drawdown_percentage"`
+		CapturedAt         string           `json:"captured_at"`
+		RankedIndex        money.IndexValue `json:"ranked_index"`
+		ReturnPercentage   float64          `json:"return_percentage"`
+		DrawdownPercentage float64          `json:"drawdown_percentage"`
 	} `json:"points"`
 }
 
@@ -71,9 +73,9 @@ func TestPerformanceHistory_ReadsCanonicalRankedSnapshots(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, canonical.Available)
 	require.Len(t, got.Points, len(canonical.Points))
-	assert.InDelta(t, *canonical.EndingIndex, *got.EndingIndex, 1e-9)
+	assert.InDelta(t, canonical.EndingIndex.Float64(), got.EndingIndex.Float64(), 1e-9)
 	assert.InDelta(t, *canonical.TimeframeReturnPercentage, *got.TimeframeReturnPercentage, 1e-9)
-	assert.InDelta(t, 100.0, got.Points[0].RankedIndex, 1e-9)
+	assert.InDelta(t, 100.0, got.Points[0].RankedIndex.Float64(), 1e-9)
 
 	// Regression guard: the archive contract must not leak back in here.
 	body := doReq(t, h, http.MethodGet, "/performance/history?timeframe=1M", "", token).Body.String()

@@ -124,11 +124,11 @@ func MaxDrawdownPercent(indexes []float64) float64 {
 // RankedHistoryPoint is one canonical ranked-history point. It carries ranked
 // projections only — never values, quantities, or cost basis.
 type RankedHistoryPoint struct {
-	CapturedAt         string  `json:"captured_at"`
-	RankedIndex        float64 `json:"ranked_index"`
-	ReturnPercentage   float64 `json:"return_percentage"`
-	DrawdownPercentage float64 `json:"drawdown_percentage"`
-	RankingStatus      string  `json:"ranking_status"`
+	CapturedAt         string           `json:"captured_at"`
+	RankedIndex        money.IndexValue `json:"ranked_index"`
+	ReturnPercentage   float64          `json:"return_percentage"`
+	DrawdownPercentage float64          `json:"drawdown_percentage"`
+	RankingStatus      string           `json:"ranking_status"`
 }
 
 // RankedHistory is the response of the canonical ranked-history read. When
@@ -141,8 +141,8 @@ type RankedHistory struct {
 	Available                 bool                 `json:"available"`
 	Reason                    string               `json:"reason,omitempty"`
 	Points                    []RankedHistoryPoint `json:"points"`
-	StartingIndex             *float64             `json:"starting_index,omitempty"`
-	EndingIndex               *float64             `json:"ending_index,omitempty"`
+	StartingIndex             *money.IndexValue    `json:"starting_index,omitempty"`
+	EndingIndex               *money.IndexValue    `json:"ending_index,omitempty"`
 	TimeframeReturnPercentage *float64             `json:"timeframe_return_percentage,omitempty"`
 	MaxDrawdownPercentage     *float64             `json:"max_drawdown_percentage,omitempty"`
 
@@ -203,8 +203,6 @@ func (s *Service) RankedHistory(ctx context.Context, userID, rawTimeframe string
 	out.Risk = CalculateRiskConsistency(riskPoints, to)
 	out.Benchmark = s.benchmarkComparison(ctx, points)
 	drawdowns := DrawdownSeriesPercent(indexes)
-	starting := indexes[0]
-	ending := indexes[len(indexes)-1]
 
 	for i, p := range points {
 		ret := 0.0
@@ -213,7 +211,7 @@ func (s *Service) RankedHistory(ctx context.Context, userID, rawTimeframe string
 		}
 		out.Points = append(out.Points, RankedHistoryPoint{
 			CapturedAt:         p.CapturedAt.UTC().Format(time.RFC3339),
-			RankedIndex:        round4(p.RankedIndex.Float64()),
+			RankedIndex:        p.RankedIndex,
 			ReturnPercentage:   round4(ret),
 			DrawdownPercentage: round4(drawdowns[i]),
 			RankingStatus:      string(p.RankingStatus),
@@ -226,12 +224,13 @@ func (s *Service) RankedHistory(ctx context.Context, userID, rawTimeframe string
 		return out, nil
 	}
 	maxDrawdown := round4(MaxDrawdownPercent(indexes))
-	startRounded, endRounded := round4(starting), round4(ending)
 	returnRounded := round4(timeframeReturn)
+	startingIndex := points[0].RankedIndex
+	endingIndex := points[len(points)-1].RankedIndex
 
 	out.Available = true
-	out.StartingIndex = &startRounded
-	out.EndingIndex = &endRounded
+	out.StartingIndex = &startingIndex
+	out.EndingIndex = &endingIndex
 	out.TimeframeReturnPercentage = &returnRounded
 	out.MaxDrawdownPercentage = &maxDrawdown
 	return out, nil

@@ -85,8 +85,8 @@ func TestRankedHistoryDerivesReturnAndDrawdownFromCanonicalSnapshots(t *testing.
 
 	require.NotNil(t, history.StartingIndex)
 	require.NotNil(t, history.EndingIndex)
-	assert.InDelta(t, 110.0, *history.StartingIndex, 1e-9)
-	assert.InDelta(t, 99.0, *history.EndingIndex, 1e-9)
+	assert.InDelta(t, 110.0, history.StartingIndex.Float64(), 1e-9)
+	assert.InDelta(t, 99.0, history.EndingIndex.Float64(), 1e-9)
 
 	// 99/110 - 1 = -10%, not 99 - 100 = -1%.
 	require.NotNil(t, history.TimeframeReturnPercentage)
@@ -138,8 +138,8 @@ func TestRankedHistoryAgreesWithCanonicalEvidenceWindow(t *testing.T) {
 	require.True(t, history.Available)
 
 	// Same boundary indexes as the canonical evidence window.
-	assert.InDelta(t, window.StartSnapshot.RankedIndex.Float64(), *history.StartingIndex, 1e-9)
-	assert.InDelta(t, window.EndSnapshot.RankedIndex.Float64(), *history.EndingIndex, 1e-9)
+	assert.InDelta(t, window.StartSnapshot.RankedIndex.Float64(), history.StartingIndex.Float64(), 1e-9)
+	assert.InDelta(t, window.EndSnapshot.RankedIndex.Float64(), history.EndingIndex.Float64(), 1e-9)
 
 	expected, err := TimeframeReturnPercent(
 		window.StartSnapshot.RankedIndex, window.EndSnapshot.RankedIndex)
@@ -149,6 +149,6 @@ func TestRankedHistoryAgreesWithCanonicalEvidenceWindow(t *testing.T) {
 	// And the same point set.
 	require.Len(t, history.Points, len(window.Points))
 	for i := range window.Points {
-		assert.InDelta(t, window.Points[i].RankedIndex.Float64(), history.Points[i].RankedIndex, 1e-9)
+		assert.InDelta(t, window.Points[i].RankedIndex.Float64(), history.Points[i].RankedIndex.Float64(), 1e-9)
 	}
 }
