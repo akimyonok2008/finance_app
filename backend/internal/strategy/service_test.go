@@ -84,7 +84,7 @@ func TestCopyFromProfileCreatesFreshBaseline(t *testing.T) {
 
 	weights := map[string]float64{}
 	for _, pos := range summary.Positions {
-		weights[pos.Symbol] = pos.CurrentValueBase / summary.CurrentValue * 100
+		weights[pos.Symbol] = pos.CurrentValueBase.Float64() / summary.CurrentValue * 100
 	}
 	assert.InDelta(t, 60.0, weights["NVDA"], 0.01)
 	assert.InDelta(t, 40.0, weights["SPY"], 0.01)

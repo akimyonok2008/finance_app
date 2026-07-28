@@ -1204,12 +1204,12 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		closed.UpdatedAt = now
 		view := ClosedPositionSummary{
 			ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType,
-			Quantity: quantity.Float64(), BaselinePrice: closed.AverageBuyPrice.Float64(),
-			BaselineCurrency: closed.Currency, ClosePrice: round2(closePriceF),
+			Quantity: quantity, BaselinePrice: closed.AverageBuyPrice,
+			BaselineCurrency: closed.Currency, ClosePrice: money.PriceFromFloat64(round2(closePriceF)),
 			ClosePriceCurrency: quote.Currency, ClosedAt: occurred.Format(time.RFC3339),
-			RealizedGainLossBase:       round2(realizedBaseF),
+			RealizedGainLossBase:       money.AmountFromFloat64(round2(realizedBaseF)),
 			RealizedGainLossPercentage: round2(realizedPct),
-			ClosedCostBasisBase:        round2(basisBaseF),
+			ClosedCostBasisBase:        money.AmountFromFloat64(round2(basisBaseF)),
 			BaseCurrency:               fx.BaseCurrency,
 		}
 		return mutationPlan{
@@ -2278,11 +2278,11 @@ func (c *MutationCoordinator) planWriteOff(req MutationRequest, pf *Portfolio, o
 	closed.RealizedGainLossPercentage = -100
 	closed.UpdatedAt = now
 	view := ClosedPositionSummary{
-		ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType, Quantity: existing.Quantity.Float64(),
-		BaselinePrice: closed.AverageBuyPrice.Float64(), BaselineCurrency: closed.Currency, ClosePrice: 0,
+		ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType, Quantity: existing.Quantity,
+		BaselinePrice: closed.AverageBuyPrice, BaselineCurrency: closed.Currency, ClosePrice: money.ZeroPrice(),
 		ClosePriceCurrency: existing.Currency, ClosedAt: now.Format(time.RFC3339),
-		RealizedGainLossBase: round2(realizedBaseF), RealizedGainLossPercentage: -100,
-		ClosedCostBasisBase: round2(basisBaseF), BaseCurrency: fx.BaseCurrency,
+		RealizedGainLossBase: money.AmountFromFloat64(round2(realizedBaseF)), RealizedGainLossPercentage: -100,
+		ClosedCostBasisBase: money.AmountFromFloat64(round2(basisBaseF)), BaseCurrency: fx.BaseCurrency,
 	}
 	activity := &Activity{
 		ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID, UserID: req.UserID,

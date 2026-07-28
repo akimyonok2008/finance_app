@@ -269,8 +269,8 @@ func TestSummary_GainComesOnlyFromPostAddMoves(t *testing.T) {
 	assert.Equal(t, "USD", sum.BaseCurrency)
 	require.Len(t, sum.Positions, 1)
 	ps := sum.Positions[0]
-	assert.Equal(t, 1950.0, ps.CostBasis) // 10 × baseline 195
-	assert.Equal(t, 2145.0, ps.CurrentValue)
+	assert.Equal(t, 1950.0, ps.CostBasis.Float64()) // 10 × baseline 195
+	assert.Equal(t, 2145.0, ps.CurrentValue.Float64())
 	assert.InDelta(t, 10.0, sum.GainLossPercentage, 0.01)
 	assert.InDelta(t, 110.0, sum.PortfolioIndex, 0.01)
 }
@@ -302,10 +302,10 @@ func TestSummary_MixedCurrencyNormalizedToUSD(t *testing.T) {
 			thyao = p
 		}
 	}
-	assert.Equal(t, 29500.0, thyao.CostBasis)    // local TRY at baseline
-	assert.Equal(t, 32450.0, thyao.CurrentValue) // local TRY now
-	assert.InDelta(t, 914.5, thyao.CostBasisBase, 0.01)
-	assert.InDelta(t, 1005.95, thyao.CurrentValueBase, 0.01)
+	assert.Equal(t, 29500.0, thyao.CostBasis.Float64())    // local TRY at baseline
+	assert.Equal(t, 32450.0, thyao.CurrentValue.Float64()) // local TRY now
+	assert.InDelta(t, 914.5, thyao.CostBasisBase.Float64(), 0.01)
+	assert.InDelta(t, 1005.95, thyao.CurrentValueBase.Float64(), 0.01)
 }
 
 func TestSummary_EmptyPortfolio(t *testing.T) {

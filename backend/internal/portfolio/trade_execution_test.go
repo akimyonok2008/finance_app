@@ -265,13 +265,13 @@ func TestBuyPreview_NonMutatingAndCorrect(t *testing.T) {
 	second, err := svc.PreviewBuy(ctx(), "u1", in)
 	require.NoError(t, err)
 
-	assert.InDelta(t, 860.0, first.GrossPurchaseAmount, 1e-9)
-	assert.InDelta(t, 5.0, first.Fee, 1e-9)
-	assert.InDelta(t, 865.0, first.TotalCashRequired, 1e-9)
-	assert.InDelta(t, 500.0, first.AvailableCash, 1e-9)
-	assert.InDelta(t, 500.0, first.CashUsed, 1e-9)
-	assert.InDelta(t, 365.0, first.AutomaticFunding, 1e-9)
-	assert.InDelta(t, 0.0, first.RemainingCash, 1e-9)
+	assert.InDelta(t, 860.0, first.GrossPurchaseAmount.Float64(), 1e-9)
+	assert.InDelta(t, 5.0, first.Fee.Float64(), 1e-9)
+	assert.InDelta(t, 865.0, first.TotalCashRequired.Float64(), 1e-9)
+	assert.InDelta(t, 500.0, first.AvailableCash.Float64(), 1e-9)
+	assert.InDelta(t, 500.0, first.CashUsed.Float64(), 1e-9)
+	assert.InDelta(t, 365.0, first.AutomaticFunding.Float64(), 1e-9)
+	assert.InDelta(t, 0.0, first.RemainingCash.Float64(), 1e-9)
 	assert.True(t, first.CreatesNewEpisode)
 	assert.Equal(t, PriceSourceProviderEstimate, first.ExecutionPriceSource)
 	assert.Equal(t, FeeSourceUserRecorded, first.FeeSource)
@@ -306,8 +306,8 @@ func TestBuyPreview_ExtendsExistingEpisode(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, preview.CreatesNewEpisode)
 	assert.Equal(t, res.Position.ID, preview.PositionEpisodeID)
-	assert.InDelta(t, 4.0, preview.ResultingQuantity, 1e-9)
-	assert.InDelta(t, 450.0, preview.ResultingAverageCost, 1e-9)
+	assert.InDelta(t, 4.0, preview.ResultingQuantity.Float64(), 1e-9)
+	assert.InDelta(t, 450.0, preview.ResultingAverageCost.Float64(), 1e-9)
 	assert.Equal(t, PriceSourceUserRecorded, preview.ExecutionPriceSource)
 }
 
@@ -514,10 +514,10 @@ func TestSellPreview_ReportsProvenanceAndClosure(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, first.WillClosePosition)
-	assert.InDelta(t, 900.0, first.GrossProceeds, 1e-9)
-	assert.InDelta(t, 890.0, first.NetProceeds, 1e-9)
-	assert.InDelta(t, 800.0, first.AllocatedBasis, 1e-9)
-	assert.InDelta(t, 90.0, first.EstimatedRealizedPnL, 1e-9)
+	assert.InDelta(t, 900.0, first.GrossProceeds.Float64(), 1e-9)
+	assert.InDelta(t, 890.0, first.NetProceeds.Float64(), 1e-9)
+	assert.InDelta(t, 800.0, first.AllocatedBasis.Float64(), 1e-9)
+	assert.InDelta(t, 90.0, first.EstimatedRealizedPnL.Float64(), 1e-9)
 	assert.Equal(t, PriceSourceUserRecorded, first.ExecutionPriceSource)
 	assert.Equal(t, FeeSourceUserRecorded, first.FeeSource)
 	assert.Equal(t, "complete", first.CalculationStatus)
@@ -995,7 +995,7 @@ func TestPublicWeightsSummary_MatchesSummaryOnPositionsAndCash(t *testing.T) {
 	for _, p := range cheap.Positions {
 		want, ok := bySymbol[p.Symbol]
 		require.True(t, ok, "cheap summary listed a symbol the full summary did not: %s", p.Symbol)
-		assert.InDelta(t, want.CurrentValueBase, p.CurrentValueBase, 0.01)
+		assert.InDelta(t, want.CurrentValueBase.Float64(), p.CurrentValueBase.Float64(), 0.01)
 		assert.Equal(t, want.CurrentPriceCurrency, p.CurrentPriceCurrency)
 	}
 

@@ -485,14 +485,14 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 		return BuyPreview{}, err
 	}
 	preview := BuyPreview{
-		Symbol: clean.Symbol, InstrumentID: input.InstrumentID, AssetType: clean.AssetType, Quantity: clean.Quantity.Float64(),
-		ExecutionPrice: price.Float64(), ExecutionPriceSource: priceSource,
-		Fee: input.Fee.Float64(), FeeSource: feeSource,
-		GrossPurchaseAmount: round2(gross.Float64()), TotalCashRequired: round2(totalRequiredAmt.Float64()),
-		AvailableCash: round2(available), CashUsed: round2(cashUsed),
-		AutomaticFunding: round2(funding), RemainingCash: round2(remaining),
-		CreatesNewEpisode: true, ResultingQuantity: clean.Quantity.Float64(),
-		ResultingAverageCost: money.QuantizePrice(resultingAvgCost).Float64(),
+		Symbol: clean.Symbol, InstrumentID: input.InstrumentID, AssetType: clean.AssetType, Quantity: clean.Quantity,
+		ExecutionPrice: price, ExecutionPriceSource: priceSource,
+		Fee: input.Fee, FeeSource: feeSource,
+		GrossPurchaseAmount: money.AmountFromFloat64(round2(gross.Float64())), TotalCashRequired: money.AmountFromFloat64(round2(totalRequiredAmt.Float64())),
+		AvailableCash: money.AmountFromFloat64(round2(available)), CashUsed: money.AmountFromFloat64(round2(cashUsed)),
+		AutomaticFunding: money.AmountFromFloat64(round2(funding)), RemainingCash: money.AmountFromFloat64(round2(remaining)),
+		CreatesNewEpisode: true, ResultingQuantity: clean.Quantity,
+		ResultingAverageCost: money.QuantizePrice(resultingAvgCost),
 		Currency:             currency, BaseCurrency: fx.BaseCurrency,
 		CalculationStatus: "complete",
 	}
@@ -514,8 +514,8 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 			}
 			preview.CreatesNewEpisode = false
 			preview.PositionEpisodeID = position.ID
-			preview.ResultingQuantity = total.Float64()
-			preview.ResultingAverageCost = money.QuantizePrice(mergedAvgCost).Float64()
+			preview.ResultingQuantity = total
+			preview.ResultingAverageCost = money.QuantizePrice(mergedAvgCost)
 			break
 		}
 	}
@@ -628,12 +628,12 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 	}
 	return SellPreview{
 		PositionID: position.ID, PositionEpisodeID: position.ID, Symbol: position.Symbol,
-		AvailableQuantity: round2(position.Quantity.Float64()), SoldQuantity: round2(input.Quantity.Float64()),
-		RemainingQuantity: round2(remaining.Float64()), ExecutionPrice: round2(price.Float64()),
+		AvailableQuantity: position.Quantity, SoldQuantity: input.Quantity,
+		RemainingQuantity: remaining, ExecutionPrice: price,
 		ExecutionPriceSource: priceSource, FeeSource: feeSource,
 		EffectiveAt: effectiveAt.Format(time.RFC3339), CalculationStatus: "complete",
-		GrossProceeds: round2(gross.Float64()), Fee: round2(input.Fee.Float64()), NetProceeds: round2(net.Float64()),
-		AllocatedBasis: round2(allocatedBasis.Float64()), EstimatedRealizedPnL: round2(realizedBase),
+		GrossProceeds: money.AmountFromFloat64(round2(gross.Float64())), Fee: input.Fee, NetProceeds: money.AmountFromFloat64(round2(net.Float64())),
+		AllocatedBasis: money.AmountFromFloat64(round2(allocatedBasis.Float64())), EstimatedRealizedPnL: money.AmountFromFloat64(round2(realizedBase)),
 		WillClosePosition: remaining.IsZero(), ProceedsCurrency: position.Currency,
 		BaseCurrency: fx.BaseCurrency,
 	}, nil
@@ -1250,15 +1250,15 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 			ID:                         pos.ID,
 			Symbol:                     pos.Symbol,
 			AssetType:                  pos.AssetType,
-			Quantity:                   pos.Quantity.Float64(),
-			BaselinePrice:              pos.AverageBuyPrice.Float64(),
+			Quantity:                   pos.Quantity,
+			BaselinePrice:              pos.AverageBuyPrice,
 			BaselineCurrency:           pos.Currency,
-			ClosePrice:                 round2(closePrice),
+			ClosePrice:                 money.PriceFromFloat64(round2(closePrice)),
 			ClosePriceCurrency:         firstNonEmpty(pos.CloseCurrency, pos.Currency),
 			ClosedAt:                   closedAt,
-			RealizedGainLossBase:       round2(pos.RealizedGainLossBase),
+			RealizedGainLossBase:       money.AmountFromFloat64(round2(pos.RealizedGainLossBase)),
 			RealizedGainLossPercentage: round2(pos.RealizedGainLossPercentage),
-			ClosedCostBasisBase:        round2(costBase),
+			ClosedCostBasisBase:        money.AmountFromFloat64(round2(costBase)),
 			BaseCurrency:               fx.BaseCurrency,
 		}, nil
 	}
@@ -1275,15 +1275,15 @@ func (s *Service) closedPositionSummary(ctx context.Context, pos *Position) (Clo
 		ID:                         pos.ID,
 		Symbol:                     pos.Symbol,
 		AssetType:                  pos.AssetType,
-		Quantity:                   pos.Quantity.Float64(),
-		BaselinePrice:              pos.AverageBuyPrice.Float64(),
+		Quantity:                   pos.Quantity,
+		BaselinePrice:              pos.AverageBuyPrice,
 		BaselineCurrency:           pos.Currency,
-		ClosePrice:                 round2(closePrice),
+		ClosePrice:                 money.PriceFromFloat64(round2(closePrice)),
 		ClosePriceCurrency:         firstNonEmpty(pos.CloseCurrency, pos.Currency),
 		ClosedAt:                   closedAt,
-		RealizedGainLossBase:       round2(totalRealizedBase),
+		RealizedGainLossBase:       money.AmountFromFloat64(round2(totalRealizedBase)),
 		RealizedGainLossPercentage: round2(realizedPct),
-		ClosedCostBasisBase:        round2(basisBase),
+		ClosedCostBasisBase:        money.AmountFromFloat64(round2(basisBase)),
 		BaseCurrency:               fx.BaseCurrency,
 	}, nil
 }

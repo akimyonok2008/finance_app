@@ -242,28 +242,28 @@ type BuyInput struct {
 // BuyPreview never writes portfolio, cash, activity, ranked, audit or outbox
 // state. Identity resolution may register one unambiguous instrument/alias.
 type BuyPreview struct {
-	Symbol               string  `json:"symbol"`
-	InstrumentID         string  `json:"instrument_id,omitempty"`
-	AssetType            string  `json:"asset_type"`
-	Quantity             float64 `json:"quantity"`
-	ExecutionPrice       float64 `json:"execution_price"`
-	ExecutionPriceSource string  `json:"execution_price_source"`
-	Fee                  float64 `json:"fee"`
-	FeeSource            string  `json:"fee_source"`
-	GrossPurchaseAmount  float64 `json:"gross_purchase_amount"`
-	TotalCashRequired    float64 `json:"total_cash_required"`
-	AvailableCash        float64 `json:"available_cash"`
-	CashUsed             float64 `json:"cash_used"`
-	AutomaticFunding     float64 `json:"automatic_funding_amount"`
-	RemainingCash        float64 `json:"remaining_cash"`
-	CreatesNewEpisode    bool    `json:"creates_new_episode"`
-	PositionEpisodeID    string  `json:"position_episode_id,omitempty"`
-	ResultingQuantity    float64 `json:"resulting_quantity"`
-	ResultingAverageCost float64 `json:"resulting_average_cost"`
-	EffectiveAt          string  `json:"effective_at"`
-	Currency             string  `json:"currency"`
-	BaseCurrency         string  `json:"base_currency"`
-	CalculationStatus    string  `json:"calculation_status"`
+	Symbol               string         `json:"symbol"`
+	InstrumentID         string         `json:"instrument_id,omitempty"`
+	AssetType            string         `json:"asset_type"`
+	Quantity             money.Quantity `json:"quantity"`
+	ExecutionPrice       money.Price    `json:"execution_price"`
+	ExecutionPriceSource string         `json:"execution_price_source"`
+	Fee                  money.Amount   `json:"fee"`
+	FeeSource            string         `json:"fee_source"`
+	GrossPurchaseAmount  money.Amount   `json:"gross_purchase_amount"`
+	TotalCashRequired    money.Amount   `json:"total_cash_required"`
+	AvailableCash        money.Amount   `json:"available_cash"`
+	CashUsed             money.Amount   `json:"cash_used"`
+	AutomaticFunding     money.Amount   `json:"automatic_funding_amount"`
+	RemainingCash        money.Amount   `json:"remaining_cash"`
+	CreatesNewEpisode    bool           `json:"creates_new_episode"`
+	PositionEpisodeID    string         `json:"position_episode_id,omitempty"`
+	ResultingQuantity    money.Quantity `json:"resulting_quantity"`
+	ResultingAverageCost money.Price    `json:"resulting_average_cost"`
+	EffectiveAt          string         `json:"effective_at"`
+	Currency             string         `json:"currency"`
+	BaseCurrency         string         `json:"base_currency"`
+	CalculationStatus    string         `json:"calculation_status"`
 }
 
 type SellInput struct {
@@ -276,25 +276,25 @@ type SellInput struct {
 }
 
 type SellPreview struct {
-	PositionID           string  `json:"position_id"`
-	PositionEpisodeID    string  `json:"position_episode_id"`
-	Symbol               string  `json:"symbol"`
-	AvailableQuantity    float64 `json:"available_quantity"`
-	SoldQuantity         float64 `json:"sold_quantity"`
-	RemainingQuantity    float64 `json:"remaining_quantity"`
-	ExecutionPrice       float64 `json:"execution_price"`
-	ExecutionPriceSource string  `json:"execution_price_source"`
-	FeeSource            string  `json:"fee_source"`
-	EffectiveAt          string  `json:"effective_at"`
-	CalculationStatus    string  `json:"calculation_status"`
-	GrossProceeds        float64 `json:"gross_proceeds"`
-	Fee                  float64 `json:"fee"`
-	NetProceeds          float64 `json:"net_proceeds"`
-	AllocatedBasis       float64 `json:"allocated_basis"`
-	EstimatedRealizedPnL float64 `json:"estimated_realized_pnl"`
-	WillClosePosition    bool    `json:"will_close_position"`
-	ProceedsCurrency     string  `json:"proceeds_currency"`
-	BaseCurrency         string  `json:"base_currency"`
+	PositionID           string         `json:"position_id"`
+	PositionEpisodeID    string         `json:"position_episode_id"`
+	Symbol               string         `json:"symbol"`
+	AvailableQuantity    money.Quantity `json:"available_quantity"`
+	SoldQuantity         money.Quantity `json:"sold_quantity"`
+	RemainingQuantity    money.Quantity `json:"remaining_quantity"`
+	ExecutionPrice       money.Price    `json:"execution_price"`
+	ExecutionPriceSource string         `json:"execution_price_source"`
+	FeeSource            string         `json:"fee_source"`
+	EffectiveAt          string         `json:"effective_at"`
+	CalculationStatus    string         `json:"calculation_status"`
+	GrossProceeds        money.Amount   `json:"gross_proceeds"`
+	Fee                  money.Amount   `json:"fee"`
+	NetProceeds          money.Amount   `json:"net_proceeds"`
+	AllocatedBasis       money.Amount   `json:"allocated_basis"`
+	EstimatedRealizedPnL money.Amount   `json:"estimated_realized_pnl"`
+	WillClosePosition    bool           `json:"will_close_position"`
+	ProceedsCurrency     string         `json:"proceeds_currency"`
+	BaseCurrency         string         `json:"base_currency"`
 }
 
 type ActivityListResponse struct {
@@ -454,45 +454,45 @@ type ReconciliationStatus struct {
 // CurrentValue are in the position's local currency; the *Base fields are the
 // FX-normalized base-currency equivalents used for portfolio totals.
 type PositionSummary struct {
-	PositionID string  `json:"position_id"`
-	Symbol     string  `json:"symbol"`
-	AssetType  string  `json:"asset_type"`
-	Quantity   float64 `json:"quantity"`
+	PositionID string         `json:"position_id"`
+	Symbol     string         `json:"symbol"`
+	AssetType  string         `json:"asset_type"`
+	Quantity   money.Quantity `json:"quantity"`
 	// AverageBuyPrice is the locked baseline price (today's price at add time).
 	// Serialized as baseline_price — the product has no "average buy price".
-	AverageBuyPrice      float64 `json:"baseline_price"`
-	CurrentPrice         float64 `json:"current_price"`
-	CurrentPriceCurrency string  `json:"current_price_currency"`
-	CostBasis            float64 `json:"cost_basis"`           // local currency
-	CurrentValue         float64 `json:"current_value"`        // local currency
-	GainLoss             float64 `json:"gain_loss"`            // local currency
-	GainLossPercentage   float64 `json:"gain_loss_percentage"` // base-currency performance
-	Currency             string  `json:"currency"`
-	CostBasisBase        float64 `json:"cost_basis_base"`    // base currency
-	CurrentValueBase     float64 `json:"current_value_base"` // base currency
-	GainLossBase         float64 `json:"gain_loss_base"`     // base currency
-	BaseCurrency         string  `json:"base_currency"`
-	QuoteProvider        string  `json:"quote_provider,omitempty"`
-	QuoteProviderStatus  string  `json:"quote_provider_status,omitempty"`
-	QuoteIsStale         bool    `json:"quote_is_stale"`
-	QuoteFetchedAt       string  `json:"quote_fetched_at,omitempty"`
-	QuoteExpiresAt       string  `json:"quote_expires_at,omitempty"`
+	AverageBuyPrice      money.Price  `json:"baseline_price"`
+	CurrentPrice         money.Price  `json:"current_price"`
+	CurrentPriceCurrency string       `json:"current_price_currency"`
+	CostBasis            money.Amount `json:"cost_basis"`           // local currency
+	CurrentValue         money.Amount `json:"current_value"`        // local currency
+	GainLoss             money.Amount `json:"gain_loss"`            // local currency
+	GainLossPercentage   float64      `json:"gain_loss_percentage"` // base-currency performance
+	Currency             string       `json:"currency"`
+	CostBasisBase        money.Amount `json:"cost_basis_base"`    // base currency
+	CurrentValueBase     money.Amount `json:"current_value_base"` // base currency
+	GainLossBase         money.Amount `json:"gain_loss_base"`     // base currency
+	BaseCurrency         string       `json:"base_currency"`
+	QuoteProvider        string       `json:"quote_provider,omitempty"`
+	QuoteProviderStatus  string       `json:"quote_provider_status,omitempty"`
+	QuoteIsStale         bool         `json:"quote_is_stale"`
+	QuoteFetchedAt       string       `json:"quote_fetched_at,omitempty"`
+	QuoteExpiresAt       string       `json:"quote_expires_at,omitempty"`
 }
 
 type ClosedPositionSummary struct {
-	ID                         string  `json:"id"`
-	Symbol                     string  `json:"symbol"`
-	AssetType                  string  `json:"asset_type"`
-	Quantity                   float64 `json:"quantity"`
-	BaselinePrice              float64 `json:"baseline_price"`
-	BaselineCurrency           string  `json:"baseline_currency"`
-	ClosePrice                 float64 `json:"close_price"`
-	ClosePriceCurrency         string  `json:"close_price_currency"`
-	ClosedAt                   string  `json:"closed_at"`
-	RealizedGainLossBase       float64 `json:"realized_gain_loss_base"`
-	RealizedGainLossPercentage float64 `json:"realized_gain_loss_percentage"`
-	ClosedCostBasisBase        float64 `json:"closed_cost_basis_base"`
-	BaseCurrency               string  `json:"base_currency"`
+	ID                         string         `json:"id"`
+	Symbol                     string         `json:"symbol"`
+	AssetType                  string         `json:"asset_type"`
+	Quantity                   money.Quantity `json:"quantity"`
+	BaselinePrice              money.Price    `json:"baseline_price"`
+	BaselineCurrency           string         `json:"baseline_currency"`
+	ClosePrice                 money.Price    `json:"close_price"`
+	ClosePriceCurrency         string         `json:"close_price_currency"`
+	ClosedAt                   string         `json:"closed_at"`
+	RealizedGainLossBase       money.Amount   `json:"realized_gain_loss_base"`
+	RealizedGainLossPercentage float64        `json:"realized_gain_loss_percentage"`
+	ClosedCostBasisBase        money.Amount   `json:"closed_cost_basis_base"`
+	BaseCurrency               string         `json:"base_currency"`
 }
 
 type PortfolioArchiveSnapshot struct {

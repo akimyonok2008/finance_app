@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -43,8 +44,8 @@ func TestExploreRouteEndToEnd(t *testing.T) {
 	summaries := testSummaries{
 		"u1": {UserID: "u1", PortfolioID: "p1", CurrentValue: 100, GainLossPercentage: 24.6, PortfolioIndex: 124.6,
 			Positions: []portfolio.PositionSummary{
-				{PositionID: "x1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: 60, CurrentPriceCurrency: "USD"},
-				{PositionID: "x2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 40, CurrentPriceCurrency: "USD"},
+				{PositionID: "x1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(60), CurrentPriceCurrency: "USD"},
+				{PositionID: "x2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(40), CurrentPriceCurrency: "USD"},
 			}},
 	}
 	svc := NewService(repo, authUserProvider{authSvc}, summaries)

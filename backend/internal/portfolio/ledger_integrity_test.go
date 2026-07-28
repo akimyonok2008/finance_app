@@ -57,7 +57,7 @@ func TestSellFee_NotDoubleCountedInReconciliation(t *testing.T) {
 	assertAmountEqual(t, "1185", usdAfter.Sub(usdBefore), "cash must increase by net proceeds exactly once")
 
 	// Realized P&L includes the sale fee exactly once.
-	assert.InDelta(t, wantRealized, sellRes.Closed.RealizedGainLossBase, 0.01)
+	assert.InDelta(t, wantRealized, sellRes.Closed.RealizedGainLossBase.Float64(), 0.01)
 
 	summary, err := svc.Summary(ctx(), userID)
 	require.NoError(t, err)
@@ -108,10 +108,10 @@ func TestSellPreview_MatchesCommittedSell(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.InDelta(t, preview.GrossProceeds, 4*60.0, 0.01)
-	assert.InDelta(t, preview.NetProceeds, 4*60.0-5, 0.01)
+	assert.InDelta(t, preview.GrossProceeds.Float64(), 4*60.0, 0.01)
+	assert.InDelta(t, preview.NetProceeds.Float64(), 4*60.0-5, 0.01)
 	assertAmountEqual(t, "35", *sellRes.Activity.RealizedGainLossBase)
-	assert.InDelta(t, 35.0, preview.EstimatedRealizedPnL, 0.01)
+	assert.InDelta(t, 35.0, preview.EstimatedRealizedPnL.Float64(), 0.01)
 	assert.False(t, preview.WillClosePosition)
 }
 
@@ -182,9 +182,9 @@ func TestClosedPosition_AggregatesPartialAndFinalSales(t *testing.T) {
 
 	wantRealized := (4*110.0 - 4*100.0) + (6*130.0 - 6*100.0)
 	wantBasis := 4*100.0 + 6*100.0
-	assert.InDelta(t, wantRealized, closed[0].RealizedGainLossBase, 0.01,
+	assert.InDelta(t, wantRealized, closed[0].RealizedGainLossBase.Float64(), 0.01,
 		"closed summary must aggregate BOTH the partial and final sale, not just the final leg")
-	assert.InDelta(t, wantBasis, closed[0].ClosedCostBasisBase, 0.01)
+	assert.InDelta(t, wantBasis, closed[0].ClosedCostBasisBase.Float64(), 0.01)
 
 	// Cross-check against the repository's episode ledger directly.
 	acts, err := svc.repo.ListActivitiesByPositionEpisode(ctx(), userID, episodeID)
@@ -252,7 +252,7 @@ func TestClosedPosition_WriteOffClosesEpisode(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, closed, 1)
 	assert.Equal(t, buyRes.Position.ID, closed[0].ID)
-	assert.InDelta(t, -20*5.0, closed[0].RealizedGainLossBase, 0.01)
+	assert.InDelta(t, -20*5.0, closed[0].RealizedGainLossBase.Float64(), 0.01)
 }
 
 // TestClosedPosition_LegacyFallback proves a closed position with no episode
@@ -278,5 +278,5 @@ func TestClosedPosition_LegacyFallback(t *testing.T) {
 	closed, err := svc.ListClosedPositions(ctx(), userID)
 	require.NoError(t, err)
 	require.Len(t, closed, 1)
-	assert.InDelta(t, 42, closed[0].RealizedGainLossBase, 0.01)
+	assert.InDelta(t, 42, closed[0].RealizedGainLossBase.Float64(), 0.01)
 }

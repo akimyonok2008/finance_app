@@ -49,7 +49,7 @@ func TestWriteOffUnpriceablePosition_SucceedsAndRealizesFullBasisAsLoss(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, res.Closed)
 	assert.Equal(t, -100.0, res.Closed.RealizedGainLossPercentage)
-	assert.InDelta(t, -1950.0, res.Closed.RealizedGainLossBase, 0.01, "the full cost basis (10 x 195) is realized as a loss")
+	assert.InDelta(t, -1950.0, res.Closed.RealizedGainLossBase.Float64(), 0.01, "the full cost basis (10 x 195) is realized as a loss")
 
 	// Ranked index drops by exactly the known cost basis — never a fabricated
 	// market move, since no market price for this symbol ever existed.

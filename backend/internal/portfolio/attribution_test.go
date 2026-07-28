@@ -3,6 +3,7 @@ package portfolio
 import (
 	"testing"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -190,8 +191,8 @@ func TestBuildInstrumentEconomicsMergesOpenClosedAndLedger(t *testing.T) {
 		"":     {Symbol: "", RealizedPnLBase: 999},
 	}}
 	got := buildInstrumentEconomics(
-		[]PositionSummary{{Symbol: "AAPL", AssetType: "stock", CostBasisBase: 1000, GainLossBase: 200}},
-		[]ClosedPositionSummary{{Symbol: "AAPL", ClosedCostBasisBase: 500}},
+		[]PositionSummary{{Symbol: "AAPL", AssetType: "stock", CostBasisBase: money.AmountFromFloat64(1000), GainLossBase: money.AmountFromFloat64(200)}},
+		[]ClosedPositionSummary{{Symbol: "AAPL", ClosedCostBasisBase: money.AmountFromFloat64(500)}},
 		ledger,
 	)
 

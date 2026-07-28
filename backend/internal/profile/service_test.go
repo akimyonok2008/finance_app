@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -78,8 +79,8 @@ func testService() *Service {
 			UserID: "u1", PortfolioID: "secret-portfolio", CurrentValue: 1000,
 			TotalCostBasis: 800, GainLoss: 200, GainLossPercentage: 25, PortfolioIndex: 125,
 			Positions: []portfolio.PositionSummary{
-				{PositionID: "secret-position", Symbol: "AAPL", AssetType: "stock", Quantity: 10, AverageBuyPrice: 50, CostBasisBase: 480, CurrentValueBase: 700, GainLossBase: 220, CurrentPriceCurrency: "USD"},
-				{PositionID: "secret-position-2", Symbol: "BTC-USD", AssetType: "crypto", Quantity: 1, AverageBuyPrice: 100, CostBasisBase: 320, CurrentValueBase: 300, GainLossBase: -20, CurrentPriceCurrency: "USD"},
+				{PositionID: "secret-position", Symbol: "AAPL", AssetType: "stock", Quantity: money.QuantityFromFloat64(10), AverageBuyPrice: money.PriceFromFloat64(50), CostBasisBase: money.AmountFromFloat64(480), CurrentValueBase: money.AmountFromFloat64(700), GainLossBase: money.AmountFromFloat64(220), CurrentPriceCurrency: "USD"},
+				{PositionID: "secret-position-2", Symbol: "BTC-USD", AssetType: "crypto", Quantity: money.QuantityFromFloat64(1), AverageBuyPrice: money.PriceFromFloat64(100), CostBasisBase: money.AmountFromFloat64(320), CurrentValueBase: money.AmountFromFloat64(300), GainLossBase: money.AmountFromFloat64(-20), CurrentPriceCurrency: "USD"},
 			},
 			ActiveCostBasisBase:    800,
 			ActiveCurrentValueBase: 1000,
@@ -88,10 +89,10 @@ func testService() *Service {
 			ClosedPositions: []portfolio.ClosedPositionSummary{
 				{
 					ID: "secret-closed-position", Symbol: "MSFT", AssetType: "stock",
-					Quantity: 5, BaselinePrice: 90, BaselineCurrency: "USD",
-					ClosePrice: 110, ClosePriceCurrency: "USD", ClosedAt: "2026-07-06T00:00:00Z",
-					RealizedGainLossBase: 100, RealizedGainLossPercentage: 22.22,
-					ClosedCostBasisBase: 450, BaseCurrency: "USD",
+					Quantity: money.QuantityFromFloat64(5), BaselinePrice: money.PriceFromFloat64(90), BaselineCurrency: "USD",
+					ClosePrice: money.PriceFromFloat64(110), ClosePriceCurrency: "USD", ClosedAt: "2026-07-06T00:00:00Z",
+					RealizedGainLossBase: money.AmountFromFloat64(100), RealizedGainLossPercentage: 22.22,
+					ClosedCostBasisBase: money.AmountFromFloat64(450), BaseCurrency: "USD",
 				},
 			},
 		},
@@ -235,13 +236,13 @@ func TestPublicInfoForUser_PrefersCheapWeightsProvider(t *testing.T) {
 	var fullCalls int
 	full := countingSummaries{calls: &fullCalls, data: map[string]*portfolio.PortfolioSummary{
 		"u1": {CurrentValue: 1000, Positions: []portfolio.PositionSummary{
-			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 		}},
 	}}
 	var cheapCalls int
 	cheap := countingWeights{calls: &cheapCalls, data: map[string]*portfolio.PortfolioSummary{
 		"u1": {CurrentValue: 500, Positions: []portfolio.PositionSummary{
-			{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: 500, CurrentPriceCurrency: "USD"},
+			{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(500), CurrentPriceCurrency: "USD"},
 		}},
 	}}
 
@@ -272,7 +273,7 @@ func TestPublicInfoForUser_FallsBackToSummaryProviderWhenUnwired(t *testing.T) {
 	repo := NewInMemoryRepository()
 	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
 	full := testSummaries{"u1": {CurrentValue: 1000, Positions: []portfolio.PositionSummary{
-		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 	}}}
 	svc := NewService(repo, users, full)
 	// SetPublicWeightsProvider intentionally left unset.
@@ -302,10 +303,10 @@ func TestExploreSummaryProvider_IsIsolatedFromOwnerAndPublicViews(t *testing.T) 
 	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
 
 	shared := testSummaries{"u1": {CurrentValue: 1000, PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
-		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 	}}}
 	exploreOnly := testSummaries{"u1": {CurrentValue: 2000, PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
-		{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: 2000, CurrentPriceCurrency: "USD"},
+		{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(2000), CurrentPriceCurrency: "USD"},
 	}}}
 
 	svc := NewService(repo, users, shared)
@@ -354,7 +355,7 @@ func TestPublicProfile_DisclosesSelfReportedExecutionPrices(t *testing.T) {
 		CurrentValue: 1000, PortfolioIndex: 110, ActiveCostBasisBase: 800, ActiveCurrentValueBase: 1000,
 		UnrealizedGainLossBase: 200, HasSelfReportedExecutionPrice: true,
 		Positions: []portfolio.PositionSummary{
-			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 1000, CurrentPriceCurrency: "USD"},
+			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 		},
 	}}
 	svc := NewService(repo, users, flagged)

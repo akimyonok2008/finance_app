@@ -3,6 +3,7 @@ package portfolio
 import (
 	"testing"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,14 +17,14 @@ func TestCalculatePositionSummary(t *testing.T) {
 	ps := CalculatePositionSummary(pos, 195, "USD", 1800, 1950, "USD")
 
 	assert.Equal(t, "p1", ps.PositionID)
-	assert.Equal(t, 1800.0, ps.CostBasis)
-	assert.Equal(t, 1950.0, ps.CurrentValue)
-	assert.Equal(t, 1800.0, ps.CostBasisBase)
-	assert.Equal(t, 1950.0, ps.CurrentValueBase)
-	assert.Equal(t, 150.0, ps.GainLossBase)
+	assert.Equal(t, 1800.0, ps.CostBasis.Float64())
+	assert.Equal(t, 1950.0, ps.CurrentValue.Float64())
+	assert.Equal(t, 1800.0, ps.CostBasisBase.Float64())
+	assert.Equal(t, 1950.0, ps.CurrentValueBase.Float64())
+	assert.Equal(t, 150.0, ps.GainLossBase.Float64())
 	assert.Equal(t, "USD", ps.CurrentPriceCurrency)
 	assert.Equal(t, "USD", ps.BaseCurrency)
-	assert.Equal(t, 150.0, ps.GainLoss)
+	assert.Equal(t, 150.0, ps.GainLoss.Float64())
 	assert.InDelta(t, 8.33, ps.GainLossPercentage, 0.01)
 }
 
@@ -39,14 +40,14 @@ func TestCalculatePositionSummary_PercentageUsesBaseCurrencyValues(t *testing.T)
 
 	assert.Equal(t, "TRY", ps.Currency)
 	assert.Equal(t, "USD", ps.CurrentPriceCurrency)
-	assert.Equal(t, 1894.2, ps.GainLossBase)
+	assert.Equal(t, 1894.2, ps.GainLossBase.Float64())
 	assert.InDelta(t, 3394.62, ps.GainLossPercentage, 0.01)
 }
 
 func TestCalculatePortfolioSummary_AggregatesBaseValues(t *testing.T) {
 	positions := []PositionSummary{
-		{CostBasisBase: 1800, CurrentValueBase: 1950},
-		{CostBasisBase: 775, CurrentValueBase: 914.5},
+		{CostBasisBase: money.AmountFromFloat64(1800), CurrentValueBase: money.AmountFromFloat64(1950)},
+		{CostBasisBase: money.AmountFromFloat64(775), CurrentValueBase: money.AmountFromFloat64(914.5)},
 	}
 
 	sum := CalculatePortfolioSummary("user-1", "pf-1", "USD", positions)

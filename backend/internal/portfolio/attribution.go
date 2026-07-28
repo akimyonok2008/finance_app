@@ -249,12 +249,12 @@ func buildInstrumentEconomics(
 
 	for _, position := range open {
 		entry := get(position.Symbol, position.AssetType)
-		entry.CapitalBase += position.CostBasisBase
-		entry.UnrealizedPnLBase += position.GainLossBase
+		entry.CapitalBase += position.CostBasisBase.Float64()
+		entry.UnrealizedPnLBase += position.GainLossBase.Float64()
 	}
 	for _, position := range closed {
 		entry := get(position.Symbol, position.AssetType)
-		entry.CapitalBase += position.ClosedCostBasisBase
+		entry.CapitalBase += position.ClosedCostBasisBase.Float64()
 	}
 	for key, ledgerEntry := range ledger.bySymbol {
 		if key == "" {

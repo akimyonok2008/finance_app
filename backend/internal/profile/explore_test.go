@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -56,23 +57,23 @@ func exploreTestService(t *testing.T) *Service {
 		"u1": {
 			UserID: "u1", PortfolioID: "p1", CurrentValue: 100, GainLossPercentage: 24.6, PortfolioIndex: 124.6,
 			Positions: []portfolio.PositionSummary{
-				{PositionID: "x1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: 40, CurrentPriceCurrency: "USD"},
-				{PositionID: "x2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 35, CurrentPriceCurrency: "USD"},
-				{PositionID: "x3", Symbol: "BTC-USD", AssetType: "crypto", CurrentValueBase: 25, CurrentPriceCurrency: "USD"},
+				{PositionID: "x1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(40), CurrentPriceCurrency: "USD"},
+				{PositionID: "x2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(35), CurrentPriceCurrency: "USD"},
+				{PositionID: "x3", Symbol: "BTC-USD", AssetType: "crypto", CurrentValueBase: money.AmountFromFloat64(25), CurrentPriceCurrency: "USD"},
 			},
 		},
 		"u2": {
 			UserID: "u2", PortfolioID: "p2", CurrentValue: 100, GainLossPercentage: 10, PortfolioIndex: 110,
 			Positions: []portfolio.PositionSummary{
-				{PositionID: "y1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: 50, CurrentPriceCurrency: "USD"},
-				{PositionID: "y2", Symbol: "MSFT", AssetType: "stock", CurrentValueBase: 50, CurrentPriceCurrency: "USD"},
+				{PositionID: "y1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(50), CurrentPriceCurrency: "USD"},
+				{PositionID: "y2", Symbol: "MSFT", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(50), CurrentPriceCurrency: "USD"},
 			},
 		},
 		"u3": {
 			UserID: "u3", PortfolioID: "p3", CurrentValue: 100, GainLossPercentage: 5, PortfolioIndex: 105,
 			Positions: []portfolio.PositionSummary{
-				{PositionID: "z1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: 60, CurrentPriceCurrency: "USD"},
-				{PositionID: "z2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: 40, CurrentPriceCurrency: "USD"},
+				{PositionID: "z1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(60), CurrentPriceCurrency: "USD"},
+				{PositionID: "z2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(40), CurrentPriceCurrency: "USD"},
 			},
 		},
 	}

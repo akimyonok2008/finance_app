@@ -1,6 +1,10 @@
 package portfolio
 
-import "math"
+import (
+	"math"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
+)
 
 // round2 rounds to two decimal places, matching the precision used for the
 // percentage and index figures shown on the dashboard.
@@ -45,18 +49,18 @@ func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceC
 		PositionID:           pos.ID,
 		Symbol:               pos.Symbol,
 		AssetType:            pos.AssetType,
-		Quantity:             pos.Quantity.Float64(),
-		AverageBuyPrice:      pos.AverageBuyPrice.Float64(),
-		CurrentPrice:         currentPrice,
+		Quantity:             pos.Quantity,
+		AverageBuyPrice:      pos.AverageBuyPrice,
+		CurrentPrice:         money.PriceFromFloat64(currentPrice),
 		CurrentPriceCurrency: currentPriceCurrency,
-		CostBasis:            round2(costBasis),
-		CurrentValue:         round2(currentValue),
-		GainLoss:             round2(gainLoss),
+		CostBasis:            money.AmountFromFloat64(round2(costBasis)),
+		CurrentValue:         money.AmountFromFloat64(round2(currentValue)),
+		GainLoss:             money.AmountFromFloat64(round2(gainLoss)),
 		GainLossPercentage:   round2(gainLossPct),
 		Currency:             pos.Currency,
-		CostBasisBase:        round2(costBasisBase),
-		CurrentValueBase:     round2(currentValueBase),
-		GainLossBase:         round2(gainLossBase),
+		CostBasisBase:        money.AmountFromFloat64(round2(costBasisBase)),
+		CurrentValueBase:     money.AmountFromFloat64(round2(currentValueBase)),
+		GainLossBase:         money.AmountFromFloat64(round2(gainLossBase)),
 		BaseCurrency:         baseCurrency,
 	}
 }
@@ -81,12 +85,12 @@ func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positio
 	}
 	var activeCostBasis, activeCurrentValue, closedCostBasis, realizedGainLoss float64
 	for _, p := range positions {
-		activeCostBasis += p.CostBasisBase
-		activeCurrentValue += p.CurrentValueBase
+		activeCostBasis += p.CostBasisBase.Float64()
+		activeCurrentValue += p.CurrentValueBase.Float64()
 	}
 	for _, p := range closed {
-		closedCostBasis += p.ClosedCostBasisBase
-		realizedGainLoss += p.RealizedGainLossBase
+		closedCostBasis += p.ClosedCostBasisBase.Float64()
+		realizedGainLoss += p.RealizedGainLossBase.Float64()
 	}
 	unrealizedGainLoss := activeCurrentValue - activeCostBasis
 	// Closed proceeds are assets only when represented by cash. Do not synthesize

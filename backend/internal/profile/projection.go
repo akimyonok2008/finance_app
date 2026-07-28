@@ -167,14 +167,14 @@ func dnaInputsFromSummary(summary *portfolio.PortfolioSummary) []dna.PositionDNA
 	}
 	inputs := make([]dna.PositionDNAInput, 0, len(summary.Positions))
 	for _, position := range summary.Positions {
-		if position.CurrentValueBase <= 0 {
+		if position.CurrentValueBase.Sign() <= 0 {
 			continue
 		}
 		inputs = append(inputs, dna.PositionDNAInput{
 			Symbol:    position.Symbol,
 			AssetType: position.AssetType,
 			Currency:  position.CurrentPriceCurrency,
-			Weight:    position.CurrentValueBase / summary.CurrentValue,
+			Weight:    position.CurrentValueBase.Float64() / summary.CurrentValue,
 		})
 	}
 	return inputs
@@ -235,13 +235,13 @@ func buildContributors(summary *portfolio.PortfolioSummary) ([]ProfileContributo
 	for _, position := range summary.Positions {
 		signals = append(signals, contributionSignal{
 			symbol: position.Symbol,
-			points: contributionPoints(position.GainLossBase, summary.TotalCostBasis),
+			points: contributionPoints(position.GainLossBase.Float64(), summary.TotalCostBasis),
 		})
 	}
 	for _, position := range summary.ClosedPositions {
 		signals = append(signals, contributionSignal{
 			symbol: position.Symbol,
-			points: contributionPoints(position.RealizedGainLossBase, summary.TotalCostBasis),
+			points: contributionPoints(position.RealizedGainLossBase.Float64(), summary.TotalCostBasis),
 		})
 	}
 	contributors := []ProfileContributor{}
@@ -333,12 +333,12 @@ func buildComposition(summary *portfolio.PortfolioSummary) ([]PublicWeight, []Ex
 	assetTypes := map[string]float64{}
 	currencies := map[string]float64{}
 	for _, position := range summary.Positions {
-		weight := round2(position.CurrentValueBase / summary.CurrentValue * 100)
+		weight := round2(position.CurrentValueBase.Float64() / summary.CurrentValue * 100)
 		weights = append(weights, PublicWeight{
 			Symbol: position.Symbol, AssetType: position.AssetType, Weight: weight,
 		})
-		assetTypes[position.AssetType] += position.CurrentValueBase
-		currencies[position.CurrentPriceCurrency] += position.CurrentValueBase
+		assetTypes[position.AssetType] += position.CurrentValueBase.Float64()
+		currencies[position.CurrentPriceCurrency] += position.CurrentValueBase.Float64()
 	}
 	if summary.TotalCashValueBase > 0 {
 		weights = append(weights, PublicWeight{
