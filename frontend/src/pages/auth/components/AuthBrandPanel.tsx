@@ -94,7 +94,7 @@ export function AuthBrandPanel() {
           />
           <PreviewStat
             label="Leaderboard"
-            value="Anonymous"
+            value="Percentage-based"
             icon={ShieldCheck}
           />
         </motion.div>

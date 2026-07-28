@@ -40,6 +40,18 @@ var (
 	// ErrNothingToCorrect is returned when the corrected amount equals the
 	// original amount, so no compensating activity would be created.
 	ErrNothingToCorrect = errors.New("corrected amount matches the original activity; nothing to correct")
+	// ErrCorrectionSupersededByLaterActivity is returned when correcting a
+	// buy/sell is unsafe because a later activity already exists in the same
+	// position episode (another buy, a partial/full sell, a split, a
+	// reinvested dividend). Only the most recent event in an episode can be
+	// corrected; anything else would retroactively change basis/quantity math
+	// that later activity already depended on.
+	ErrCorrectionSupersededByLaterActivity = errors.New("a later transaction exists in this position's history; this trade can no longer be corrected — record an offsetting trade instead")
+	// ErrCorrectionRankedConflict is returned when correcting a buy/sell would
+	// change state that an already-computed, trusted ranked snapshot
+	// captured. Ranked history is never rebuilt: the correction is refused so
+	// ranked history stays internally consistent.
+	ErrCorrectionRankedConflict = errors.New("this trade contributed to an already-established ranked snapshot and can no longer be corrected")
 
 	// ErrPositionNotFound is returned when a position does not exist OR does not
 	// belong to the requesting user. The same error is used for both cases so
@@ -77,28 +89,16 @@ var (
 	ErrInvalidBuyFee = errors.New("purchase fee must be non-negative")
 
 	// ErrImplausibleExecutionPrice is returned when a user-entered execution
-	// price for a LIVE (non-backdated) trade is wildly inconsistent with the
-	// tracked market quote pinned for the same mutation — e.g. claiming a fill
-	// far below or above the current price. It exists because current holdings
-	// P&L and public open/closed return percentages are built directly from
-	// this price, unlike the ranked leaderboard index, which values every
-	// position at the tracked quote and is unaffected by it. Backdated trades
-	// are exempt: no live quote exists for the claimed date to compare against,
-	// and backdating a real historical trade is a deliberate, supported
-	// feature.
-	ErrImplausibleExecutionPrice = errors.New("execution price is too far from the current market price for a live trade; backdate the trade with effective_at if this was a past transaction")
+	// price for a trade is wildly inconsistent with the tracked market quote
+	// pinned for the same mutation — e.g. claiming a fill far below or above
+	// the current price. It exists because current holdings P&L and public
+	// open/closed return percentages are built directly from this price,
+	// unlike the ranked leaderboard index, which values every position at the
+	// tracked quote and is unaffected by it. There is no backdating exemption:
+	// every trade is recorded against the live quote at the time it is
+	// entered, so there is always a real comparator.
+	ErrImplausibleExecutionPrice = errors.New("execution price is too far from the current market price")
 
-	// ErrHistoricalRankedConflict is returned when a backdated transaction would
-	// change state that an already-computed, trusted ranked snapshot captured.
-	// Alarvest does NOT rebuild ranked history: the transaction is refused so
-	// ranked history stays internally consistent.
-	ErrHistoricalRankedConflict = errors.New("this historical transaction would change established ranked history and requires reconciliation")
-	// ErrHistoricalQuantityInsufficient is returned when a backdated sale
-	// exceeds the quantity the position actually held at effective_at, measured
-	// by chronological replay of the activity ledger's quantity effects.
-	ErrHistoricalQuantityInsufficient       = errors.New("the position did not hold that quantity at this transaction date")
-	ErrHistoricalExecutionPriceRequired     = errors.New("backdated trades require an explicit execution price")
-	ErrHistoricalEpisodeNotOpen             = errors.New("selected position episode was not open at effective_at")
 	ErrInstrumentIdentityAmbiguous          = errors.New("instrument identity is ambiguous; provide exchange or MIC")
 	ErrInstrumentIdentityUnresolvedConflict = errors.New("an unresolved open position already uses this symbol; resolve the instrument before adding another listing")
 

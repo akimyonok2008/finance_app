@@ -10,6 +10,10 @@ var (
 	ErrNotFriends           = errors.New("you can only message mutual friends")
 	ErrInvalidMessage       = errors.New("message body is required")
 	ErrMessageTooLong       = errors.New("message body must be 1000 characters or fewer")
+	ErrMessageRateLimited   = errors.New("message sending limit reached; try again shortly")
+	ErrConversationLimited  = errors.New("conversation message limit reached; try again shortly")
+	ErrRepeatedMessage      = errors.New("repeated identical messages are not allowed")
+	ErrSpamBurst            = errors.New("message burst detected; slow down")
 	ErrConversationNotFound = errors.New("conversation not found")
 	ErrForbidden            = errors.New("forbidden")
 	// ErrInteractionBlocked is returned whenever the canonical interaction

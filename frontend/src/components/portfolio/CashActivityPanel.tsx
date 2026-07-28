@@ -44,7 +44,7 @@ export function CashActivityPanel() {
             <p className="mt-1 text-xs text-zinc-500">Multi-currency, immediately settled tracking balances.</p>
           </div>
           <span className="text-sm font-semibold text-emerald-200">
-            {formatMoney(cash.data?.total_cash_value_base ?? 0, cash.data?.base_currency ?? "USD")}
+            {formatMoney(cash.data?.total_cash_value_base ?? "0", cash.data?.base_currency ?? "USD")}
           </span>
         </div>
 

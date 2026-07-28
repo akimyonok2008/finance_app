@@ -1,8 +1,29 @@
 package social
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 const MaxMessageLength = 1000
+
+var defaultMessageAbusePolicy = MessageAbusePolicy{
+	UserLimit: 30, UserWindow: time.Minute,
+	ConversationLimit: 40, ConversationWindow: time.Minute,
+	RepeatedLimit: 3, RepeatedWindow: 10 * time.Minute,
+	BurstLimit: 8, BurstWindow: 10 * time.Second,
+}
+
+type MessageAbusePolicy struct {
+	UserLimit          int
+	UserWindow         time.Duration
+	ConversationLimit  int
+	ConversationWindow time.Duration
+	RepeatedLimit      int
+	RepeatedWindow     time.Duration
+	BurstLimit         int
+	BurstWindow        time.Duration
+}
 
 type SafeProfile struct {
 	Handle      string `json:"handle"`
@@ -57,6 +78,23 @@ type Message struct {
 	CreatedAt      time.Time
 	RemovedAt      *time.Time
 	RemovedBy      *string
+}
+
+type MessageNotification struct {
+	ID          string
+	RecipientID string
+	Type        string
+	DedupeKey   string
+	Payload     map[string]string
+	CreatedAt   time.Time
+}
+
+type MessageWrite struct {
+	Message      Message
+	Notification *MessageNotification
+	// VolatileNotify is used only by the in-memory repository. PostgreSQL
+	// persists Notification in the same transaction as Message.
+	VolatileNotify func(context.Context) error
 }
 
 // IsRemoved reports whether a moderator tombstoned this message.

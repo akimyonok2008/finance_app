@@ -25,14 +25,12 @@ type ResolveWrite struct {
 	SuspendUntil *time.Time
 	// Notification is optional; nil means no notification is created.
 	Notification *Notification
-	// ExternalApply performs any account mutation that must happen through
-	// another package's boundary (e.g. auth.Service.Suspend/Ban). It runs
-	// while the report row is still locked, after the audit/report/
-	// notification writes are staged but before they are committed (for
-	// Postgres) or made visible (for the in-memory repo), so a failure here
-	// leaves no partial state and a concurrent resolver cannot race it.
-	// May be nil.
-	ExternalApply func(ctx context.Context) error
+	// VolatileApply is used only by the in-memory repository to mirror an
+	// account/content effect into the other in-memory services. Durable
+	// repositories must ignore it and apply ActionType themselves through
+	// their own transaction; in particular, PostgreSQL never calls this
+	// function through a second connection.
+	VolatileApply func(ctx context.Context) error
 }
 
 // ResolveBuilder is invoked by Repository.ResolveReport with the current,

@@ -106,13 +106,13 @@ function historyWith(
 }
 
 const completeBreakdown: EconomicBreakdown = {
-  realized_pnl_base: 150,
-  unrealized_pnl_base: 400,
-  net_income_base: 60,
-  standalone_fees_base: 20,
-  attributed_total_base: 590,
-  total_economic_pnl_base: 590,
-  unattributed_base: 0,
+  realized_pnl_base: "150",
+  unrealized_pnl_base: "400",
+  net_income_base: "60",
+  standalone_fees_base: "20",
+  attributed_total_base: "590",
+  total_economic_pnl_base: "590",
+  unattributed_base: "0",
   calculation_status: "complete",
   is_complete: true,
 };
@@ -121,23 +121,23 @@ const contributions: ContributionAnalysis = {
   basis: "since_inception",
   calculation_status: "complete",
   available: true,
-  total_capital_base: 10000,
+  total_capital_base: "10000",
   contributors: [
     {
       symbol: "BIG",
       weight_percentage: 90,
       instrument_return_percentage: 10,
       contribution_percentage_points: 9,
-      economic_result_base: 900,
-      income_base: 0,
+      economic_result_base: "900",
+      income_base: "0",
     },
     {
       symbol: "MOON",
       weight_percentage: 1,
       instrument_return_percentage: 100,
       contribution_percentage_points: 1,
-      economic_result_base: 100,
-      income_base: 0,
+      economic_result_base: "100",
+      income_base: "0",
     },
   ],
   detractors: [
@@ -146,8 +146,8 @@ const contributions: ContributionAnalysis = {
       weight_percentage: 9,
       instrument_return_percentage: -20,
       contribution_percentage_points: -1.8,
-      economic_result_base: -180,
-      income_base: 0,
+      economic_result_base: "-180",
+      income_base: "0",
     },
   ],
   unattributed_percentage_points: 0,
@@ -161,7 +161,7 @@ function summaryWith(
     ranked: { index: 110, return_percentage: 10, tracking_status: "active" },
     economic_breakdown: completeBreakdown,
     contributions,
-    reconciliation: { is_complete: true, is_consistent: true, difference: 0 },
+    reconciliation: { is_complete: true, is_consistent: true, difference: "0" },
     ...overrides,
   };
 }

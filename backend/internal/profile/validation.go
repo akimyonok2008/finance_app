@@ -16,6 +16,10 @@ var (
 	// be queried while filtering a profile/Explore result. Callers must fail
 	// closed (server error) rather than fall back to an unfiltered view.
 	ErrSafetyUnavailable = errors.New("safety_unavailable")
+	// ErrRankedDataUnavailable prevents public projections from substituting
+	// mutable portfolio-summary performance when the canonical ranked source
+	// cannot be read.
+	ErrRankedDataUnavailable = errors.New("ranked_data_unavailable")
 
 	handlePattern = regexp.MustCompile(`^[a-z0-9_-]{3,30}$`)
 	invalidHandle = regexp.MustCompile(`[^a-z0-9_-]+`)

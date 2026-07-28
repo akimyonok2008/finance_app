@@ -96,56 +96,56 @@ export type PortfolioSummary = {
   user_id?: string;
   portfolio_id?: string;
   base_currency?: string;
-  total_cost_basis: number;
-  current_value: number;
-  gain_loss: number;
+  total_cost_basis: DecimalString;
+  current_value: DecimalString;
+  gain_loss: DecimalString;
   gain_loss_percentage: number;
   portfolio_index: number;
   positions?: PositionSummary[];
   closed_positions?: ClosedPosition[];
-  active_cost_basis_base?: number;
-  active_current_value_base?: number;
-  unrealized_gain_loss_base?: number;
-  closed_cost_basis_base?: number;
-  realized_gain_loss_base?: number;
+  active_cost_basis_base?: DecimalString;
+  active_current_value_base?: DecimalString;
+  unrealized_gain_loss_base?: DecimalString;
+  closed_cost_basis_base?: DecimalString;
+  realized_gain_loss_base?: DecimalString;
   quote_status?: QuoteStatus;
   cash_balances?: CashBalance[];
-  total_cash_value_base?: number;
+  total_cash_value_base?: DecimalString;
   ranked_performance: {
     index: number;
     return_percentage: number;
     tracking_status: "active" | "paused" | "unavailable";
   };
   valuation: {
-    open_holdings_market_value_base: number;
-    cash_value_base: number;
-    current_portfolio_value_base: number;
+    open_holdings_market_value_base: DecimalString;
+    cash_value_base: DecimalString;
+    current_portfolio_value_base: DecimalString;
   };
   open_holdings: {
-    cost_basis_base: number;
-    unrealized_pnl_base: number;
+    cost_basis_base: DecimalString;
+    unrealized_pnl_base: DecimalString;
     unrealized_return_percentage: number | null;
   };
   realized: {
-    realized_pnl_base: number;
+    realized_pnl_base: DecimalString;
   };
   income: {
-    dividends_base: number;
-    distributions_base: number;
-    interest_base: number;
-    other_income_base: number;
-    total_income_base: number;
+    dividends_base: DecimalString;
+    distributions_base: DecimalString;
+    interest_base: DecimalString;
+    other_income_base: DecimalString;
+    total_income_base: DecimalString;
   };
   fees: {
-    transaction_fees_base: number;
-    management_fees_base: number;
-    custody_fees_base: number;
-    other_fees_base: number;
-    total_fees_base: number;
+    transaction_fees_base: DecimalString;
+    management_fees_base: DecimalString;
+    custody_fees_base: DecimalString;
+    other_fees_base: DecimalString;
+    total_fees_base: DecimalString;
   };
   economic_performance: {
-    total_pnl_base: number | null;
-    net_contributions_base: number | null;
+    total_pnl_base: DecimalString | null;
+    net_contributions_base: DecimalString | null;
     return_percentage: number | null;
     calculation_status: "complete" | "legacy_estimate" | "insufficient_history";
     is_complete: boolean;
@@ -153,7 +153,7 @@ export type PortfolioSummary = {
   reconciliation: {
     is_complete: boolean;
     is_consistent: boolean;
-    difference: number;
+    difference: DecimalString;
     reasons?: string[];
   };
 };
@@ -168,8 +168,7 @@ export type CashBalance = {
 
 export type CashResponse = {
   cash_balances: CashBalance[];
-  /** still a float64 aggregate on PortfolioSummary; kept as number here too for symmetry with the summary DTO */
-  total_cash_value_base: number;
+  total_cash_value_base: DecimalString;
   base_currency: string;
 };
 
@@ -248,7 +247,6 @@ export type SellPositionInput = {
   quantity: DecimalString;
   execution_price?: DecimalString;
   fee?: DecimalString;
-  effective_at?: string;
 };
 
 export type SellPreview = {
@@ -323,8 +321,6 @@ export type CreatePositionInput = {
   execution_price?: DecimalString;
   /** Transaction fee actually charged. Omitted → zero. */
   fee?: DecimalString;
-  /** When the trade really happened (RFC3339). Omitted → now. */
-  effective_at?: string;
 };
 
 /** Where a recorded price/fee came from, so estimates are never shown as facts. */

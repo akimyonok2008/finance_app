@@ -15,7 +15,7 @@ import type {
 const STANDARD_RULES = [
   "Your portfolio baseline is locked when you join.",
   "Rankings use percentage performance only.",
-  "Holdings and portfolio values always remain private.",
+  "This sprint board omits holdings and account values. Composition is shared only through an opted-in public profile.",
 ];
 
 export async function getActiveSprint(): Promise<ActiveSprint> {

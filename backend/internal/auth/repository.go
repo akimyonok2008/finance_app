@@ -15,6 +15,10 @@ type UserRepository interface {
 	// Create persists a new user. It returns ErrEmailExists if the (normalized)
 	// email is already taken.
 	Create(user *User) error
+	// CreateWithVerification atomically persists a password user, its initial
+	// verification token, and the corresponding durable email-outbox message.
+	// A failure must leave none of the three records behind.
+	CreateWithVerification(ctx context.Context, user *User, token LifecycleToken, email EmailOutboxMessage) error
 	// FindByEmail looks up a user by email. The email is normalized internally,
 	// so callers may pass any casing. Returns ErrUserNotFound on a miss.
 	FindByEmail(email string) (*User, error)
@@ -36,6 +40,10 @@ type UserRepository interface {
 	ResetPasswordToken(ctx context.Context, tokenHash, passwordHash string, now time.Time) (*User, error)
 	SaveReauthenticationToken(ctx context.Context, token LifecycleToken) error
 	ConsumeReauthenticationToken(ctx context.Context, userID, tokenHash string, now time.Time) error
+	ClaimEmailOutboxByID(ctx context.Context, id string, now time.Time) (EmailOutboxMessage, bool, error)
+	ClaimEmailOutbox(ctx context.Context, limit int, now time.Time) ([]EmailOutboxMessage, error)
+	MarkEmailOutboxDelivered(ctx context.Context, id string, deliveredAt time.Time) error
+	MarkEmailOutboxFailed(ctx context.Context, id, failure string, retryAt time.Time) error
 	// SoftDelete marks the user deleted. From that point on FindByEmail,
 	// FindByID, and ListUsers must all treat the account as gone — which also
 	// means any outstanding JWT stops working, since RequireAuthWithUser
@@ -63,6 +71,7 @@ type InMemoryUserRepository struct {
 	emailTokens  []memoryLifecycleToken
 	resetTokens  []memoryLifecycleToken
 	reauthTokens []memoryLifecycleToken
+	emailOutbox  []EmailOutboxMessage
 }
 
 type memoryLifecycleToken struct {
@@ -106,6 +115,126 @@ func (r *InMemoryUserRepository) Create(user *User) error {
 	r.byID[stored.ID] = &stored
 	r.byEmail[key] = &stored
 	return nil
+}
+
+func (r *InMemoryUserRepository) CreateWithVerification(
+	_ context.Context,
+	user *User,
+	token LifecycleToken,
+	email EmailOutboxMessage,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := normalizeEmail(user.Email)
+	if _, exists := r.byEmail[key]; exists {
+		return ErrEmailExists
+	}
+	stored := *user
+	if stored.AuthVersion == 0 {
+		stored.AuthVersion = 1
+	}
+	if stored.PasswordHash != "" {
+		stored.HasPassword = true
+	}
+	if stored.Role == "" {
+		stored.Role = RoleUser
+	}
+	r.byID[stored.ID] = &stored
+	r.byEmail[key] = &stored
+	r.emailTokens = append(r.emailTokens, memoryLifecycleToken{LifecycleToken: token})
+	r.emailOutbox = append(r.emailOutbox, email)
+	return nil
+}
+
+func (r *InMemoryUserRepository) ClaimEmailOutbox(
+	_ context.Context,
+	limit int,
+	now time.Time,
+) ([]EmailOutboxMessage, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	out := make([]EmailOutboxMessage, 0, limit)
+	for i := range r.emailOutbox {
+		message := &r.emailOutbox[i]
+		leaseExpired := message.ClaimedAt != nil && message.ClaimedAt.Add(emailOutboxLeaseTTL).Before(now)
+		if message.DeliveredAt != nil || message.AvailableAt.After(now) ||
+			(message.ClaimedAt != nil && !leaseExpired) {
+			continue
+		}
+		claimed := now
+		message.ClaimedAt = &claimed
+		message.Attempts++
+		out = append(out, *message)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (r *InMemoryUserRepository) ClaimEmailOutboxByID(
+	_ context.Context,
+	id string,
+	now time.Time,
+) (EmailOutboxMessage, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.emailOutbox {
+		message := &r.emailOutbox[i]
+		if message.ID != id || message.DeliveredAt != nil || message.AvailableAt.After(now) {
+			continue
+		}
+		leaseExpired := message.ClaimedAt != nil && message.ClaimedAt.Add(emailOutboxLeaseTTL).Before(now)
+		if message.ClaimedAt != nil && !leaseExpired {
+			return EmailOutboxMessage{}, false, nil
+		}
+		claimed := now
+		message.ClaimedAt = &claimed
+		message.Attempts++
+		return *message, true, nil
+	}
+	return EmailOutboxMessage{}, false, nil
+}
+
+func (r *InMemoryUserRepository) MarkEmailOutboxDelivered(
+	_ context.Context,
+	id string,
+	deliveredAt time.Time,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.emailOutbox {
+		if r.emailOutbox[i].ID == id {
+			r.emailOutbox[i].DeliveredAt = &deliveredAt
+			r.emailOutbox[i].ClaimedAt = nil
+			r.emailOutbox[i].LastError = ""
+			r.emailOutbox[i].VerificationURL = ""
+			return nil
+		}
+	}
+	return ErrEmailOutboxNotFound
+}
+
+func (r *InMemoryUserRepository) MarkEmailOutboxFailed(
+	_ context.Context,
+	id, failure string,
+	retryAt time.Time,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.emailOutbox {
+		if r.emailOutbox[i].ID == id {
+			r.emailOutbox[i].ClaimedAt = nil
+			r.emailOutbox[i].AvailableAt = retryAt
+			r.emailOutbox[i].LastError = failure
+			return nil
+		}
+	}
+	return ErrEmailOutboxNotFound
 }
 
 // FindByEmail returns a copy of the user with the given email.

@@ -69,7 +69,7 @@ type RankedPerformance struct {
 
 // RankedPerformanceProvider supplies a user's persistent ranked performance so
 // public profiles show the trusted ranked index rather than a mutable
-// current-basket figure. Optional; when unset the summary index is used.
+// current-basket figure. Public projections fail closed when it is unavailable.
 type RankedPerformanceProvider interface {
 	CurrentRankedPerformance(ctx context.Context, userID string) (RankedPerformance, error)
 }
@@ -217,7 +217,7 @@ func (s *Service) GetMe(ctx context.Context, userID string) (OwnerProfile, error
 	if err != nil {
 		return OwnerProfile{}, err
 	}
-	return s.ownerProjection(ctx, p), nil
+	return s.ownerProjection(ctx, p)
 }
 
 func (s *Service) UpdateMe(ctx context.Context, userID string, input UpdateInput) (OwnerProfile, error) {
@@ -256,7 +256,7 @@ func (s *Service) UpdateMe(ctx context.Context, userID string, input UpdateInput
 	if err := s.repo.Update(ctx, p); err != nil {
 		return OwnerProfile{}, err
 	}
-	return s.ownerProjection(ctx, p), nil
+	return s.ownerProjection(ctx, p)
 }
 
 // OnAccountDeleted implements auth.AccountDeletionHook: it unpublishes the
@@ -303,7 +303,7 @@ func (s *Service) GetPublic(ctx context.Context, callerID, handle string) (Publi
 			return PublicProfile{}, ErrNotFound
 		}
 	}
-	return s.publicProjection(ctx, p), nil
+	return s.publicProjection(ctx, p)
 }
 
 // PublicStrategyByHandle returns the safe public strategy weights used by copy
@@ -396,7 +396,11 @@ func (s *Service) getOrCreate(ctx context.Context, userID string) (Profile, erro
 	return Profile{}, errors.New("could not allocate unique profile handle")
 }
 
-func (s *Service) ownerProjection(ctx context.Context, p Profile) OwnerProfile {
+func (s *Service) ownerProjection(ctx context.Context, p Profile) (OwnerProfile, error) {
+	publicPreview, err := s.publicProjection(ctx, p)
+	if err != nil {
+		return OwnerProfile{}, err
+	}
 	return OwnerProfile{
 		Handle:            p.Handle,
 		DisplayName:       p.DisplayName,
@@ -407,6 +411,6 @@ func (s *Service) ownerProjection(ctx context.Context, p Profile) OwnerProfile {
 		ShowPublicWeights: p.ShowPublicWeights,
 		CreatedAt:         p.CreatedAt,
 		UpdatedAt:         p.UpdatedAt,
-		PublicPreview:     s.publicProjection(ctx, p),
-	}
+		PublicPreview:     publicPreview,
+	}, nil
 }

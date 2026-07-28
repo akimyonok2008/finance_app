@@ -179,18 +179,9 @@ func (r *InMemoryRepository) ResolveReport(ctx context.Context, reportID string,
 		return Report{}, false, err
 	}
 	// Stage the action locally; only appended to r.actions once every later
-	// stage (including ExternalApply) has succeeded, so an injected or real
+	// stage (including VolatileApply) has succeeded, so an injected or real
 	// failure at any point leaves the actions slice untouched.
 	pendingAction := write.Action
-
-	if write.ExternalApply != nil {
-		if err := r.fail("external_apply"); err != nil {
-			return Report{}, false, err
-		}
-		if err := write.ExternalApply(ctx); err != nil {
-			return Report{}, false, err
-		}
-	}
 
 	if write.Notification != nil {
 		if err := r.fail("notification_insert"); err != nil {
@@ -202,7 +193,19 @@ func (r *InMemoryRepository) ResolveReport(ctx context.Context, reportID string,
 		return Report{}, false, err
 	}
 
-	// All checks passed: commit every mutation together.
+	// VolatileApply is the last fallible operation. Once it succeeds, publishing
+	// the already-staged in-memory maps/slices below cannot fail, so no later
+	// error can leave the mirrored account/content effect on its own.
+	if write.VolatileApply != nil {
+		if err := r.fail("external_apply"); err != nil {
+			return Report{}, false, err
+		}
+		if err := write.VolatileApply(ctx); err != nil {
+			return Report{}, false, err
+		}
+	}
+
+	// All checks passed: publish every mutation together.
 	r.actions = append(r.actions, pendingAction)
 	if write.Notification != nil {
 		n := *write.Notification

@@ -104,6 +104,11 @@ const ReportsQueuePage = lazy(() =>
     }),
   ),
 );
+const PrivacyPolicyPage = lazy(() =>
+  import("@/pages/PrivacyPolicyPage").then(({ PrivacyPolicyPage }) => ({
+    default: PrivacyPolicyPage,
+  })),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -147,6 +152,7 @@ export default function App() {
               <Route path="/verify-email" element={<VerifyEmailPage />} />
               <Route path="/forgot-password" element={<ForgotPasswordPage />} />
               <Route path="/reset-password" element={<ResetPasswordPage />} />
+              <Route path="/privacy" element={<PrivacyPolicyPage />} />
 
               <Route
                 path="/dashboard"

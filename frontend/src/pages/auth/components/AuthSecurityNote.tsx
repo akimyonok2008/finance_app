@@ -1,9 +1,10 @@
 import { EyeOff, LockKeyhole, ShieldCheck } from "lucide-react";
+import { Link } from "react-router-dom";
 
 const TRUST_ITEMS = [
   { icon: ShieldCheck, label: "Secure session" },
-  { icon: EyeOff, label: "Private rankings" },
-  { icon: LockKeyhole, label: "No public holdings" },
+  { icon: EyeOff, label: "Private account values" },
+  { icon: LockKeyhole, label: "Opt-in composition" },
 ];
 
 export function AuthSecurityNote() {
@@ -23,7 +24,10 @@ export function AuthSecurityNote() {
       </div>
 
       {/* Main note */}
-      <p className="text-xs leading-5 text-zinc-500">Private rankings. No public holdings.</p>
+      <p className="text-xs leading-5 text-zinc-500">
+        Rankings use percentages. You choose whether your public profile shares
+        symbols and allocation weights.
+      </p>
 
       {/* Legal */}
       <p className="text-xs text-zinc-600">
@@ -35,12 +39,12 @@ export function AuthSecurityNote() {
           Terms
         </button>{" "}
         and{" "}
-        <button
-          type="button"
+        <Link
+          to="/privacy"
           className="underline underline-offset-2 hover:text-zinc-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/40"
         >
           Privacy Policy
-        </button>
+        </Link>
         .
       </p>
     </div>

@@ -184,16 +184,22 @@ function ReportDetailPanel({
             </div>
           )}
           <div>
-            <label className="mb-1 block text-xs text-zinc-400">Reason (shown in audit log)</label>
+            <label htmlFor="moderation-reason" className="mb-1 block text-xs text-zinc-400">
+              Reason (shown in audit log)
+            </label>
             <input
+              id="moderation-reason"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               className="w-full rounded-lg border border-white/10 bg-black/20 p-1.5 text-sm"
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs text-zinc-400">Moderator notes (internal)</label>
+            <label htmlFor="moderation-notes" className="mb-1 block text-xs text-zinc-400">
+              Moderator notes (internal)
+            </label>
             <textarea
+              id="moderation-notes"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               className="min-h-16 w-full rounded-lg border border-white/10 bg-black/20 p-1.5 text-sm"

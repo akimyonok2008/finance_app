@@ -9,6 +9,16 @@ import (
 	"time"
 )
 
+// Leader reports whether this process currently holds leadership over the
+// gated jobs (implemented by *leaderlock.Elector). Worker takes a narrow
+// interface rather than importing leaderlock's concrete type so callers that
+// never need coordination (a single-instance/dev/memory-mode deployment) can
+// leave it unset — a nil Leader is treated as "always leader" — without
+// jobs depending on leaderlock's pgx-specific dependencies.
+type Leader interface {
+	IsLeader() bool
+}
+
 // GlobalLeaderboardRefresher recomputes and caches the global ranking.
 // Implemented by *leaderboard.Service.
 type GlobalLeaderboardRefresher interface {
@@ -39,6 +49,7 @@ type Worker struct {
 	sprints   SprintMaintainer
 	snapshots PortfolioSnapshotter // optional
 	interval  time.Duration
+	leader    Leader // optional; nil means "always leader"
 }
 
 // NewWorker wires a Worker that runs every interval.
@@ -52,14 +63,27 @@ func (w *Worker) SetPortfolioSnapshotter(s PortfolioSnapshotter) {
 	w.snapshots = s
 }
 
+// SetLeaderElector attaches the coordination gate that keeps these jobs
+// running on exactly one replica at a time. Every job this Worker runs does a
+// full unpaginated pass over all users with no per-row claiming (unlike the
+// outbox and ranked-snapshot workers), so two replicas both running it
+// doubles leaderboard-cache writes and daily-snapshot valuation load for no
+// benefit.
+func (w *Worker) SetLeaderElector(l Leader) {
+	w.leader = l
+}
+
 // Start runs the jobs immediately, then on every tick until ctx is cancelled.
-// The returned channel closes when the worker has fully stopped.
+// The returned channel closes when the worker has fully stopped. Each pass is
+// skipped (logged, not executed) while this process is not the leader — see
+// SetLeaderElector — so a non-leader replica just idles rather than doing
+// redundant work.
 func (w *Worker) Start(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		slog.Info("background worker started", "interval", w.interval.String())
-		w.RunOnce(ctx)
+		w.runIfLeader(ctx)
 
 		ticker := time.NewTicker(w.interval)
 		defer ticker.Stop()
@@ -69,11 +93,19 @@ func (w *Worker) Start(ctx context.Context) <-chan struct{} {
 				slog.Info("background worker stopped")
 				return
 			case <-ticker.C:
-				w.RunOnce(ctx)
+				w.runIfLeader(ctx)
 			}
 		}
 	}()
 	return done
+}
+
+func (w *Worker) runIfLeader(ctx context.Context) {
+	if w.leader != nil && !w.leader.IsLeader() {
+		slog.Debug("job: skipped, not leader")
+		return
+	}
+	w.RunOnce(ctx)
 }
 
 // RunOnce executes every job a single time. Exported so startup and tests can

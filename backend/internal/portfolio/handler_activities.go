@@ -139,16 +139,20 @@ func (h *Handler) CorrectIncomeEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 type activityCorrectionRequest struct {
-	ActualAmount money.Amount `json:"actual_amount"`
-	Reason       string       `json:"reason"`
+	ActualAmount            money.Amount   `json:"actual_amount,omitempty"`
+	CorrectedQuantity       money.Quantity `json:"corrected_quantity,omitempty"`
+	CorrectedExecutionPrice money.Price    `json:"corrected_execution_price,omitempty"`
+	CorrectedFee            money.Amount   `json:"corrected_fee,omitempty"`
+	Reason                  string         `json:"reason"`
 }
 
 // CorrectActivity handles POST /portfolio/activities/{id}/correction. It
-// reconciles a user-recorded deposit or withdrawal to its actual amount by
-// posting a compensating activity — the original, immutable activity is never
-// edited. Buy/sell activities are rejected (record an offsetting sell/buy
-// instead); this endpoint never accepts automatic/system-generated activities
-// since those already have their own dedicated correction paths (e.g. income).
+// reconciles a user-recorded activity to its actual values by posting a new
+// compensating/corrected activity — the original, immutable activity is never
+// edited. Deposits/withdrawals use actual_amount; buy/sell corrections use
+// corrected_quantity/corrected_execution_price/corrected_fee, and only apply
+// to the most recent trade in its position episode. Every other activity type
+// is rejected (income has its own dedicated correction path).
 func (h *Handler) CorrectActivity(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(w, r)
 	if !ok {
@@ -164,9 +168,12 @@ func (h *Handler) CorrectActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.CorrectActivity(r.Context(), uid, requestID, ActivityCorrectionInput{
-		ActivityID:   chi.URLParam(r, "id"),
-		ActualAmount: req.ActualAmount,
-		Reason:       req.Reason,
+		ActivityID:              chi.URLParam(r, "id"),
+		ActualAmount:            req.ActualAmount,
+		CorrectedQuantity:       req.CorrectedQuantity,
+		CorrectedExecutionPrice: req.CorrectedExecutionPrice,
+		CorrectedFee:            req.CorrectedFee,
+		Reason:                  req.Reason,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -243,10 +250,11 @@ func (h *Handler) ListCorporateActions(w http.ResponseWriter, r *http.Request) {
 const effectiveAtFutureTolerance = 5 * time.Minute
 
 // parseEffectiveAt parses an optional ISO-8601 effective_at, writing a 400 and
-// returning ok=false on a malformed or future-dated value. Backdating is a
-// deliberate, supported feature (see the historical-quantity tests); only a
-// date beyond "now" is rejected, since nothing about this product can make an
-// activity that hasn't happened yet true.
+// returning ok=false on a malformed or future-dated value. Used only by
+// non-trade activities (fees, corrections) that may be logged after the fact;
+// buys and sells have no effective_at field at all. Only a date beyond "now"
+// is rejected, since nothing about this product can make an activity that
+// hasn't happened yet true.
 func parseEffectiveAt(w http.ResponseWriter, raw string) (*time.Time, bool) {
 	if raw == "" {
 		return nil, true

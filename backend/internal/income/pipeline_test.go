@@ -223,11 +223,15 @@ func TestEligibility_UsesHistoricalHoldingsNotCurrentQuantity(t *testing.T) {
 	h := newHarness(t)
 	h.fund(t, "u1", "100")
 	// Sell 60 AFTER the ex-date. Current quantity becomes 40, but entitlement is
-	// based on the 100 held on the ex-date.
+	// based on the 100 held on the ex-date. The portfolio's own clock (not a
+	// user-supplied backdate) is advanced past the ex-date to record the sale
+	// activity at that later, real moment in time.
 	sellAt := h.now.AddDate(0, 0, -2)
+	h.svc.Coordinator().SetClock(func() time.Time { return sellAt })
 	_, err := h.svc.SellPosition(context.Background(), "u1", "sell-1", portfolio.SellInput{
-		Symbol: "AAPL", Quantity: testQuantity("60"), ExecutionPrice: testPrice("195"), EffectiveAt: &sellAt,
+		Symbol: "AAPL", Quantity: testQuantity("60"), ExecutionPrice: testPrice("195"),
 	})
+	h.svc.Coordinator().SetClock(func() time.Time { return time.Now().UTC() })
 	require.NoError(t, err)
 
 	cashBefore := h.cashUSD(t, "u1")
@@ -246,9 +250,11 @@ func TestEligibility_FullySoldAfterExDateStillReceivesDividend(t *testing.T) {
 	h := newHarness(t)
 	h.fund(t, "u1", "100")
 	sellAt := h.now.AddDate(0, 0, -2)
+	h.svc.Coordinator().SetClock(func() time.Time { return sellAt })
 	_, err := h.svc.SellPosition(context.Background(), "u1", "sell-all", portfolio.SellInput{
-		Symbol: "AAPL", Quantity: testQuantity("100"), ExecutionPrice: testPrice("195"), EffectiveAt: &sellAt,
+		Symbol: "AAPL", Quantity: testQuantity("100"), ExecutionPrice: testPrice("195"),
 	})
+	h.svc.Coordinator().SetClock(func() time.Time { return time.Now().UTC() })
 	require.NoError(t, err)
 	cashBefore := h.cashUSD(t, "u1")
 	h.prov.Seed(ProviderIncomeEvent{
@@ -266,10 +272,12 @@ func TestEligibility_BuyAfterExDateReceivesNothing(t *testing.T) {
 	_, err := h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: testAmount("100000")})
 	require.NoError(t, err)
 	buyAt := h.now.AddDate(0, 0, -2)
+	h.svc.Coordinator().SetClock(func() time.Time { return buyAt })
 	_, err = h.svc.BuyPosition(context.Background(), "u1", "late-buy", portfolio.BuyInput{
 		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: testQuantity("100"),
-		ExecutionPrice: testPrice("190"), EffectiveAt: &buyAt,
+		ExecutionPrice: testPrice("190"),
 	})
+	h.svc.Coordinator().SetClock(func() time.Time { return time.Now().UTC() })
 	require.NoError(t, err)
 	cashBefore := h.cashUSD(t, "u1")
 	h.prov.Seed(ProviderIncomeEvent{
@@ -286,7 +294,14 @@ func TestEligibility_BuyAfterExDateReceivesNothing(t *testing.T) {
 	assert.Equal(t, StatusProcessedNoEntitlement, ev.Status)
 }
 
-func TestProcessedNoEntitlement_ReevaluatesAfterBackdatedBuy(t *testing.T) {
+// TestProcessedNoEntitlement_ReevaluatesAfterLateArrivingHolder simulates a buy
+// that, in real elapsed time, happened before the ex-date but was recorded
+// after the pipeline already evaluated the event as having no eligible
+// holders (e.g. instrument discovery lagging the trade). The portfolio's own
+// clock is advanced for this call — not a user-supplied backdate, since the
+// product has no such field — purely to simulate the passage of real time in
+// a unit test.
+func TestProcessedNoEntitlement_ReevaluatesAfterLateArrivingHolder(t *testing.T) {
 	h := newHarness(t)
 	raw := ProviderIncomeEvent{
 		ProviderEventID: "AAPL-REEVAL", Type: TypeCashDividend,
@@ -305,10 +320,12 @@ func TestProcessedNoEntitlement_ReevaluatesAfterBackdatedBuy(t *testing.T) {
 	_, err = h.svc.DepositCash(context.Background(), "u1", "dep", portfolio.CashFlowInput{Currency: "USD", Amount: testAmount("100000")})
 	require.NoError(t, err)
 	buyAt := h.now.AddDate(0, 0, -10)
-	_, err = h.svc.BuyPosition(context.Background(), "u1", "backdated-buy", portfolio.BuyInput{
+	h.svc.Coordinator().SetClock(func() time.Time { return buyAt })
+	_, err = h.svc.BuyPosition(context.Background(), "u1", "late-arriving-buy", portfolio.BuyInput{
 		Symbol: "AAPL", AssetType: portfolio.AssetTypeStock, Quantity: testQuantity("25"),
-		ExecutionPrice: testPrice("180"), EffectiveAt: &buyAt,
+		ExecutionPrice: testPrice("180"),
 	})
+	h.svc.Coordinator().SetClock(func() time.Time { return time.Now().UTC() })
 	require.NoError(t, err)
 	cashBefore := h.cashUSD(t, "u1")
 	require.NoError(t, h.income.Process(context.Background()))

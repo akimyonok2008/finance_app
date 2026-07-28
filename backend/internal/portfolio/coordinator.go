@@ -3,9 +3,7 @@ package portfolio
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +28,12 @@ const (
 	MutationWithdrawal MutationKind = "withdrawal"
 	MutationBuy        MutationKind = "buy"
 	MutationSell       MutationKind = "sell"
+	// MutationCorrectBuy/MutationCorrectSell correct a fat-fingered
+	// quantity/price/fee on the most recent buy/sell in a position episode.
+	// They post one new activity carrying the corrected values (the original
+	// activity is never edited) and update the position in place.
+	MutationCorrectBuy  MutationKind = "correct_buy"
+	MutationCorrectSell MutationKind = "correct_sell"
 
 	// Return-bearing mutations (change value without neutralizing the index).
 	MutationIncome             MutationKind = "income"
@@ -64,6 +68,8 @@ type MutationRequest struct {
 	CashFlow   CashFlowInput
 	Buy        BuyInput
 	Sell       SellInput
+	// Correction carries the payload for MutationCorrectBuy/MutationCorrectSell.
+	Correction TradeCorrectionInput
 
 	// Return-bearing / corporate-action payloads. Only the one matching Kind is
 	// used.
@@ -407,9 +413,9 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 	}
 	versionBefore := state.Version
 
-	// Conservative historical-transaction policy, evaluated against the trusted
-	// ranked boundary BEFORE any write happens (see validateHistorical).
-	if err := c.validateHistorical(ctx, tx, req, all, state, found); err != nil {
+	// Conservative correction policy, evaluated against the trusted ranked
+	// boundary BEFORE any write happens (see validateCorrection).
+	if err := c.validateCorrection(ctx, tx, req, state, found); err != nil {
 		return MutationResult{}, nil, err
 	}
 
@@ -581,73 +587,31 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 // migration is out of scope), so equality is never tested exactly.
 const quantityTolerance = 1e-9
 
-// validateHistorical implements the CONSERVATIVE historical-transaction policy.
-//
-// It is deliberately NOT a deterministic replay engine: Alarvest does not
-// recompute ranked history. The exact rules, in order:
-//
-//  1. A transaction with no effective_at (or one dated now/later) is current.
-//  2. Every backdated trade requires an explicit execution price; a live quote
-//     is never substituted for a historical fill.
-//  3. A backdated sale is validated only against its selected durable position
-//     episode. The episode must already be open and must contain enough units at
-//     effective_at. This is quantity bookkeeping, not ranked-history replay.
-//  4. The trusted boundary is the exact captured_at of the latest complete
-//     canonical ranked snapshot in the current tracking epoch. Every buy or sale
-//     before that instant is rejected. There is no exception for a new symbol.
-//
-// Nothing has been written when this runs, so a rejection leaves current state
-// completely untouched.
-func (c *MutationCoordinator) validateHistorical(
-	ctx context.Context, tx AggregateTx, req MutationRequest, all []*Position,
+// validateCorrection enforces the safety rules for a buy/sell correction,
+// evaluated BEFORE any write happens: a correction may only be applied to the
+// most recent ledger event in its position episode, and never across an
+// already-trusted ranked snapshot boundary. Alarvest does not rebuild ranked
+// history, so a correction that would change already-established ranked
+// state is refused rather than applied.
+func (c *MutationCoordinator) validateCorrection(
+	ctx context.Context, tx AggregateTx, req MutationRequest,
 	state performance.State, haveState bool,
 ) error {
-	var effectiveAt *time.Time
-	var selected *Position
 	switch req.Kind {
-	case MutationBuy:
-		effectiveAt = req.Buy.EffectiveAt
-	case MutationSell:
-		effectiveAt = req.Sell.EffectiveAt
-		if position, err := findSalePosition(all, req); err == nil {
-			selected = position
-		} else {
-			return err
-		}
+	case MutationCorrectBuy, MutationCorrectSell:
 	default:
 		return nil
 	}
-	if effectiveAt == nil {
-		return nil
-	}
-	at := effectiveAt.UTC()
-	if !at.Before(c.now()) {
-		return nil // current-dated (or clock skew); nothing historical about it
-	}
-	if (req.Kind == MutationBuy && req.Buy.ExecutionPrice.IsZero()) ||
-		(req.Kind == MutationSell && req.Sell.ExecutionPrice.IsZero()) {
-		return ErrHistoricalExecutionPriceRequired
-	}
+	original := req.Correction.Original
 
 	ledger, err := tx.LedgerActivities(ctx)
 	if err != nil {
 		return err
 	}
-
-	// Historical quantity validation for sales.
-	if req.Kind == MutationSell {
-		held, opened := historicalEpisodeQuantity(ledger, selected.ID, at)
-		if !opened {
-			return ErrHistoricalEpisodeNotOpen
-		}
-		// Exact decimal comparison: no epsilon tolerance.
-		if req.Sell.Quantity.Cmp(held) > 0 {
-			return fmt.Errorf("%w: the position held only %s units at %s",
-				ErrHistoricalQuantityInsufficient, held.String(), at.Format(time.RFC3339))
-		}
+	if !isLastEpisodeEvent(ledger, original) {
+		return ErrCorrectionSupersededByLaterActivity
 	}
 
-	// Everything at or after the trusted ranked boundary behaves normally.
 	if !haveState || c.history == nil {
 		return nil
 	}
@@ -657,51 +621,47 @@ func (c *MutationCoordinator) validateHistorical(
 	if err != nil {
 		return err
 	}
-	if !found || !at.Before(boundary) {
+	if !found || !original.OccurredAt.Before(boundary) {
 		return nil
 	}
-	return ErrHistoricalRankedConflict
+	return ErrCorrectionRankedConflict
 }
 
-// historicalEpisodeQuantity replays quantity effects for one durable episode,
-// using exact decimal arithmetic throughout (no epsilon banding needed: a
-// full sale followed by no further activity lands on exactly zero).
-func historicalEpisodeQuantity(ledger []Activity, episodeID string, at time.Time) (money.Quantity, bool) {
-	ordered := make([]Activity, 0, len(ledger))
-	for _, activity := range ledger {
-		if activity.PositionEpisodeID == episodeID && !activity.OccurredAt.After(at) {
-			ordered = append(ordered, activity)
-		}
-	}
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].OccurredAt.Equal(ordered[j].OccurredAt) {
-			return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
-		}
-		return ordered[i].OccurredAt.Before(ordered[j].OccurredAt)
-	})
-	total := money.ZeroQuantity()
-	opened := false
-	for _, activity := range ordered {
-		if activity.Quantity == nil {
+// isLastEpisodeEvent reports whether original is the most recent ledger event
+// in its own position episode — the only condition under which the position's
+// CURRENT Quantity/AverageBuyPrice are a pure function of original's own
+// contribution, so reversing that contribution algebraically (rather than
+// replaying the whole ledger) is safe. Grouped sibling legs of the same
+// economic event (e.g. original's own fee or automatic-funding leg) never
+// count as "later".
+func isLastEpisodeEvent(ledger []Activity, original Activity) bool {
+	for _, a := range ledger {
+		if a.ID == original.ID || a.PositionEpisodeID != original.PositionEpisodeID {
 			continue
 		}
-		switch activity.Type {
-		case ActivityBuy, ActivityOpeningBalance:
-			opened = true
-			total = total.Add(*activity.Quantity)
-		case ActivityStockDividend, ActivityReinvestedDividend:
-			total = total.Add(*activity.Quantity)
-		case ActivitySell, ActivityWriteOff:
-			total = total.Sub(*activity.Quantity)
-		case ActivityStockSplit, ActivityReverseSplit:
-			// Splits restate the running total rather than adding to it.
-			total = *activity.Quantity
+		if a.GroupID != "" && a.GroupID == original.GroupID {
+			continue
+		}
+		if a.OccurredAt.After(original.OccurredAt) {
+			return false
+		}
+		if a.OccurredAt.Equal(original.OccurredAt) && a.CreatedAt.After(original.CreatedAt) {
+			return false
 		}
 	}
-	if total.Sign() < 0 {
-		total = money.ZeroQuantity()
+	return true
+}
+
+// findPositionByID looks up a position within the locked aggregate regardless
+// of open/closed status — a correction must be able to reopen a position that
+// the original (now-corrected) sell fully closed.
+func findPositionByID(all []*Position, id string) (*Position, error) {
+	for _, p := range all {
+		if p.ID == id {
+			return p, nil
+		}
 	}
-	return total, opened && total.Sign() > 0
+	return nil, ErrPositionNotFound
 }
 
 // neutral reports whether two ranked indexes are equal within a relative
@@ -876,7 +836,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 		// validateLiveExecutionPrice still takes float64 (it also compares
 		// against quote.Price, which stays float64 in this pass); .Float64()
 		// is a documented boundary conversion, not further decimal math.
-		if err := validateLiveExecutionPrice(req.Buy.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
+		if err := validateLiveExecutionPrice(priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
 			return mutationPlan{}, err
 		}
 		fee := req.Buy.Fee
@@ -885,9 +845,6 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			feeSource = FeeSourceDefaultZero
 		}
 		occurred := now
-		if req.Buy.EffectiveAt != nil {
-			occurred = req.Buy.EffectiveAt.UTC()
-		}
 
 		// Canonical purchase contract: gross cost = quantity * execution
 		// price; cost basis includes gross cost AND the buy fee. All exact
@@ -1089,7 +1046,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			executionPrice = quote.Price
 			priceSource = PriceSourceProviderEstimate
 		}
-		if err := validateLiveExecutionPrice(req.Sell.EffectiveAt, priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
+		if err := validateLiveExecutionPrice(priceSource, executionPrice.Float64(), quote.Price.Float64()); err != nil {
 			return mutationPlan{}, err
 		}
 		fee := req.Sell.Fee
@@ -1129,9 +1086,6 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			balance.CreatedAt = now
 		}
 		occurred := now
-		if req.Sell.EffectiveAt != nil {
-			occurred = req.Sell.EffectiveAt.UTC()
-		}
 		groupID := uuid.NewString()
 		activity := &Activity{
 			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
@@ -1223,6 +1177,258 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			},
 			resultClosed: &view, resultPositionID: closed.ID, activity: activity,
 			extraActivities: extraActivities, performanceEffect: effect,
+		}, nil
+
+	case MutationCorrectBuy:
+		orig := req.Correction.Original
+		existing, err := findPositionByID(all, orig.PositionEpisodeID)
+		if err != nil {
+			return mutationPlan{}, err
+		}
+		quote, ok := val.Quote(existing.Symbol)
+		if !ok {
+			return mutationPlan{}, ErrPriceProvider
+		}
+		if err := validateLiveExecutionPrice(PriceSourceUserRecorded, req.Correction.CorrectedExecutionPrice.Float64(), quote.Price.Float64()); err != nil {
+			return mutationPlan{}, err
+		}
+		now := val.ObservedAt
+
+		// The anchor rule (enforced separately in validateCorrection) guarantees
+		// original is the last event in this episode, so the position's CURRENT
+		// quantity/basis is a pure function of original's own contribution:
+		// subtracting it recovers exactly what the episode looked like right
+		// before the original buy, and adding the corrected contribution back
+		// gives the true post-correction state — no ledger replay needed.
+		quantityBeforeOriginal := existing.Quantity.Sub(*orig.Quantity)
+		basisBeforeOriginal := existing.Quantity.MulPrice(existing.AverageBuyPrice).Sub(orig.GrossAmount).Sub(orig.FeeAmount)
+
+		correctedGross := req.Correction.CorrectedQuantity.MulPrice(req.Correction.CorrectedExecutionPrice)
+		newQuantity := money.QuantizeQuantity(quantityBeforeOriginal.Add(req.Correction.CorrectedQuantity))
+		newBasis := basisBeforeOriginal.Add(correctedGross).Add(req.Correction.CorrectedFee)
+		newAvgPrice, err := newBasis.DivByQuantity(newQuantity, money.ScalePrice)
+		if err != nil {
+			return mutationPlan{}, err
+		}
+		newAvgPrice = money.QuantizePrice(newAvgPrice)
+
+		correctedTotal := correctedGross.Add(req.Correction.CorrectedFee)
+		originalTotal := orig.GrossAmount.Add(orig.FeeAmount)
+		cashDelta := correctedTotal.Sub(originalTotal)
+
+		available, _ := cashAmount(oldCash, existing.Currency)
+		nextCashAmt := available.Sub(cashDelta)
+		if nextCashAmt.Sign() < 0 {
+			return mutationPlan{}, ErrInsufficientCash
+		}
+		balance, _ := cashBalance(oldCash, existing.Currency)
+		balance.PortfolioID = pf.ID
+		balance.Currency = existing.Currency
+		balance.Amount = nextCashAmt
+		balance.UpdatedAt = now
+		if balance.CreatedAt.IsZero() {
+			balance.CreatedAt = now
+		}
+
+		merged := *existing
+		merged.Quantity = newQuantity
+		merged.AverageBuyPrice = newAvgPrice
+		merged.UpdatedAt = now
+
+		feeSource := FeeSourceUserRecorded
+		if req.Correction.CorrectedFee.IsZero() {
+			feeSource = FeeSourceDefaultZero
+		}
+		groupID := uuid.NewString()
+		activity := &Activity{
+			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
+			UserID: req.UserID, Type: ActivityBuy, Symbol: existing.Symbol,
+			InstrumentID: existing.InstrumentID, AssetType: existing.AssetType, Currency: existing.Currency,
+			Quantity: quantityPointer(req.Correction.CorrectedQuantity), UnitPrice: pricePointer(req.Correction.CorrectedExecutionPrice),
+			GrossAmount: correctedGross, OccurredAt: orig.OccurredAt, CreatedAt: now,
+			Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceUserReported, map[string]any{
+				"activity_group_id":         groupID,
+				"correction_of_activity_id": orig.ID,
+				"correction_reason":         req.Correction.Reason,
+				"execution_price_source":    PriceSourceUserRecorded,
+				"fee_source":                feeSource,
+				"effective_at":              orig.OccurredAt.Format(time.RFC3339Nano),
+				"recorded_at":               now.Format(time.RFC3339Nano),
+			}),
+			GroupID: groupID, PositionEpisodeID: existing.ID,
+			FeeAmount: req.Correction.CorrectedFee, NetAmount: correctedTotal,
+		}
+
+		// The quantity/price correction itself is a pure data fix (neutral): the
+		// user is no richer or poorer for it. Only the FEE DELTA is a genuine
+		// change in a realized cost, so only it moves the ranked index — and
+		// only the delta, since the original fee's full effect was already
+		// applied (and is permanently baked into ranked history) by the
+		// original buy's own checkpoint.
+		feeDelta := req.Correction.CorrectedFee.Sub(orig.FeeAmount)
+		returnBase := feeDelta.Convert(val.rates[existing.Currency]).Neg()
+
+		return mutationPlan{
+			newOpen: replaceInSet(oldOpen, existing.ID, &merged),
+			newCash: replaceCash(oldCash, balance),
+			write: func(ctx context.Context, tx AggregateTx) error {
+				if err := tx.PutCashBalance(ctx, balance); err != nil {
+					return err
+				}
+				return tx.UpdatePosition(ctx, &merged)
+			},
+			resultPosition: &merged, resultPositionID: merged.ID,
+			activity: activity, returnValueBase: returnBase,
+		}, nil
+
+	case MutationCorrectSell:
+		orig := req.Correction.Original
+		existing, err := findPositionByID(all, orig.PositionEpisodeID)
+		if err != nil {
+			return mutationPlan{}, err
+		}
+		quote, ok := val.Quote(existing.Symbol)
+		if !ok {
+			return mutationPlan{}, ErrPriceProvider
+		}
+		if err := validateLiveExecutionPrice(PriceSourceUserRecorded, req.Correction.CorrectedExecutionPrice.Float64(), quote.Price.Float64()); err != nil {
+			return mutationPlan{}, err
+		}
+		now := val.ObservedAt
+
+		// A full-close sell never mutates Quantity (only Status), so a closed
+		// episode's Quantity IS what was held right before the original sale;
+		// an open (partial-sale) episode's current Quantity already had
+		// original's own contribution subtracted, so it must be added back.
+		heldBeforeOriginal := existing.Quantity
+		if existing.Status != PositionStatusClosed {
+			heldBeforeOriginal = existing.Quantity.Add(*orig.Quantity)
+		}
+		if req.Correction.CorrectedQuantity.Cmp(heldBeforeOriginal) > 0 {
+			return mutationPlan{}, ErrInvalidSaleQuantity
+		}
+
+		correctedProceeds := req.Correction.CorrectedQuantity.MulPrice(req.Correction.CorrectedExecutionPrice)
+		if req.Correction.CorrectedFee.Cmp(correctedProceeds) >= 0 {
+			return mutationPlan{}, ErrInvalidSaleFee
+		}
+		correctedNet := correctedProceeds.Sub(req.Correction.CorrectedFee)
+		// Allocated basis uses the position's EXISTING average price, which a
+		// sale (corrected or not) never touches.
+		allocatedBasis := req.Correction.CorrectedQuantity.MulPrice(existing.AverageBuyPrice)
+		basisRate := val.rates[existing.Currency]
+		saleRate := val.rates[quote.Currency]
+		realizedBase := correctedNet.Convert(saleRate).Sub(allocatedBasis.Convert(basisRate))
+		realizedBaseF := realizedBase.Float64()
+		basisBaseF := allocatedBasis.Convert(basisRate).Float64()
+		realizedPct := 0.0
+		if basisBaseF > 0 {
+			realizedPct = realizedBaseF / basisBaseF * 100
+		}
+
+		cashDelta := correctedNet.Sub(orig.NetAmount)
+		available, _ := cashAmount(oldCash, existing.Currency)
+		nextCashAmt := available.Add(cashDelta)
+		if nextCashAmt.Sign() < 0 {
+			return mutationPlan{}, ErrInsufficientCash
+		}
+		balance, _ := cashBalance(oldCash, existing.Currency)
+		balance.PortfolioID = pf.ID
+		balance.Currency = existing.Currency
+		balance.Amount = nextCashAmt
+		balance.UpdatedAt = now
+		if balance.CreatedAt.IsZero() {
+			balance.CreatedAt = now
+		}
+
+		groupID := uuid.NewString()
+		feeSource := FeeSourceUserRecorded
+		if req.Correction.CorrectedFee.IsZero() {
+			feeSource = FeeSourceDefaultZero
+		}
+		activity := &Activity{
+			ID: uuid.NewString(), RequestID: req.RequestID, PortfolioID: pf.ID,
+			UserID: req.UserID, Type: ActivitySell, Symbol: existing.Symbol,
+			InstrumentID: existing.InstrumentID, AssetType: existing.AssetType, Currency: existing.Currency,
+			Quantity: quantityPointer(req.Correction.CorrectedQuantity), UnitPrice: pricePointer(req.Correction.CorrectedExecutionPrice),
+			GrossAmount: correctedProceeds, CostBasisAllocated: amountPointer(allocatedBasis),
+			RealizedGainLossBase:       amountPointer(realizedBase),
+			RealizedGainLossPercentage: floatPointer(realizedPct),
+			OccurredAt:                 orig.OccurredAt, CreatedAt: now,
+			Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceUserReported, map[string]any{
+				"activity_group_id":         groupID,
+				"correction_of_activity_id": orig.ID,
+				"correction_reason":         req.Correction.Reason,
+				"execution_price_source":    PriceSourceUserRecorded,
+				"fee_source":                feeSource,
+				"effective_at":              orig.OccurredAt.Format(time.RFC3339Nano),
+				"recorded_at":               now.Format(time.RFC3339Nano),
+			}),
+			GroupID: groupID, PositionEpisodeID: existing.ID,
+			FeeAmount: req.Correction.CorrectedFee, NetAmount: correctedNet,
+		}
+
+		effect := PerformanceEffectNeutral
+		if req.Correction.CorrectedFee.Sign() > 0 || req.Correction.CorrectedExecutionPrice.Cmp(quote.Price) != 0 {
+			effect = PerformanceEffectReturn
+		}
+
+		remainingQty := money.QuantizeQuantity(heldBeforeOriginal.Sub(req.Correction.CorrectedQuantity))
+		if !remainingQty.IsZero() {
+			remaining := *existing
+			remaining.Status = PositionStatusOpen
+			remaining.Quantity = remainingQty
+			remaining.ClosedAt = nil
+			remaining.ClosePrice = nil
+			remaining.CloseCurrency = ""
+			remaining.RealizedGainLossBase = 0
+			remaining.RealizedGainLossPercentage = 0
+			remaining.UpdatedAt = now
+			return mutationPlan{
+				newOpen: replaceInSet(oldOpen, existing.ID, &remaining),
+				newCash: replaceCash(oldCash, balance),
+				write: func(ctx context.Context, tx AggregateTx) error {
+					if err := tx.PutCashBalance(ctx, balance); err != nil {
+						return err
+					}
+					return tx.UpdatePosition(ctx, &remaining)
+				},
+				resultPosition: &remaining, resultPositionID: remaining.ID,
+				activity: activity, performanceEffect: effect,
+			}, nil
+		}
+
+		closePriceF := req.Correction.CorrectedExecutionPrice.Float64()
+		closedAt := orig.OccurredAt
+		closed := *existing
+		closed.Status = PositionStatusClosed
+		closed.ClosedAt = &closedAt
+		closed.ClosePrice = &closePriceF
+		closed.CloseCurrency = existing.Currency
+		closed.RealizedGainLossBase = round2(realizedBaseF)
+		closed.RealizedGainLossPercentage = round2(realizedPct)
+		closed.UpdatedAt = now
+		view := ClosedPositionSummary{
+			ID: closed.ID, Symbol: closed.Symbol, AssetType: closed.AssetType,
+			Quantity: req.Correction.CorrectedQuantity, BaselinePrice: closed.AverageBuyPrice,
+			BaselineCurrency: closed.Currency, ClosePrice: money.PriceFromFloat64(round2(closePriceF)),
+			ClosePriceCurrency: existing.Currency, ClosedAt: closedAt.Format(time.RFC3339),
+			RealizedGainLossBase:       money.AmountFromFloat64(round2(realizedBaseF)),
+			RealizedGainLossPercentage: round2(realizedPct),
+			ClosedCostBasisBase:        money.AmountFromFloat64(round2(basisBaseF)),
+			BaseCurrency:               fx.BaseCurrency,
+		}
+		return mutationPlan{
+			newOpen: removeFromSet(oldOpen, existing.ID),
+			newCash: replaceCash(oldCash, balance),
+			write: func(ctx context.Context, tx AggregateTx) error {
+				if err := tx.PutCashBalance(ctx, balance); err != nil {
+					return err
+				}
+				return tx.UpdatePosition(ctx, &closed)
+			},
+			resultClosed: &view, resultPositionID: closed.ID, activity: activity,
+			performanceEffect: effect,
 		}, nil
 
 	case MutationAdd:
@@ -2503,17 +2709,13 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		if !req.Buy.ExecutionPrice.IsZero() && req.Buy.ExecutionPrice.Sign() <= 0 {
 			return nil, ErrInvalidBuyPrice
 		}
-		if req.Buy.EffectiveAt != nil && req.Buy.EffectiveAt.UTC().Before(c.now()) &&
-			req.Buy.ExecutionPrice.IsZero() {
-			return nil, ErrHistoricalExecutionPriceRequired
-		}
 		if req.Buy.Fee.Sign() < 0 {
 			return nil, ErrInvalidBuyFee
 		}
 		req.Buy = BuyInput{
 			Symbol: clean.Symbol, AssetType: clean.AssetType, Quantity: clean.Quantity,
 			ExecutionPrice: req.Buy.ExecutionPrice, Fee: req.Buy.Fee,
-			EffectiveAt: req.Buy.EffectiveAt, InstrumentID: req.Buy.InstrumentID,
+			InstrumentID: req.Buy.InstrumentID,
 			ExchangeCode: req.Buy.ExchangeCode, MIC: req.Buy.MIC,
 			IdentityQuality: req.Buy.IdentityQuality,
 		}
@@ -2524,10 +2726,6 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		}
 		if !req.Sell.ExecutionPrice.IsZero() && req.Sell.ExecutionPrice.Sign() <= 0 {
 			return nil, ErrInvalidSalePrice
-		}
-		if req.Sell.EffectiveAt != nil && req.Sell.EffectiveAt.UTC().Before(c.now()) &&
-			req.Sell.ExecutionPrice.IsZero() {
-			return nil, ErrHistoricalExecutionPriceRequired
 		}
 		if req.Sell.Fee.Sign() < 0 {
 			return nil, ErrInvalidSaleFee
@@ -2546,6 +2744,33 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 			return []string{symbol}, nil
 		}
 		return nil, nil
+
+	case MutationCorrectBuy, MutationCorrectSell:
+		c := req.Correction
+		if c.Original.ID == "" || c.Original.PositionEpisodeID == "" {
+			return nil, ErrActivityNotFound
+		}
+		if c.CorrectedQuantity.Sign() <= 0 {
+			return nil, ErrInvalidQuantity
+		}
+		if c.CorrectedExecutionPrice.Sign() <= 0 {
+			if req.Kind == MutationCorrectBuy {
+				return nil, ErrInvalidBuyPrice
+			}
+			return nil, ErrInvalidSalePrice
+		}
+		if c.CorrectedFee.Sign() < 0 {
+			if req.Kind == MutationCorrectBuy {
+				return nil, ErrInvalidBuyFee
+			}
+			return nil, ErrInvalidSaleFee
+		}
+		symbol, err := prices.ValidateAndNormalizeSymbol(strings.ToUpper(strings.TrimSpace(c.Original.Symbol)))
+		if err != nil {
+			return nil, ErrUnsupportedSymbol
+		}
+		return []string{symbol}, nil
+
 	case MutationAdd:
 		clean, err := validateAndNormalize(req.Input)
 		if err != nil {

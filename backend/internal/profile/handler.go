@@ -26,7 +26,11 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.svc.GetMe(r.Context(), userID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "could not load profile")
+		if errors.Is(err, ErrRankedDataUnavailable) {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "ranked performance data unavailable")
+		} else {
+			httpx.WriteError(w, http.StatusInternalServerError, "could not load profile")
+		}
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
@@ -52,6 +56,8 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusNotFound, "profile not found")
 		case errors.Is(err, ErrInvalid):
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, ErrRankedDataUnavailable):
+			httpx.WriteError(w, http.StatusServiceUnavailable, "ranked performance data unavailable")
 		default:
 			httpx.WriteError(w, http.StatusInternalServerError, "could not update profile")
 		}
@@ -66,6 +72,8 @@ func (h *Handler) GetPublic(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httpx.WriteError(w, http.StatusNotFound, "profile not found")
+		} else if errors.Is(err, ErrRankedDataUnavailable) {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "ranked performance data unavailable")
 		} else {
 			httpx.WriteError(w, http.StatusInternalServerError, "could not load profile")
 		}

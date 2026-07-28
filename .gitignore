@@ -15,3 +15,5 @@
 # Local logs and coverage
 *.log
 coverage/
+playwright-report/
+test-results/

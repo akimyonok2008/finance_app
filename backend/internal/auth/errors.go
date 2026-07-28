@@ -29,6 +29,7 @@ var (
 	ErrInvalidLifecycleToken     = errors.New("invalid or expired token")
 	ErrReauthenticationRequired  = errors.New("reauthentication required")
 	ErrPasswordAlreadySet        = errors.New("account already has a password")
+	ErrEmailOutboxNotFound       = errors.New("email outbox message not found")
 	// ErrAccountBanned is returned when a permanently banned account attempts
 	// to use any authenticated API.
 	ErrAccountBanned = errors.New("this account has been banned")

@@ -9,7 +9,6 @@ export type PositionFormState = {
   /** Optional real execution details. Blank means "let the backend estimate". */
   execution_price: string;
   fee: string;
-  effective_at: string;
 };
 
 export type PositionFormErrors = Partial<
@@ -22,7 +21,6 @@ export const EMPTY_POSITION_FORM: PositionFormState = {
   quantity: "",
   execution_price: "",
   fee: "",
-  effective_at: "",
 };
 
 const SYMBOL_PATTERN = /^[A-Z0-9.-]+$/;
@@ -86,18 +84,6 @@ export function validatePositionForm(
     }
   }
 
-  let effectiveAt: string | undefined;
-  if (state.effective_at.trim() !== "") {
-    const parsed = new Date(state.effective_at);
-    if (Number.isNaN(parsed.getTime())) {
-      errors.effective_at = "Enter a valid date.";
-    } else if (parsed.getTime() > Date.now() + 60_000) {
-      errors.effective_at = "The trade date cannot be in the future.";
-    } else {
-      effectiveAt = parsed.toISOString();
-    }
-  }
-
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
   }
@@ -110,7 +96,6 @@ export function validatePositionForm(
       quantity: quantityRaw,
       ...(executionPrice !== undefined ? { execution_price: executionPrice } : {}),
       ...(fee !== undefined ? { fee } : {}),
-      ...(effectiveAt !== undefined ? { effective_at: effectiveAt } : {}),
     },
   };
 }

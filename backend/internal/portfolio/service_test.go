@@ -290,8 +290,8 @@ func TestSummary_MixedCurrencyNormalizedToUSD(t *testing.T) {
 	require.NoError(t, err)
 
 	// Baseline base: 1950 + 29500*0.031=914.5 -> 2864.5. Value: +10% across.
-	assert.InDelta(t, 2864.5, sum.TotalCostBasis, 0.01)
-	assert.InDelta(t, 3150.95, sum.CurrentValue, 0.01)
+	assert.InDelta(t, 2864.5, sum.TotalCostBasis.Float64(), 0.01)
+	assert.InDelta(t, 3150.95, sum.CurrentValue.Float64(), 0.01)
 	assert.InDelta(t, 10.0, sum.GainLossPercentage, 0.05)
 	assert.InDelta(t, 110.0, sum.PortfolioIndex, 0.05)
 
@@ -315,7 +315,7 @@ func TestSummary_EmptyPortfolio(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, sum.Positions)
-	assert.Equal(t, 0.0, sum.TotalCostBasis)
+	assert.Equal(t, 0.0, sum.TotalCostBasis.Float64())
 	assert.Equal(t, 0.0, sum.GainLossPercentage)
 	assert.Equal(t, 100.0, sum.PortfolioIndex)
 	assert.Equal(t, "USD", sum.BaseCurrency)

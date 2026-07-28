@@ -333,9 +333,11 @@ func (s *Service) trustedForAccountData(ev IncomeEvent) bool {
 // every component atomically. It returns true when the holder was credited.
 func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) bool {
 	entitlementDate := ev.entitlementDate()
-	// Do not use the position row's CreatedAt as an entitlement shortcut:
-	// backdated trades are recorded later than their economic OccurredAt. The
-	// immutable activity ledger below is the authoritative cutoff calculation.
+	// Do not use the position row's CreatedAt as an entitlement shortcut: a
+	// position can accumulate ledger activity (partial sales, corporate
+	// actions) whose OccurredAt differs from when the row was first created.
+	// The immutable activity ledger below is the authoritative cutoff
+	// calculation.
 	eligible, err := s.gateway.EligibleQuantity(ctx, h.UserID, ev.Instrument.InstrumentID, ev.Instrument.Symbol, entitlementDate)
 	if err != nil {
 		s.metrics.Inc("income_event_eligibility_failures_total")

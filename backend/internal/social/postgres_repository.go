@@ -2,6 +2,7 @@ package social
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -243,6 +244,104 @@ func (r *PostgresRepository) AddMessage(ctx context.Context, msg Message) error 
 		UPDATE dm_conversations SET updated_at = $2, last_message_at = $2 WHERE id = $1
 	`, msg.ConversationID, msg.CreatedAt); err != nil {
 		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) CreateMessage(
+	ctx context.Context,
+	write MessageWrite,
+	policy MessageAbusePolicy,
+) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	msg := write.Message
+
+	// Fixed lock order serializes the per-user budget across conversations and
+	// the per-conversation budget across both participants, including across
+	// API replicas.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('dm-user'), hashtext($1))`,
+		msg.SenderUserID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('dm-conversation'), hashtext($1))`,
+		msg.ConversationID,
+	); err != nil {
+		return err
+	}
+
+	var userCount, conversationCount, repeatedCount, burstCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (
+				WHERE sender_user_id = $1 AND created_at >= $3
+			),
+			COUNT(*) FILTER (
+				WHERE conversation_id = $2 AND created_at >= $4
+			),
+			COUNT(*) FILTER (
+				WHERE sender_user_id = $1 AND created_at >= $5
+				  AND lower(regexp_replace(btrim(body), '[[:space:]]+', ' ', 'g')) = $7
+			),
+			COUNT(*) FILTER (
+				WHERE sender_user_id = $1 AND created_at >= $6
+			)
+		FROM dm_messages
+		WHERE sender_user_id = $1 OR conversation_id = $2
+	`, msg.SenderUserID, msg.ConversationID,
+		msg.CreatedAt.Add(-policy.UserWindow),
+		msg.CreatedAt.Add(-policy.ConversationWindow),
+		msg.CreatedAt.Add(-policy.RepeatedWindow),
+		msg.CreatedAt.Add(-policy.BurstWindow),
+		normalizeMessageBody(msg.Body),
+	).Scan(&userCount, &conversationCount, &repeatedCount, &burstCount); err != nil {
+		return err
+	}
+	if policy.UserLimit > 0 && userCount >= policy.UserLimit {
+		return ErrMessageRateLimited
+	}
+	if policy.ConversationLimit > 0 && conversationCount >= policy.ConversationLimit {
+		return ErrConversationLimited
+	}
+	if policy.RepeatedLimit > 0 && repeatedCount >= policy.RepeatedLimit {
+		return ErrRepeatedMessage
+	}
+	if policy.BurstLimit > 0 && burstCount >= policy.BurstLimit {
+		return ErrSpamBurst
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO dm_messages (id, conversation_id, sender_user_id, body, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, msg.ID, msg.ConversationID, msg.SenderUserID, msg.Body, msg.CreatedAt); err != nil {
+		return mapPGError(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE dm_conversations SET updated_at = $2, last_message_at = $2 WHERE id = $1
+	`, msg.ConversationID, msg.CreatedAt); err != nil {
+		return err
+	}
+	if write.Notification != nil {
+		payload, err := json.Marshal(write.Notification.Payload)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO notifications (
+				id, recipient_user_id, type, payload, dedupe_key, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (recipient_user_id, dedupe_key) DO NOTHING
+		`, write.Notification.ID, write.Notification.RecipientID,
+			write.Notification.Type, payload, write.Notification.DedupeKey,
+			write.Notification.CreatedAt); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

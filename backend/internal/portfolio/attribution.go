@@ -3,6 +3,8 @@ package portfolio
 import (
 	"math"
 	"sort"
+
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // StandaloneFeesBase is the ONE definition of "fees that still have to be
@@ -13,8 +15,8 @@ import (
 // separately; subtracting TotalFeesBase in full would double-count them. Both
 // ReconcilePortfolioFinancials and the Performance tab's economic breakdown go
 // through this function so they can never drift apart.
-func StandaloneFeesBase(fees FeeMetrics) float64 {
-	return round2(fees.TotalFeesBase - fees.EmbeddedInRealizedPnLBase)
+func StandaloneFeesBase(fees FeeMetrics) money.Amount {
+	return money.QuantizeValue(fees.TotalFeesBase.Sub(fees.EmbeddedInRealizedPnLBase))
 }
 
 // EconomicAttribution is the Performance tab's economic breakdown. It is the
@@ -27,19 +29,19 @@ func StandaloneFeesBase(fees FeeMetrics) float64 {
 // cover the full holding history it is nil and IsComplete is false, so the UI
 // shows a truthful gap rather than a zero.
 type EconomicAttribution struct {
-	RealizedPnLBase    float64 `json:"realized_pnl_base"`
-	UnrealizedPnLBase  float64 `json:"unrealized_pnl_base"`
-	NetIncomeBase      float64 `json:"net_income_base"`
-	StandaloneFeesBase float64 `json:"standalone_fees_base"`
+	RealizedPnLBase    money.Amount `json:"realized_pnl_base"`
+	UnrealizedPnLBase  money.Amount `json:"unrealized_pnl_base"`
+	NetIncomeBase      money.Amount `json:"net_income_base"`
+	StandaloneFeesBase money.Amount `json:"standalone_fees_base"`
 	// AttributedTotalBase is realized + unrealized + income - standalone fees.
-	AttributedTotalBase float64 `json:"attributed_total_base"`
+	AttributedTotalBase money.Amount `json:"attributed_total_base"`
 	// TotalEconomicPnLBase is the ledger's own total. nil when incomplete.
-	TotalEconomicPnLBase *float64 `json:"total_economic_pnl_base"`
+	TotalEconomicPnLBase *money.Amount `json:"total_economic_pnl_base"`
 	// UnattributedBase is ledger total - attributed total. A non-zero value is
 	// disclosed rather than hidden; ReconcilePortfolioFinancials flags it.
-	UnattributedBase  *float64 `json:"unattributed_base"`
-	CalculationStatus string   `json:"calculation_status"`
-	IsComplete        bool     `json:"is_complete"`
+	UnattributedBase  *money.Amount `json:"unattributed_base"`
+	CalculationStatus string        `json:"calculation_status"`
+	IsComplete        bool          `json:"is_complete"`
 }
 
 // CalculateEconomicAttribution assembles the breakdown from Step 1's existing
@@ -53,21 +55,22 @@ func CalculateEconomicAttribution(
 	economic EconomicPerformance,
 ) EconomicAttribution {
 	standalone := StandaloneFeesBase(fees)
+	attributedTotal := money.QuantizeValue(
+		open.UnrealizedPnLBase.Add(realized.RealizedPnLBase).
+			Add(income.TotalIncomeBase).Sub(standalone),
+	)
 	out := EconomicAttribution{
-		RealizedPnLBase:    round2(realized.RealizedPnLBase),
-		UnrealizedPnLBase:  round2(open.UnrealizedPnLBase),
-		NetIncomeBase:      round2(income.TotalIncomeBase),
-		StandaloneFeesBase: standalone,
-		AttributedTotalBase: round2(
-			open.UnrealizedPnLBase + realized.RealizedPnLBase +
-				income.TotalIncomeBase - standalone,
-		),
-		CalculationStatus: economic.CalculationStatus,
-		IsComplete:        economic.IsComplete,
+		RealizedPnLBase:     money.QuantizeValue(realized.RealizedPnLBase),
+		UnrealizedPnLBase:   money.QuantizeValue(open.UnrealizedPnLBase),
+		NetIncomeBase:       money.QuantizeValue(income.TotalIncomeBase),
+		StandaloneFeesBase:  standalone,
+		AttributedTotalBase: attributedTotal,
+		CalculationStatus:   economic.CalculationStatus,
+		IsComplete:          economic.IsComplete,
 	}
 	if economic.IsComplete && economic.TotalPnLBase != nil {
-		total := round2(*economic.TotalPnLBase)
-		unattributed := round2(total - out.AttributedTotalBase)
+		total := money.QuantizeValue(*economic.TotalPnLBase)
+		unattributed := money.QuantizeValue(total.Sub(out.AttributedTotalBase))
 		out.TotalEconomicPnLBase = &total
 		out.UnattributedBase = &unattributed
 	}
@@ -79,17 +82,17 @@ func CalculateEconomicAttribution(
 type InstrumentEconomics struct {
 	Symbol            string
 	AssetType         string
-	CapitalBase       float64 // cost basis committed (open + closed episodes)
-	UnrealizedPnLBase float64
-	RealizedPnLBase   float64
-	IncomeBase        float64
-	FeesBase          float64 // standalone (non-embedded) fees booked to it
+	CapitalBase       money.Amount // cost basis committed (open + closed episodes)
+	UnrealizedPnLBase money.Amount
+	RealizedPnLBase   money.Amount
+	IncomeBase        money.Amount
+	FeesBase          money.Amount // standalone (non-embedded) fees booked to it
 }
 
 // TotalPnLBase is the instrument's economic result: price movement plus income
 // minus its own standalone fees.
-func (i InstrumentEconomics) TotalPnLBase() float64 {
-	return i.UnrealizedPnLBase + i.RealizedPnLBase + i.IncomeBase - i.FeesBase
+func (i InstrumentEconomics) TotalPnLBase() money.Amount {
+	return i.UnrealizedPnLBase.Add(i.RealizedPnLBase).Add(i.IncomeBase).Sub(i.FeesBase)
 }
 
 // InstrumentContribution is one instrument's contribution to portfolio return,
@@ -104,9 +107,9 @@ type InstrumentContribution struct {
 	InstrumentReturnPercentage *float64 `json:"instrument_return_percentage"`
 	// ContributionPercentagePoints is weight x instrument return, i.e. the
 	// instrument's economic result as a share of total committed capital.
-	ContributionPercentagePoints float64 `json:"contribution_percentage_points"`
-	EconomicResultBase           float64 `json:"economic_result_base"`
-	IncomeBase                   float64 `json:"income_base"`
+	ContributionPercentagePoints float64      `json:"contribution_percentage_points"`
+	EconomicResultBase           money.Amount `json:"economic_result_base"`
+	IncomeBase                   money.Amount `json:"income_base"`
 }
 
 // ContributionAnalysis is the Contributors / Detractors block.
@@ -134,7 +137,7 @@ type ContributionAnalysis struct {
 	CalculationStatus string                   `json:"calculation_status"`
 	Available         bool                     `json:"available"`
 	Reason            string                   `json:"reason,omitempty"`
-	TotalCapitalBase  float64                  `json:"total_capital_base"`
+	TotalCapitalBase  money.Amount             `json:"total_capital_base"`
 	Contributors      []InstrumentContribution `json:"contributors"`
 	Detractors        []InstrumentContribution `json:"detractors"`
 	// UnattributedPercentagePoints is the part of the portfolio's economic
@@ -158,7 +161,7 @@ const (
 //
 // portfolioLevel is the economic result that belongs to no instrument (cash
 // interest, management and custody fees); it is reported as unattributed.
-func CalculateContributions(instruments []InstrumentEconomics, portfolioLevelBase float64) ContributionAnalysis {
+func CalculateContributions(instruments []InstrumentEconomics, portfolioLevelBase money.Amount) ContributionAnalysis {
 	out := ContributionAnalysis{
 		Basis:             ContributionBasisSinceInception,
 		CalculationStatus: "complete",
@@ -166,12 +169,13 @@ func CalculateContributions(instruments []InstrumentEconomics, portfolioLevelBas
 		Detractors:        []InstrumentContribution{},
 	}
 
-	total := 0.0
+	total := money.ZeroAmount()
 	for _, ins := range instruments {
-		total += ins.CapitalBase
+		total = total.Add(ins.CapitalBase)
 	}
-	total = round2(total)
-	if total <= 0 || math.IsNaN(total) || math.IsInf(total, 0) {
+	total = money.QuantizeValue(total)
+	totalFloat := total.Float64()
+	if total.Sign() <= 0 || math.IsNaN(totalFloat) || math.IsInf(totalFloat, 0) {
 		out.CalculationStatus = "incomplete"
 		out.Reason = contributionReasonNoCapital
 		return out
@@ -185,13 +189,13 @@ func CalculateContributions(instruments []InstrumentEconomics, portfolioLevelBas
 		row := InstrumentContribution{
 			Symbol:                       ins.Symbol,
 			AssetType:                    ins.AssetType,
-			WeightPercentage:             round2(ins.CapitalBase / total * 100),
-			ContributionPercentagePoints: round4(result / total * 100),
-			EconomicResultBase:           round2(result),
-			IncomeBase:                   round2(ins.IncomeBase),
+			WeightPercentage:             round2(ins.CapitalBase.Float64() / totalFloat * 100),
+			ContributionPercentagePoints: round4(result.Float64() / totalFloat * 100),
+			EconomicResultBase:           money.QuantizeValue(result),
+			IncomeBase:                   money.QuantizeValue(ins.IncomeBase),
 		}
-		if ins.CapitalBase > 0 {
-			ret := round2(result / ins.CapitalBase * 100)
+		if ins.CapitalBase.Sign() > 0 {
+			ret := round2(result.Float64() / ins.CapitalBase.Float64() * 100)
 			row.InstrumentReturnPercentage = &ret
 		}
 		rows = append(rows, row)
@@ -216,7 +220,7 @@ func CalculateContributions(instruments []InstrumentEconomics, portfolioLevelBas
 		}
 	}
 
-	out.UnattributedPercentagePoints = round4(portfolioLevelBase / total * 100)
+	out.UnattributedPercentagePoints = round4(portfolioLevelBase.Float64() / totalFloat * 100)
 	if out.UnattributedPercentagePoints != 0 {
 		out.CalculationStatus = "incomplete"
 	}
@@ -249,21 +253,21 @@ func buildInstrumentEconomics(
 
 	for _, position := range open {
 		entry := get(position.Symbol, position.AssetType)
-		entry.CapitalBase += position.CostBasisBase.Float64()
-		entry.UnrealizedPnLBase += position.GainLossBase.Float64()
+		entry.CapitalBase = entry.CapitalBase.Add(position.CostBasisBase)
+		entry.UnrealizedPnLBase = entry.UnrealizedPnLBase.Add(position.GainLossBase)
 	}
 	for _, position := range closed {
 		entry := get(position.Symbol, position.AssetType)
-		entry.CapitalBase += position.ClosedCostBasisBase.Float64()
+		entry.CapitalBase = entry.CapitalBase.Add(position.ClosedCostBasisBase)
 	}
 	for key, ledgerEntry := range ledger.bySymbol {
 		if key == "" {
 			continue
 		}
 		entry := get(key, ledgerEntry.AssetType)
-		entry.RealizedPnLBase += ledgerEntry.RealizedPnLBase
-		entry.IncomeBase += ledgerEntry.IncomeBase
-		entry.FeesBase += ledgerEntry.FeesBase
+		entry.RealizedPnLBase = entry.RealizedPnLBase.Add(ledgerEntry.RealizedPnLBase)
+		entry.IncomeBase = entry.IncomeBase.Add(ledgerEntry.IncomeBase)
+		entry.FeesBase = entry.FeesBase.Add(ledgerEntry.FeesBase)
 	}
 
 	out := make([]InstrumentEconomics, 0, len(merged))

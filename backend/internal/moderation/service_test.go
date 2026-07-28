@@ -174,6 +174,57 @@ func TestService_ModeratorCannotActAgainstAdminUnlessAdmin(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestService_DeletedTargetCanStillBeResolvedWithoutLiveAccountAction(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	users := newFakeUsers()
+	svc := NewService(repo, users)
+
+	_, err := repo.CreateUserReport(ctx, Report{
+		ID: "deleted-target-report", ReporterUserID: "reporter-1",
+		ReportedDeleted: true, Category: CategoryHarassment,
+		Status: StatusOpen, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	detail, err := svc.ResolveReport(ctx, "mod-1", UserView{ID: "mod-1", Role: "moderator"},
+		"deleted-target-report", ResolveInput{Decision: "no_action"})
+	require.NoError(t, err)
+	assert.Equal(t, StatusResolvedNoAction, detail.Status)
+	assert.Equal(t, deletedAccountLabel, detail.ReportedUserID)
+
+	evidenceText := "retained evidence"
+	_, err = repo.CreateMessageReport(ctx, Report{
+		ID: "deleted-target-content-removal", ReporterUserID: "reporter-1",
+		ReportedDeleted: true, Category: CategoryHarassment,
+		Status: StatusOpen, CreatedAt: time.Now().UTC(),
+	}, Evidence{
+		ID: "deleted-target-evidence", ReportID: "deleted-target-content-removal",
+		MessageText: &evidenceText, ReportCreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	detail, err = svc.ResolveReport(ctx, "mod-1", UserView{ID: "mod-1", Role: "moderator"},
+		"deleted-target-content-removal", ResolveInput{
+			Decision: "action_taken", ActionType: ActionContentRemoval,
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusResolvedActionTaken, detail.Status)
+	require.NotNil(t, detail.Evidence)
+	assert.Equal(t, evidenceText, detail.Evidence.MessageText)
+
+	_, err = repo.CreateUserReport(ctx, Report{
+		ID: "deleted-target-live-action", ReporterUserID: "reporter-1",
+		ReportedDeleted: true, Category: CategoryHarassment,
+		Status: StatusOpen, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = svc.ResolveReport(ctx, "mod-1", UserView{ID: "mod-1", Role: "moderator"},
+		"deleted-target-live-action", ResolveInput{
+			Decision: "action_taken", ActionType: ActionPermanentBan,
+		})
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
 func TestService_NotificationsReadState(t *testing.T) {
 	ctx := context.Background()
 	svc, _, _, _ := newTestService()

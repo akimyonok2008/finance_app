@@ -122,8 +122,8 @@ func TestPG_ReturnOfCapitalPersistsAndReconciles(t *testing.T) {
 
 	summary, err := svc.Summary(ctx, userID)
 	require.NoError(t, err)
-	assert.InDelta(t, 20, summary.Income.TotalIncomeBase, 0.01)
-	assert.InDelta(t, 50, summary.Income.ReturnOfCapitalBase, 0.01)
+	assert.InDelta(t, 20, summary.Income.TotalIncomeBase.Float64(), 0.01)
+	assert.InDelta(t, 50, summary.Income.ReturnOfCapitalBase.Float64(), 0.01)
 	assert.True(t, summary.Reconciliation.IsConsistent, "reasons: %v", summary.Reconciliation.Reasons)
 
 	positions, err := svc.ListPositions(ctx, userID)
@@ -162,7 +162,7 @@ func TestPG_StockDividendZeroGrossPersistsAndPreservesBasis(t *testing.T) {
 
 	after, err := svc.Summary(ctx, userID)
 	require.NoError(t, err)
-	assert.InDelta(t, before.ActiveCostBasisBase, after.ActiveCostBasisBase, 0.01, "stock dividend must preserve total basis")
+	assert.InDelta(t, before.ActiveCostBasisBase.Float64(), after.ActiveCostBasisBase.Float64(), 0.01, "stock dividend must preserve total basis")
 
 	var grossAmount float64
 	require.NoError(t, pool.QueryRow(ctx,
@@ -218,7 +218,7 @@ func TestPG_PartialAndFinalSaleShareOneClosedEpisode(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, closedList, 1)
 	wantRealized := (4*110.0 - 4*100.0) + (6*130.0 - 6*100.0)
-	assert.InDelta(t, wantRealized, closedList[0].RealizedGainLossBase, 0.01)
+	assert.InDelta(t, wantRealized, closedList[0].RealizedGainLossBase.Float64(), 0.01)
 }
 
 // TestPG_RebuyAfterClosureCreatesNewEpisode proves rebuying the same symbol
@@ -283,5 +283,5 @@ func TestPG_SaleFeeIdempotentRetryDoesNotDuplicate(t *testing.T) {
 
 	_, totalCash, err := svc.CashBalances(ctx, userID)
 	require.NoError(t, err)
-	assert.InDelta(t, 10000-1000+10*120-15, totalCash, 0.01)
+	assert.InDelta(t, 10000-1000+10*120-15, totalCash.Float64(), 0.01)
 }

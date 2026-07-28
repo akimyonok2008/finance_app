@@ -155,21 +155,26 @@ func (s *Service) GetReportDetail(ctx context.Context, id string) (ReportDetail,
 		Decision:       rep.Decision,
 		ModeratorNotes: rep.ModeratorNotes,
 	}
-	if rep.MessageID != nil {
-		if evidence, ok, err := s.repo.GetEvidence(ctx, rep.ID); err == nil && ok {
-			dto := &EvidenceDTO{}
-			if evidence.MessageText != nil {
-				dto.MessageText = *evidence.MessageText
-			}
-			dto.MessageCreatedAt = evidence.MessageCreatedAt
-			if evidence.ConversationID != nil {
-				dto.ConversationID = *evidence.ConversationID
-			}
-			if evidence.SenderID != nil {
-				dto.SenderID = *evidence.SenderID
-			}
-			detail.Evidence = dto
+	// Account deletion can cascade the live message and SET report.message_id
+	// to NULL. Evidence is keyed by report_id and must remain reviewable even
+	// in that state, so its lookup cannot be gated on the live message FK.
+	if evidence, ok, err := s.repo.GetEvidence(ctx, rep.ID); err == nil && ok {
+		dto := &EvidenceDTO{}
+		if evidence.MessageText != nil {
+			dto.MessageText = *evidence.MessageText
 		}
+		dto.MessageCreatedAt = evidence.MessageCreatedAt
+		if evidence.ConversationID != nil {
+			dto.ConversationID = *evidence.ConversationID
+		} else {
+			dto.ConversationID = evidence.ConversationSubjectID
+		}
+		if evidence.SenderID != nil {
+			dto.SenderID = *evidence.SenderID
+		} else {
+			dto.SenderID = evidence.SenderSubjectID
+		}
+		detail.Evidence = dto
 	}
 	return detail, nil
 }
@@ -193,16 +198,6 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 		return s.GetReportDetail(ctx, reportID)
 	}
 
-	target, err := s.users.UserByID(ctx, rep.ReportedUserID)
-	if err != nil {
-		return ReportDetail{}, err
-	}
-	// A moderator cannot act against an admin unless the acting account is
-	// also an admin.
-	if target.IsAdmin && !actorRole.IsAdmin {
-		return ReportDetail{}, ErrModerationForbidden
-	}
-
 	var status, decision string
 	switch in.Decision {
 	case "action_taken":
@@ -217,7 +212,26 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 		return ReportDetail{}, ErrInvalidAction
 	}
 
+	if !rep.ReportedDeleted {
+		target, err := s.users.UserByID(ctx, rep.ReportedUserID)
+		if err != nil {
+			return ReportDetail{}, err
+		}
+		// A moderator cannot act against an admin unless the acting account is
+		// also an admin.
+		if target.IsAdmin && !actorRole.IsAdmin {
+			return ReportDetail{}, ErrModerationForbidden
+		}
+	} else if actionRequiresLiveTarget(in.ActionType) {
+		return ReportDetail{}, ErrNotFound
+	}
+
 	build := func(ctx context.Context, current Report) (ResolveWrite, error) {
+		// Re-check against the locked row: the target may have been deleted
+		// between the initial read above and repository row-lock acquisition.
+		if current.ReportedDeleted && actionRequiresLiveTarget(in.ActionType) {
+			return ResolveWrite{}, ErrNotFound
+		}
 		now := s.now()
 		updated := current
 		updated.Status = status
@@ -249,8 +263,7 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 				DedupeKey: "moderation:" + current.ID, CreatedAt: now,
 			}
 		case ActionPermanentBan, ActionContentRemoval, ActionNoAction:
-			// No notification for these today; content removal is applied
-			// via ExternalApply below.
+			// No notification for these today.
 		}
 
 		action := ModerationAction{
@@ -261,7 +274,7 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 
 		actionType := in.ActionType
 		messageID := current.MessageID
-		externalApply := func(ctx context.Context) error {
+		volatileApply := func(ctx context.Context) error {
 			switch actionType {
 			case ActionTemporarySuspension:
 				return s.users.Suspend(ctx, current.ReportedUserID, suspendUntil, in.Reason)
@@ -277,7 +290,7 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 
 		return ResolveWrite{
 			Report: updated, Action: action, ActionType: actionType, SuspendUntil: suspendUntil,
-			Notification: notification, ExternalApply: externalApply,
+			Notification: notification, VolatileApply: volatileApply,
 		}, nil
 	}
 
@@ -285,6 +298,15 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 		return ReportDetail{}, err
 	}
 	return s.GetReportDetail(ctx, reportID)
+}
+
+func actionRequiresLiveTarget(actionType string) bool {
+	switch actionType {
+	case ActionWarning, ActionTemporarySuspension, ActionPermanentBan:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) notify(ctx context.Context, recipientID, notifType, dedupeKey string, payload map[string]string) {

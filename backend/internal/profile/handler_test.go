@@ -3,6 +3,7 @@ package profile
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,6 +50,7 @@ func TestProfileRoutesAuthenticatedUpdateAndPrivacy(t *testing.T) {
 	require.NoError(t, err)
 
 	profileSvc := NewService(NewInMemoryRepository(), authUserProvider{authSvc}, testSummaries{})
+	useTestRanked(profileSvc)
 	router := chi.NewRouter()
 	router.Use(auth.RequireAuthWithUser(tokens, authSvc))
 	handler := NewHandler(profileSvc)
@@ -85,4 +87,27 @@ func TestProfileRoutesAuthenticatedUpdateAndPrivacy(t *testing.T) {
 	assert.NotContains(t, public.Body.String(), user.ID)
 	assert.NotContains(t, public.Body.String(), user.Email)
 	assert.NotContains(t, public.Body.String(), "password")
+}
+
+func TestGetPublicReturnsServiceUnavailableWhenRankedDataFails(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	require.NoError(t, repo.Create(ctx, Profile{
+		UserID: "u1", Handle: "ranked_user", DisplayName: "Ranked User",
+		StrategyTag: DefaultStrategyTag, IsPublic: true,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}))
+	svc := NewService(repo, testUsers{"u1": {ID: "u1"}}, testSummaries{
+		"u1": {PortfolioIndex: 187, GainLossPercentage: 87},
+	})
+	svc.SetRankedPerformanceProvider(failingRanked{err: errors.New("ranked store offline")})
+
+	router := chi.NewRouter()
+	router.Get("/profiles/{handle}", NewHandler(svc).GetPublic)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/profiles/ranked_user", nil))
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ranked performance data unavailable")
+	assert.NotContains(t, rec.Body.String(), "187")
 }

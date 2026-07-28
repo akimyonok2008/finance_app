@@ -62,7 +62,7 @@ export const cashBalanceSchema = z.object({
 
 export const cashResponseSchema = z.object({
   cash_balances: z.array(cashBalanceSchema),
-  total_cash_value_base: z.number(),
+  total_cash_value_base: decimalStringSchema,
   base_currency: z.string(),
 });
 
@@ -117,18 +117,46 @@ export const rankedPerformanceHistorySchema = z.object({
 });
 
 export const leaderboardEntrySchema = z.object({
-  rank: z.number(),
-  display_name: z.string(),
+  rank: z.number().int().positive(),
+  display_name: z.string().min(1),
+  handle: z.string().min(1).optional(),
+  avatar_key: z.string().optional(),
+  strategy_tag: z.string().optional(),
   ranked_index: decimalStringSchema,
   ranked_return_percentage: decimalStringSchema,
+  public_weights: z
+    .array(
+      z.object({
+        symbol: z.string().min(1),
+        asset_type: z.enum(["stock", "etf", "crypto", "fund", "cash", "other"]),
+        weight_percentage: z.number().finite(),
+      }),
+    )
+    .optional()
+    .default([]),
+  badges: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        name: z.string(),
+        icon_key: z.string().optional(),
+        unlocked_at: z.string().optional(),
+      }),
+    )
+    .optional()
+    .default([]),
+  is_me: z.boolean().optional(),
 });
+
+export const leaderboardResponseSchema = z.array(leaderboardEntrySchema);
 
 /**
  * Partial-shape check for GET /portfolio/summary. Only validates the
  * decimal-string-bearing sub-arrays (positions, closed_positions,
- * cash_balances) — the many float64 aggregate fields documented as
- * intentionally-still-`number` are left unchecked (`.passthrough()`) so this
- * schema doesn't need to duplicate the entire, still-evolving aggregate DTO.
+ * cash_balances) — the aggregate money fields (now decimal strings) and
+ * percentage/ratio fields (still `number`) are left unchecked
+ * (`.passthrough()`) so this schema doesn't need to duplicate the entire,
+ * still-evolving aggregate DTO.
  */
 export const portfolioSummaryShapeSchema = z
   .object({
@@ -138,12 +166,48 @@ export const portfolioSummaryShapeSchema = z
   })
   .passthrough();
 
-export const leaderboardStandingSchema = z.object({
-  eligible: z.boolean(),
-  ranked_index: decimalStringSchema,
-  ranked_return_percentage: decimalStringSchema,
-  percentile: z.number(),
-});
+const nullablePositiveRankSchema = z.number().int().positive().nullable();
+
+export const leaderboardStandingSchema = z
+  .object({
+    timeframe: z.enum(["1W", "1M", "3M", "6M", "1Y", "ALL"]),
+    eligible: z.boolean(),
+    rank: nullablePositiveRankSchema,
+    previous_rank: nullablePositiveRankSchema,
+    rank_delta: z.number().int().nullable(),
+    best_rank: nullablePositiveRankSchema,
+    participant_count: z.number().int().nonnegative(),
+    total_participants: z.number().int().nonnegative(),
+    percentile: z.number().finite().min(0).max(100),
+    ranked_return_percentage: decimalStringSchema,
+    ranked_index: decimalStringSchema,
+    paused: z.boolean(),
+    next_milestone: z
+      .object({
+        label: z.string().min(1),
+        target_rank: z.number().int().positive(),
+        rank_gap: z.number().int().nonnegative(),
+        return_gap_percentage: decimalStringSchema,
+      })
+      .nullable(),
+    reason: z.string(),
+  })
+  .superRefine((standing, ctx) => {
+    if (standing.eligible && standing.rank === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["rank"],
+        message: "eligible standing must include a rank",
+      });
+    }
+    if (standing.participant_count !== standing.total_participants) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["total_participants"],
+        message: "participant count aliases must match",
+      });
+    }
+  });
 
 /**
  * Validates `data` against `schema`. On failure, throws a descriptive Error

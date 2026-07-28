@@ -189,19 +189,6 @@ export function AddPositionForm({ onSuccess, compact }: AddPositionFormProps) {
               />
               {errors.fee && <span className="text-rose-300">{errors.fee}</span>}
             </label>
-            <label className="grid gap-1 text-zinc-300">
-              Trade date — leave blank for now
-              <input
-                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
-                type="datetime-local"
-                disabled={pending}
-                value={state.effective_at}
-                onChange={(event) => onChange({ effective_at: event.target.value })}
-              />
-              {errors.effective_at && (
-                <span className="text-rose-300">{errors.effective_at}</span>
-              )}
-            </label>
           </div>
         )}
       </div>

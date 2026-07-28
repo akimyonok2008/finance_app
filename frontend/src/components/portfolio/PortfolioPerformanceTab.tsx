@@ -332,6 +332,10 @@ function EconomicBreakdownSection({
   isLoading: boolean;
   isError: boolean;
 }) {
+  // breakdown's *_base fields are decimal strings (the authoritative money
+  // contract). They are only ever displayed here (never re-stored or summed
+  // back into the wire payload), so Number()-parsing at this point-of-use is
+  // the same documented display-arithmetic boundary formatMoney itself uses.
   const rows: Array<{
     label: string;
     value: number;
@@ -341,25 +345,25 @@ function EconomicBreakdownSection({
     ? [
         {
           label: "Realized P&L",
-          value: breakdown.realized_pnl_base,
+          value: Number(breakdown.realized_pnl_base),
           href: "/portfolio?tab=transactions&category=trades",
           hint: "Closed and partially-sold positions",
         },
         {
           label: "Unrealized P&L",
-          value: breakdown.unrealized_pnl_base,
+          value: Number(breakdown.unrealized_pnl_base),
           href: "/portfolio?tab=state&view=open",
           hint: "Open holdings at current prices",
         },
         {
           label: "Net Income",
-          value: breakdown.net_income_base,
+          value: Number(breakdown.net_income_base),
           href: "/portfolio?tab=transactions&category=income",
           hint: "Dividends, distributions, interest",
         },
         {
           label: "Standalone Fees",
-          value: -breakdown.standalone_fees_base,
+          value: -Number(breakdown.standalone_fees_base),
           href: "/portfolio?tab=transactions&category=fees",
           hint: "Management and custody fees; trade fees are already inside the figures above",
         },
@@ -437,7 +441,7 @@ function EconomicBreakdownSection({
               </p>
             )}
             {breakdown.unattributed_base !== null &&
-              breakdown.unattributed_base !== 0 && (
+              Number(breakdown.unattributed_base) !== 0 && (
                 <p className="mt-2 text-[11px] leading-4 text-amber-200/80">
                   {signedMoney(breakdown.unattributed_base, currency)} of the
                   total could not be traced to the components above and is shown
@@ -812,14 +816,18 @@ function ContributionList({
 
 /**
  * Money with an explicit sign, so gain/loss is never signalled by colour alone.
+ * Accepts either a plain `number` or a decimal-string money field; the string
+ * form is only parsed here, at the formatting boundary (same pattern as
+ * formatMoney), never for arithmetic.
  */
-function signedMoney(value: number | null | undefined, currency: string) {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
+function signedMoney(value: number | string | null | undefined, currency: string) {
+  const n = typeof value === "string" ? Number(value) : value;
+  if (n === null || n === undefined || !Number.isFinite(n)) {
     return "—";
   }
-  const formatted = formatMoney(Math.abs(value), currency);
-  if (value > 0) return `+${formatted}`;
-  if (value < 0) return `-${formatted}`;
+  const formatted = formatMoney(Math.abs(n), currency);
+  if (n > 0) return `+${formatted}`;
+  if (n < 0) return `-${formatted}`;
   return formatted;
 }
 

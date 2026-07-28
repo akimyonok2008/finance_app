@@ -36,6 +36,13 @@ const (
 	defaultFMPDailyBudget         = 250
 	defaultDataUsageMode          = "personal"
 	defaultOpenFIGIBaseURL        = "https://api.openfigi.com"
+	// defaultRefreshBatchSize bounds how many users a single leaderboard-cache
+	// refresh or daily-snapshot pass processes per tick, so either job's cost
+	// stays bounded regardless of how many users the platform has (see
+	// leaderboard.Service.SetRefreshBatchSize and portfolioSnapshotAdapter in
+	// cmd/api/main.go). 0 would mean unbounded; the default here is always a
+	// real cap rather than opt-in, since both jobs run on a short ticker.
+	defaultRefreshBatchSize = 500
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -57,10 +64,15 @@ type Config struct {
 	// production, or to no CORS headers at all in production.
 	CORSAllowedOrigins []string
 
-	EnableBackgroundWorkers        bool
-	OutboxReadinessMaxPending      int
-	OutboxReadinessMaxAge          time.Duration
-	LeaderboardRefreshInterval     time.Duration
+	EnableBackgroundWorkers    bool
+	OutboxReadinessMaxPending  int
+	OutboxReadinessMaxAge      time.Duration
+	LeaderboardRefreshInterval time.Duration
+	// RefreshBatchSize bounds per-tick work for the leaderboard-cache refresh
+	// and daily-snapshot jobs (see defaultRefreshBatchSize above). Shared
+	// between the two since both are "full valuation over all users" jobs
+	// with the identical scaling problem.
+	RefreshBatchSize               int
 	PriceCacheTTL                  time.Duration
 	EnableRealMarketData           bool
 	TwelveDataAPIKey               string
@@ -183,6 +195,7 @@ func Load() Config {
 		OutboxReadinessMaxPending:      getEnvInt("OUTBOX_READINESS_MAX_PENDING", 1000),
 		OutboxReadinessMaxAge:          getEnvDuration("OUTBOX_READINESS_MAX_AGE", 15*time.Minute),
 		LeaderboardRefreshInterval:     time.Duration(getEnvInt("LEADERBOARD_REFRESH_INTERVAL_SECONDS", defaultLeaderboardSecs)) * time.Second,
+		RefreshBatchSize:               getEnvInt("REFRESH_BATCH_SIZE", defaultRefreshBatchSize),
 		PriceCacheTTL:                  time.Duration(getEnvInt("PRICE_CACHE_TTL_SECONDS", defaultPriceCacheSecs)) * time.Second,
 		EnableRealMarketData:           getEnvBool("ENABLE_REAL_MARKET_DATA", false),
 		TwelveDataAPIKey:               getEnv("TWELVE_DATA_API_KEY", ""),

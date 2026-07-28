@@ -28,6 +28,14 @@ type User struct {
 	// user cannot authenticate at all.
 	BannedAt  *time.Time
 	BanReason string
+
+	// SignupIPHash is HMAC(pepper, client IP at registration), never the raw
+	// IP. It exists only so a later investigation can find accounts created
+	// from the same network (multi-account "survivorship gaming" of the
+	// public leaderboard) — it is never exposed via the API and is not itself
+	// a block, just a durable signal. Empty for accounts created before this
+	// existed, for OAuth signups, or when no IP was available.
+	SignupIPHash string
 }
 
 const (
@@ -85,6 +93,10 @@ type RegisterInput struct {
 	Password    string
 	DisplayName string
 	AvatarKey   string
+	// SignupIP is the caller's request IP, set by the handler only — never
+	// client-supplied. Hashed and stored as SignupIPHash; the raw value is
+	// never persisted.
+	SignupIP string
 }
 
 type AuthProvider string
@@ -118,4 +130,23 @@ type LifecycleToken struct {
 	TokenHash string
 	ExpiresAt time.Time
 	CreatedAt time.Time
+}
+
+const EmailKindVerification = "email_verification"
+
+// EmailOutboxMessage is durable delivery intent. VerificationURL contains the
+// one-time raw token and must be treated as sensitive; only the email worker
+// reads it, and logs must never include it.
+type EmailOutboxMessage struct {
+	ID              string
+	UserID          string
+	Kind            string
+	Recipient       string
+	VerificationURL string
+	CreatedAt       time.Time
+	AvailableAt     time.Time
+	ClaimedAt       *time.Time
+	DeliveredAt     *time.Time
+	Attempts        int
+	LastError       string
 }

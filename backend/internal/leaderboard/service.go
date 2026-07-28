@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
@@ -75,6 +76,21 @@ type Service struct {
 	profiles       ProfilePublicProvider // optional; enriches rows with handle/tag/weights
 	maxSnapshotAge time.Duration
 	now            func() time.Time
+
+	// refreshBatchSize bounds how many users RefreshCache revalues (one
+	// CurrentRankedPerformance call each, which does a full portfolio
+	// valuation) in a single call. Zero means unbounded — every call
+	// revalues every user, the original behavior, which existing tests and
+	// any deployment that hasn't opted in via SetRefreshBatchSize still get.
+	// When set, RefreshCache advances refreshCursor through the (stably
+	// sorted) user list on every call, so a periodic caller doing one full
+	// scan every len(users)/refreshBatchSize calls still eventually
+	// refreshes everyone — cost per call is bounded by refreshBatchSize
+	// regardless of how many users the platform has, so a short ticker
+	// interval no longer means unbounded work per tick.
+	refreshBatchSize int
+	refreshMu        sync.Mutex
+	refreshCursor    int
 }
 
 // NewService wires a leaderboard Service around the ranked-performance provider.
@@ -94,6 +110,16 @@ func (s *Service) SetMaxSnapshotAge(d time.Duration) {
 	if d > 0 {
 		s.maxSnapshotAge = d
 	}
+}
+
+// SetRefreshBatchSize bounds how many users a single RefreshCache call
+// revalues; see the Service.refreshBatchSize field comment. n <= 0 restores
+// the unbounded default (revalue everyone on every call).
+func (s *Service) SetRefreshBatchSize(n int) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	s.refreshBatchSize = n
+	s.refreshCursor = 0
 }
 
 // SetCache attaches an optional ranking cache (Redis in production).
@@ -231,6 +257,42 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 // score. Canonical history is owned by the independent ranked snapshot worker.
 // With neither a cache nor snapshot reader attached this compatibility refresh
 // is a no-op.
+//
+// nextBatch selects the slice of users this call should revalue, and reports
+// whether that slice is every known user (true whenever refreshBatchSize is
+// unset/non-positive, or happens to cover the whole list). Selection is a
+// stable, sorted-by-ID sliding window that advances across calls, so a
+// caller invoking RefreshCache on a fixed interval eventually covers every
+// user over ceil(len(users)/refreshBatchSize) calls, with each individual
+// call doing bounded work.
+func (s *Service) nextBatch(users []auth.User) ([]auth.User, bool) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
+	if s.refreshBatchSize <= 0 || s.refreshBatchSize >= len(users) {
+		return users, true
+	}
+	sorted := make([]auth.User, len(users))
+	copy(sorted, users)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	n := len(sorted)
+	if s.refreshCursor >= n {
+		s.refreshCursor = 0
+	}
+	start := s.refreshCursor
+	size := s.refreshBatchSize
+	if size > n {
+		size = n
+	}
+	batch := make([]auth.User, 0, size)
+	for i := 0; i < size; i++ {
+		batch = append(batch, sorted[(start+i)%n])
+	}
+	s.refreshCursor = (start + size) % n
+	return batch, false
+}
+
 func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	if s.cache == nil && s.snapshots == nil {
 		return 0, nil
@@ -239,15 +301,22 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrListUsers, err)
 	}
-	slog.Info("leaderboard_cache_reconciliation_started", "users", len(users))
-	skipped := 0
-	activeUpserted, pausedRemoved, deletedRemoved, cacheFailures := 0, 0, 0, 0
-	ranked := make(map[string]bool, len(users))
+	// known/deletion detection covers every user on every call — it's a
+	// membership check, not a valuation, so it stays cheap regardless of
+	// scale. Only the expensive per-user CurrentRankedPerformance valuation
+	// below is restricted to this call's batch.
 	known := make(map[string]bool, len(users))
-	valuationFailed := make(map[string]bool)
-	var firstCacheErr error
 	for _, u := range users {
 		known[u.ID] = true
+	}
+	batch, allProcessed := s.nextBatch(users)
+	slog.Info("leaderboard_cache_reconciliation_started", "users", len(users), "batch", len(batch))
+	skipped := 0
+	activeUpserted, pausedRemoved, deletedRemoved, cacheFailures := 0, 0, 0, 0
+	ranked := make(map[string]bool, len(batch))
+	valuationFailed := make(map[string]bool)
+	var firstCacheErr error
+	for _, u := range batch {
 		rp, err := s.ranked.CurrentRankedPerformance(ctx, u.ID)
 		if err != nil {
 			skipped++
@@ -293,7 +362,14 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	if s.cache != nil {
 		if cached, err := s.cache.GetGlobalTop(ctx, 0); err == nil {
 			for _, sc := range cached {
-				if ranked[sc.UserID] || valuationFailed[sc.UserID] {
+				// A known user who simply wasn't in this tick's batch has
+				// unknown status this round — never guess-evict them; only a
+				// full unbounded pass (allProcessed) may prune a known user,
+				// and only when it actually revalued them and found them
+				// unrankable. A genuinely deleted user (!known) is always
+				// safe to prune regardless of batching.
+				if ranked[sc.UserID] || valuationFailed[sc.UserID] ||
+					(known[sc.UserID] && !allProcessed) {
 					continue
 				}
 				if err := s.cache.RemoveGlobalScore(ctx, sc.UserID); err != nil {

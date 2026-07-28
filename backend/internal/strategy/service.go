@@ -30,16 +30,17 @@ func (s *Service) CompareProfile(ctx context.Context, userID, handle string) (Co
 	if err != nil {
 		return CompareProfileResponse{}, err
 	}
-	if summary == nil || len(summary.Positions) == 0 || summary.CurrentValue <= 0 {
+	if summary == nil || len(summary.Positions) == 0 || summary.CurrentValue.Sign() <= 0 {
 		return CompareProfileResponse{}, ErrEmptyPortfolio
 	}
+	currentValue := summary.CurrentValue.Float64()
 
 	myWeights := make(map[string]WeightDifference)
 	mySorted := make([]WeightDifference, 0, len(summary.Positions))
 	for _, position := range summary.Positions {
 		row := WeightDifference{
 			Symbol:             position.Symbol,
-			MyWeightPercentage: round2(position.CurrentValueBase.Float64() / summary.CurrentValue * 100),
+			MyWeightPercentage: round2(position.CurrentValueBase.Float64() / currentValue * 100),
 			AssetType:          position.AssetType,
 		}
 		myWeights[position.Symbol] = row

@@ -101,7 +101,7 @@ export function ProfileForm({ profile, onSubmit, isSaving, serverError }: { prof
         </div>
         <div className="sm:col-span-2 grid gap-3 sm:grid-cols-2">
           <Controller control={control} name="is_public" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Public profile" description="When off, other users cannot view your profile." />} />
-          <Controller control={control} name="show_public_weights" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Show public weights" description="Others see symbols and percentage weights, never quantities or values." />} />
+          <Controller control={control} name="show_public_weights" render={({ field }) => <Toggle checked={field.value} onChange={field.onChange} label="Show public weights" description="When your profile is public, others may see active and closed symbols, allocation percentages, symbol-level drivers, and reusable Compare/Copy weights. Quantities, prices, cost basis, and monetary values stay private." />} />
         </div>
       </div>
 

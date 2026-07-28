@@ -42,13 +42,16 @@ func TestExploreRouteEndToEnd(t *testing.T) {
 		IsPublic: true, ShowPublicWeights: true, CreatedAt: now, UpdatedAt: now,
 	}))
 	summaries := testSummaries{
-		"u1": {UserID: "u1", PortfolioID: "p1", CurrentValue: 100, GainLossPercentage: 24.6, PortfolioIndex: 124.6,
+		"u1": {UserID: "u1", PortfolioID: "p1", CurrentValue: money.AmountFromFloat64(100), GainLossPercentage: 24.6, PortfolioIndex: 124.6,
 			Positions: []portfolio.PositionSummary{
 				{PositionID: "x1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(60), CurrentPriceCurrency: "USD"},
 				{PositionID: "x2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(40), CurrentPriceCurrency: "USD"},
 			}},
 	}
 	svc := NewService(repo, authUserProvider{authSvc}, summaries)
+	svc.SetRankedPerformanceProvider(testRanked{
+		"u1": {RankedIndex: 124.6, RankedReturnPercentage: 24.6},
+	})
 
 	router := chi.NewRouter()
 	router.Use(auth.RequireAuthWithUser(tokens, authSvc))

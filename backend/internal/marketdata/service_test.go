@@ -3,6 +3,7 @@ package marketdata
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -201,4 +202,77 @@ func TestRequestLimiter_RespectsMaxRequestsPerMinute(t *testing.T) {
 	limiter := NewRequestLimiter(1, 10)
 	require.NoError(t, limiter.Allow())
 	assert.ErrorIs(t, limiter.Allow(), ErrProviderRateLimited)
+}
+
+func TestService_RefreshSymbolsChunksLargeSymbolLists(t *testing.T) {
+	provider := &countingProvider{}
+	svc := newTestService(provider)
+
+	// 60 symbols exceeds MaxQuoteBatchSize (25), should chunk into 3 calls
+	symbols := make([]string, 60)
+	for i := 0; i < 60; i++ {
+		symbols[i] = fmt.Sprintf("SYM%03d", i)
+	}
+
+	count, err := svc.RefreshSymbols(context.Background(), symbols)
+	require.NoError(t, err)
+	assert.Equal(t, 60, count)
+	assert.Equal(t, 3, provider.calls) // 25 + 25 + 10
+}
+
+func TestService_RefreshSymbolsDeduplicates(t *testing.T) {
+	provider := &countingProvider{}
+	svc := newTestService(provider)
+
+	count, err := svc.RefreshSymbols(context.Background(), []string{"AAPL", "AAPL", "MSFT", "AAPL"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+	assert.Equal(t, 1, provider.calls)
+}
+
+func TestService_RefreshSymbolsReturnsErrorButPartialCount(t *testing.T) {
+	svc := newTestService(&mockFailingProvider{failOnCall: 2})
+
+	symbols := make([]string, 60)
+	for i := 0; i < 60; i++ {
+		symbols[i] = fmt.Sprintf("SYM%03d", i)
+	}
+
+	count, err := svc.RefreshSymbols(context.Background(), symbols)
+	assert.ErrorIs(t, err, ErrProviderUnavailable)
+	assert.Equal(t, 25, count) // First chunk succeeded, second failed
+}
+
+type mockFailingProvider struct {
+	failOnCall int
+	callCount  int
+}
+
+func (p *mockFailingProvider) SearchInstruments(context.Context, string) ([]Instrument, error) {
+	return nil, nil
+}
+
+func (p *mockFailingProvider) GetQuote(ctx context.Context, symbol string) (Quote, error) {
+	quotes, err := p.GetQuotes(ctx, []string{symbol})
+	if err != nil {
+		return Quote{}, err
+	}
+	return quotes[0], nil
+}
+
+func (p *mockFailingProvider) GetQuotes(_ context.Context, symbols []string) ([]Quote, error) {
+	p.callCount++
+	if p.callCount == p.failOnCall {
+		return nil, ErrProviderUnavailable
+	}
+	now := time.Now().UTC()
+	out := make([]Quote, 0, len(symbols))
+	for _, symbol := range symbols {
+		out = append(out, Quote{
+			Symbol: normalizeSymbol(symbol), Price: 100, Currency: "USD",
+			Provider: "test", ProviderStatus: StatusOK,
+			FetchedAt: now, ExpiresAt: now.Add(time.Minute),
+		})
+	}
+	return out, nil
 }

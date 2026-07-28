@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -175,13 +176,13 @@ func TestPerformanceSummaryEconomicBreakdownReconciles(t *testing.T) {
 			Index float64 `json:"index"`
 		} `json:"ranked"`
 		EconomicBreakdown struct {
-			RealizedPnLBase      float64  `json:"realized_pnl_base"`
-			UnrealizedPnLBase    float64  `json:"unrealized_pnl_base"`
-			NetIncomeBase        float64  `json:"net_income_base"`
-			StandaloneFeesBase   float64  `json:"standalone_fees_base"`
-			AttributedTotalBase  float64  `json:"attributed_total_base"`
-			TotalEconomicPnLBase *float64 `json:"total_economic_pnl_base"`
-			IsComplete           bool     `json:"is_complete"`
+			RealizedPnLBase      string  `json:"realized_pnl_base"`
+			UnrealizedPnLBase    string  `json:"unrealized_pnl_base"`
+			NetIncomeBase        string  `json:"net_income_base"`
+			StandaloneFeesBase   string  `json:"standalone_fees_base"`
+			AttributedTotalBase  string  `json:"attributed_total_base"`
+			TotalEconomicPnLBase *string `json:"total_economic_pnl_base"`
+			IsComplete           bool    `json:"is_complete"`
 		} `json:"economic_breakdown"`
 		Contributions struct {
 			Basis     string `json:"basis"`
@@ -191,9 +192,19 @@ func TestPerformanceSummaryEconomicBreakdownReconciles(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 
 	b := payload.EconomicBreakdown
+	realized, err := strconv.ParseFloat(b.RealizedPnLBase, 64)
+	require.NoError(t, err)
+	unrealized, err := strconv.ParseFloat(b.UnrealizedPnLBase, 64)
+	require.NoError(t, err)
+	netIncome, err := strconv.ParseFloat(b.NetIncomeBase, 64)
+	require.NoError(t, err)
+	standaloneFees, err := strconv.ParseFloat(b.StandaloneFeesBase, 64)
+	require.NoError(t, err)
+	attributedTotal, err := strconv.ParseFloat(b.AttributedTotalBase, 64)
+	require.NoError(t, err)
 	assert.InDelta(t,
-		b.RealizedPnLBase+b.UnrealizedPnLBase+b.NetIncomeBase-b.StandaloneFeesBase,
-		b.AttributedTotalBase, 0.011,
+		realized+unrealized+netIncome-standaloneFees,
+		attributedTotal, 0.011,
 		"the breakdown must satisfy realized + unrealized + income - standalone fees")
 
 	// The contribution scope limitation is always declared.
@@ -202,7 +213,9 @@ func TestPerformanceSummaryEconomicBreakdownReconciles(t *testing.T) {
 	// Economic P&L is money; ranked index is a unitless competitive projection.
 	// They must never be the same number by construction.
 	if b.IsComplete && b.TotalEconomicPnLBase != nil {
-		assert.NotEqual(t, payload.Ranked.Index, *b.TotalEconomicPnLBase)
+		totalEconomicPnL, err := strconv.ParseFloat(*b.TotalEconomicPnLBase, 64)
+		require.NoError(t, err)
+		assert.NotEqual(t, payload.Ranked.Index, totalEconomicPnL)
 	}
 }
 

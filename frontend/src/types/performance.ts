@@ -106,13 +106,13 @@ export type BenchmarkComparison = {
  * the ledger does not cover the full holding history.
  */
 export type EconomicBreakdown = {
-  realized_pnl_base: number;
-  unrealized_pnl_base: number;
-  net_income_base: number;
-  standalone_fees_base: number;
-  attributed_total_base: number;
-  total_economic_pnl_base: number | null;
-  unattributed_base: number | null;
+  realized_pnl_base: DecimalString;
+  unrealized_pnl_base: DecimalString;
+  net_income_base: DecimalString;
+  standalone_fees_base: DecimalString;
+  attributed_total_base: DecimalString;
+  total_economic_pnl_base: DecimalString | null;
+  unattributed_base: DecimalString | null;
   calculation_status: string;
   is_complete: boolean;
 };
@@ -125,8 +125,8 @@ export type InstrumentContribution = {
   /** Standalone return, shown for context. Ranking never uses it. */
   instrument_return_percentage: number | null;
   contribution_percentage_points: number;
-  economic_result_base: number;
-  income_base: number;
+  economic_result_base: DecimalString;
+  income_base: DecimalString;
 };
 
 /**
@@ -142,7 +142,7 @@ export type ContributionAnalysis = {
   calculation_status: string;
   available: boolean;
   reason?: string;
-  total_capital_base: number;
+  total_capital_base: DecimalString;
   contributors: InstrumentContribution[];
   detractors: InstrumentContribution[];
   unattributed_percentage_points: number;
@@ -157,7 +157,7 @@ export type PerformanceSummary = {
   reconciliation: {
     is_complete: boolean;
     is_consistent: boolean;
-    difference: number;
+    difference: DecimalString;
     reasons?: string[];
   };
 };

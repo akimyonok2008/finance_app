@@ -223,6 +223,11 @@ func writeSocialError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusForbidden, "You can only message mutual friends.")
 	case errors.Is(err, ErrInteractionBlocked):
 		httpx.WriteError(w, http.StatusForbidden, "This action isn't available for this account.")
+	case errors.Is(err, ErrMessageRateLimited),
+		errors.Is(err, ErrConversationLimited),
+		errors.Is(err, ErrRepeatedMessage),
+		errors.Is(err, ErrSpamBurst):
+		httpx.WriteError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, ErrForbidden):
 		httpx.WriteError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrConversationNotFound), errors.Is(err, ErrMessageNotFound):

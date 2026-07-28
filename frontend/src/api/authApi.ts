@@ -33,6 +33,10 @@ export class AuthApiError extends Error {
 }
 
 function normalizeUser(data: Record<string, unknown>): AuthSession["user"] {
+  const role =
+    data.role === "moderator" || data.role === "admin" || data.role === "user"
+      ? data.role
+      : undefined;
   return {
     id: String(data.id ?? ""),
     email: String(data.email ?? ""),
@@ -40,6 +44,13 @@ function normalizeUser(data: Record<string, unknown>): AuthSession["user"] {
     avatar_key: data.avatar_key ? String(data.avatar_key) : undefined,
     email_verified: Boolean(data.email_verified),
     has_password: Boolean(data.has_password),
+    role,
+    suspended_until: data.suspended_until
+      ? String(data.suspended_until)
+      : undefined,
+    suspension_reason: data.suspension_reason
+      ? String(data.suspension_reason)
+      : undefined,
   };
 }
 

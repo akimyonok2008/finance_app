@@ -121,7 +121,9 @@ token so the current browser continues while older sessions are revoked.
 
 Compatibility redirects:
 
-- `/arena` and `/sprint` → `/leaderboard`
+- `/arena` and `/sprint` → `/leaderboard` (Arena and Sprint are not currently
+  product features; they only exist as legacy/unreachable code and would only
+  be built out if a future decision is made to add them)
 - `/profile/me` → `/profile`
 - `/friends` → `/explore?tab=friends`
 - `/messages` and `/messages/:conversationId` → the matching Explore Messages
@@ -338,6 +340,15 @@ currently includes profiles with both public visibility and public weights
 enabled; these are product-presentation controls, not restrictions required to
 protect monetary privacy.
 
+Symbol-level composition requires both a public profile and the separate
+`show_public_weights` opt-in. Enabling it also permits reuse in Compare, Copy,
+similar-strategy matching, trending holdings, and leaderboard enrichment.
+Disabling it stops subsequent product responses, but cannot recall information
+another user already saw or copied. Competitive rankings may still show
+display name, avatar, rank, ranked index, and percentage return for an eligible
+participant whose profile is private. See [`../PRIVACY.md`](../PRIVACY.md) for
+the authoritative visibility matrix.
+
 React components only format backend-owned financial metrics. They do not
 multiply ranked return by basis, reconstruct total P&L, or add realized results,
 income, or fees to current value. Positive/negative colors are selected
@@ -359,7 +370,9 @@ provider secret.
   persistent-ranked leaderboard presentation, benchmark achievements, public
   profile discovery, friendships, and messages.
 - **Legacy/unreachable:** Arena/sprint components and APIs remain in the source
-  tree, but active routes redirect to Leaderboard.
+  tree, but active routes redirect to Leaderboard. Arena and Sprint are not
+  currently product features — they would only be built out and shipped if a
+  future decision is made to add them.
 - **Removed:** Coach API, hooks, types, components, and portfolio analysis modes.
 - **Not implemented:** Apple sign-in UI, live competition UI, broker trading,
   AI advice, refresh tokens, device-management UI, MFA/passkeys, and production

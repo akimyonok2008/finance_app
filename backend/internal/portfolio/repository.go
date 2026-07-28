@@ -53,6 +53,14 @@ type Repository interface {
 	// workers can never create duplicates.
 	CreateArchiveSnapshot(ctx context.Context, s *PortfolioArchiveSnapshot) (inserted bool, err error)
 	ListArchiveSnapshots(ctx context.Context, userID string, from, to string) ([]*PortfolioArchiveSnapshot, error)
+
+	// SnapshottedUserIDs returns the set of user IDs that already have an
+	// archive snapshot for the given UTC calendar date. It is a cheap
+	// membership query (no valuation), so the daily-snapshot job can skip the
+	// expensive per-user Summary() computation for users already done for the
+	// day instead of recomputing it — and immediately discarding it via
+	// CreateArchiveSnapshot's own idempotency check — on every tick.
+	SnapshottedUserIDs(ctx context.Context, date time.Time) (map[string]bool, error)
 }
 
 // InMemoryRepository is the process-local store used for zero-infrastructure
@@ -434,6 +442,25 @@ func (r *InMemoryRepository) ListArchiveSnapshots(ctx context.Context, userID st
 			continue
 		}
 		out = append(out, copyArchiveSnapshot(s))
+	}
+	return out, nil
+}
+
+// SnapshottedUserIDs mirrors the Postgres implementation's cheap
+// membership-only lookup: no valuation, just a scan of already-recorded
+// snapshot dates.
+func (r *InMemoryRepository) SnapshottedUserIDs(ctx context.Context, date time.Time) (map[string]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	day := date.UTC().Format("2006-01-02")
+	out := map[string]bool{}
+	for _, s := range r.archives {
+		if s.CapturedAt.UTC().Format("2006-01-02") == day {
+			out[s.UserID] = true
+		}
 	}
 	return out, nil
 }

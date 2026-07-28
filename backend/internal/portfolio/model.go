@@ -182,16 +182,37 @@ type CashFlowInput struct {
 }
 
 // ActivityCorrectionInput reconciles a user-recorded activity to its actual
-// amount. It never edits the original (immutable) activity; the service posts
-// a compensating deposit/withdrawal for the delta and links it back via
-// metadata. Only deposit and withdrawal activities are supported: correcting
-// a buy/sell safely would require reconstructing everything that happened to
-// the position afterward, so those are rejected — record an offsetting
-// buy/sell instead.
+// values. It never edits the original (immutable) activity.
+//
+// Deposit/withdrawal: the service posts a compensating cash flow for the
+// delta between ActualAmount and the original, linked back via metadata.
+//
+// Buy/sell: CorrectedQuantity/CorrectedExecutionPrice/CorrectedFee are the
+// only correctable fields, and only when the original is the most recent
+// ledger event in its position episode (see isLastEpisodeEvent) — otherwise
+// reversing its contribution could conflict with activity that happened
+// afterward (partial sells, closures, rebuys), so it is rejected. Symbol,
+// instrument, and the trade's date are never correctable: record an
+// offsetting buy/sell instead.
 type ActivityCorrectionInput struct {
 	ActivityID   string
 	ActualAmount money.Amount
 	Reason       string
+
+	CorrectedQuantity       money.Quantity
+	CorrectedExecutionPrice money.Price
+	CorrectedFee            money.Amount
+}
+
+// TradeCorrectionInput carries a validated buy/sell correction into the
+// mutation pipeline. Original is the immutable activity being corrected; the
+// coordinator never re-fetches it from storage.
+type TradeCorrectionInput struct {
+	Original                Activity
+	CorrectedQuantity       money.Quantity
+	CorrectedExecutionPrice money.Price
+	CorrectedFee            money.Amount
+	Reason                  string
 }
 
 // Execution-price and fee provenance labels. They record HOW a recorded trade's
@@ -213,15 +234,18 @@ const (
 	FeeSourceDefaultZero = "default_zero"
 )
 
-// BuyInput records a real-world purchase. Only Symbol/AssetType/Quantity are
-// required: the user records the essential action and the backend infers the
-// accounting consequences.
+// BuyInput records a real-world purchase happening now. Only
+// Symbol/AssetType/Quantity are required: the user records the essential
+// action and the backend infers the accounting consequences.
 //
-//   - ExecutionPrice: the real per-unit price paid. For a live trade, zero means
-//     "estimate it from the latest tracked quote" (provider_estimate). A
-//     backdated trade must always provide this value explicitly.
+//   - ExecutionPrice: the real per-unit price paid. Zero means "estimate it
+//     from the latest tracked quote" (provider_estimate).
 //   - Fee: the transaction fee actually charged. Zero means default_zero.
-//   - EffectiveAt: when the trade really happened. Nil means now.
+//
+// There is no backdating: every trade is recorded against the live quote
+// pinned for the mutation, so a user-supplied price always has a real
+// comparator (see validateLiveExecutionPrice) rather than an unverifiable
+// historical claim.
 //
 // Basis convention (documented in backend/README.md): a position's cost basis
 // INCLUDES the purchase price and the buy fee, mirroring the canonical sale
@@ -236,7 +260,6 @@ type BuyInput struct {
 	Quantity        money.Quantity
 	ExecutionPrice  money.Price
 	Fee             money.Amount
-	EffectiveAt     *time.Time
 }
 
 // BuyPreview never writes portfolio, cash, activity, ranked, audit or outbox
@@ -272,7 +295,6 @@ type SellInput struct {
 	Quantity       money.Quantity
 	ExecutionPrice money.Price
 	Fee            money.Amount
-	EffectiveAt    *time.Time
 }
 
 type SellPreview struct {
@@ -343,21 +365,21 @@ type PortfolioSummary struct {
 	// nested metric groups below. Their fixed scopes are: open holdings basis,
 	// total portfolio value, open holdings unrealized P&L/return, and ranked
 	// index respectively.
-	TotalCostBasis         float64                 `json:"total_cost_basis"`
-	CurrentValue           float64                 `json:"current_value"`
-	GainLoss               float64                 `json:"gain_loss"`
+	TotalCostBasis         money.Amount            `json:"total_cost_basis"`
+	CurrentValue           money.Amount            `json:"current_value"`
+	GainLoss               money.Amount            `json:"gain_loss"`
 	GainLossPercentage     float64                 `json:"gain_loss_percentage"`
 	PortfolioIndex         float64                 `json:"portfolio_index"`
 	Positions              []PositionSummary       `json:"positions"`
 	ClosedPositions        []ClosedPositionSummary `json:"closed_positions"`
-	ActiveCostBasisBase    float64                 `json:"active_cost_basis_base"`
-	ActiveCurrentValueBase float64                 `json:"active_current_value_base"`
-	UnrealizedGainLossBase float64                 `json:"unrealized_gain_loss_base"`
-	ClosedCostBasisBase    float64                 `json:"closed_cost_basis_base"`
-	RealizedGainLossBase   float64                 `json:"realized_gain_loss_base"`
+	ActiveCostBasisBase    money.Amount            `json:"active_cost_basis_base"`
+	ActiveCurrentValueBase money.Amount            `json:"active_current_value_base"`
+	UnrealizedGainLossBase money.Amount            `json:"unrealized_gain_loss_base"`
+	ClosedCostBasisBase    money.Amount            `json:"closed_cost_basis_base"`
+	RealizedGainLossBase   money.Amount            `json:"realized_gain_loss_base"`
 	QuoteStatus            QuoteStatus             `json:"quote_status"`
 	CashBalances           []CashBalanceView       `json:"cash_balances"`
-	TotalCashValueBase     float64                 `json:"total_cash_value_base"`
+	TotalCashValueBase     money.Amount            `json:"total_cash_value_base"`
 	RankedPerformance      RankedPerformanceView   `json:"ranked_performance"`
 	Valuation              PortfolioValuation      `json:"valuation"`
 	OpenHoldings           OpenHoldingsMetrics     `json:"open_holdings"`
@@ -392,62 +414,62 @@ type RankedPerformanceView struct {
 }
 
 type PortfolioValuation struct {
-	OpenHoldingsMarketValueBase float64 `json:"open_holdings_market_value_base"`
-	CashValueBase               float64 `json:"cash_value_base"`
-	CurrentPortfolioValueBase   float64 `json:"current_portfolio_value_base"`
+	OpenHoldingsMarketValueBase money.Amount `json:"open_holdings_market_value_base"`
+	CashValueBase               money.Amount `json:"cash_value_base"`
+	CurrentPortfolioValueBase   money.Amount `json:"current_portfolio_value_base"`
 }
 
 type OpenHoldingsMetrics struct {
-	CostBasisBase              float64  `json:"cost_basis_base"`
-	UnrealizedPnLBase          float64  `json:"unrealized_pnl_base"`
-	UnrealizedReturnPercentage *float64 `json:"unrealized_return_percentage"`
+	CostBasisBase              money.Amount `json:"cost_basis_base"`
+	UnrealizedPnLBase          money.Amount `json:"unrealized_pnl_base"`
+	UnrealizedReturnPercentage *float64     `json:"unrealized_return_percentage"`
 }
 
 type RealizedMetrics struct {
-	RealizedPnLBase float64 `json:"realized_pnl_base"`
+	RealizedPnLBase money.Amount `json:"realized_pnl_base"`
 }
 
 type IncomeMetrics struct {
-	DividendsBase     float64 `json:"dividends_base"`
-	DistributionsBase float64 `json:"distributions_base"`
-	InterestBase      float64 `json:"interest_base"`
-	OtherIncomeBase   float64 `json:"other_income_base"`
-	TotalIncomeBase   float64 `json:"total_income_base"`
+	DividendsBase     money.Amount `json:"dividends_base"`
+	DistributionsBase money.Amount `json:"distributions_base"`
+	InterestBase      money.Amount `json:"interest_base"`
+	OtherIncomeBase   money.Amount `json:"other_income_base"`
+	TotalIncomeBase   money.Amount `json:"total_income_base"`
 	// ReturnOfCapitalBase is disclosed separately for audit visibility. Return
 	// of capital is NOT ordinary income (it is a basis-reducing cash credit),
 	// so it is deliberately excluded from TotalIncomeBase. See
 	// backend/README.md for the documented accounting policy.
-	ReturnOfCapitalBase float64 `json:"return_of_capital_base"`
+	ReturnOfCapitalBase money.Amount `json:"return_of_capital_base"`
 }
 
 type FeeMetrics struct {
-	TransactionFeesBase float64 `json:"transaction_fees_base"`
-	ManagementFeesBase  float64 `json:"management_fees_base"`
-	CustodyFeesBase     float64 `json:"custody_fees_base"`
-	OtherFeesBase       float64 `json:"other_fees_base"`
-	TotalFeesBase       float64 `json:"total_fees_base"`
+	TransactionFeesBase money.Amount `json:"transaction_fees_base"`
+	ManagementFeesBase  money.Amount `json:"management_fees_base"`
+	CustodyFeesBase     money.Amount `json:"custody_fees_base"`
+	OtherFeesBase       money.Amount `json:"other_fees_base"`
+	TotalFeesBase       money.Amount `json:"total_fees_base"`
 	// EmbeddedInRealizedPnLBase discloses the portion of TotalFeesBase that is
 	// a sale fee already netted into RealizedMetrics.RealizedPnLBase (canonical
 	// sale contract: net proceeds = gross proceeds - sale fee, realized P&L =
 	// net proceeds - allocated cost basis). It is shown for fee-reporting
 	// audit purposes only and must never be subtracted a second time from
 	// economic attribution — see ReconcilePortfolioFinancials.
-	EmbeddedInRealizedPnLBase float64 `json:"embedded_in_realized_pnl_base"`
+	EmbeddedInRealizedPnLBase money.Amount `json:"embedded_in_realized_pnl_base"`
 }
 
 type EconomicPerformance struct {
-	TotalPnLBase         *float64 `json:"total_pnl_base"`
-	NetContributionsBase *float64 `json:"net_contributions_base"`
-	ReturnPercentage     *float64 `json:"return_percentage"`
-	CalculationStatus    string   `json:"calculation_status"`
-	IsComplete           bool     `json:"is_complete"`
+	TotalPnLBase         *money.Amount `json:"total_pnl_base"`
+	NetContributionsBase *money.Amount `json:"net_contributions_base"`
+	ReturnPercentage     *float64      `json:"return_percentage"`
+	CalculationStatus    string        `json:"calculation_status"`
+	IsComplete           bool          `json:"is_complete"`
 }
 
 type ReconciliationStatus struct {
-	IsComplete   bool     `json:"is_complete"`
-	IsConsistent bool     `json:"is_consistent"`
-	Difference   float64  `json:"difference"`
-	Reasons      []string `json:"reasons,omitempty"`
+	IsComplete   bool         `json:"is_complete"`
+	IsConsistent bool         `json:"is_consistent"`
+	Difference   money.Amount `json:"difference"`
+	Reasons      []string     `json:"reasons,omitempty"`
 }
 
 // PositionSummary is the calculated view of a single position. CostBasis and

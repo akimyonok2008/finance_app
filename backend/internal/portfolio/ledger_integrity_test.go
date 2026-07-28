@@ -63,15 +63,15 @@ func TestSellFee_NotDoubleCountedInReconciliation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Fee metrics still display the sale fee...
-	assert.InDelta(t, 15, summary.Fees.TransactionFeesBase, 0.01)
-	assert.InDelta(t, 15, summary.Fees.TotalFeesBase, 0.01)
+	assert.InDelta(t, 15, summary.Fees.TransactionFeesBase.Float64(), 0.01)
+	assert.InDelta(t, 15, summary.Fees.TotalFeesBase.Float64(), 0.01)
 	// ...but it is flagged as already embedded in realized P&L, so
 	// reconciliation must not subtract it again.
-	assert.InDelta(t, 15, summary.Fees.EmbeddedInRealizedPnLBase, 0.01)
-	assert.InDelta(t, wantRealized, summary.Realized.RealizedPnLBase, 0.01)
+	assert.InDelta(t, 15, summary.Fees.EmbeddedInRealizedPnLBase.Float64(), 0.01)
+	assert.InDelta(t, wantRealized, summary.Realized.RealizedPnLBase.Float64(), 0.01)
 
 	econ := calculateEconomicPerformance(summary.CurrentValue, ledgerMetrics{
-		deposits: 10000, hasBuy: true,
+		deposits: amt(10000), hasBuy: true,
 	}, true)
 	// Reconciliation is internally consistent: standalone fees (TotalFeesBase -
 	// EmbeddedInRealizedPnLBase) is what's subtracted, not the full fee total.
@@ -81,8 +81,8 @@ func TestSellFee_NotDoubleCountedInReconciliation(t *testing.T) {
 	)
 	_ = status // shape-checked below via the standalone-fee assertion
 
-	standaloneFees := summary.Fees.TotalFeesBase - summary.Fees.EmbeddedInRealizedPnLBase
-	assert.InDelta(t, 0, standaloneFees, 0.01, "the sale fee must not appear as a standalone deduction")
+	standaloneFees := summary.Fees.TotalFeesBase.Sub(summary.Fees.EmbeddedInRealizedPnLBase)
+	assert.InDelta(t, 0, standaloneFees.Float64(), 0.01, "the sale fee must not appear as a standalone deduction")
 }
 
 // TestSellPreview_MatchesCommittedSell proves SellPreview and the committed
@@ -143,8 +143,8 @@ func TestReturnOfCapital_ExcludedFromOrdinaryIncomeTotal(t *testing.T) {
 	summary, err := svc.Summary(ctx(), userID)
 	require.NoError(t, err)
 
-	assert.InDelta(t, 20, summary.Income.TotalIncomeBase, 0.01, "ROC must not be counted as ordinary income")
-	assert.InDelta(t, 50, summary.Income.ReturnOfCapitalBase, 0.01, "ROC must still be disclosed separately")
+	assert.InDelta(t, 20, summary.Income.TotalIncomeBase.Float64(), 0.01, "ROC must not be counted as ordinary income")
+	assert.InDelta(t, 50, summary.Income.ReturnOfCapitalBase.Float64(), 0.01, "ROC must still be disclosed separately")
 	assert.True(t, summary.Reconciliation.IsConsistent, "reconciliation must remain consistent: %v", summary.Reconciliation.Reasons)
 }
 

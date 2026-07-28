@@ -287,6 +287,10 @@ leaderboard experiences. Public DTOs must continue to omit quantities,
 balances, monetary values, transaction prices, cost basis, absolute gain/loss,
 email, and brokerage identifiers.
 
+The authoritative product visibility rules, including defaults, consent
+controls, competitive identity, downstream reuse, and the complete prohibited
+field list, are defined in [`PRIVACY.md`](PRIVACY.md).
+
 ## Performance semantics
 
 The app deliberately keeps two differently scoped histories:
@@ -410,7 +414,9 @@ portfolio mutation, and the live database calculation remains the fallback.
   the scan is not yet paginated for large populations.
 - Weekly competition APIs are implemented, but the active frontend redirects
   `/sprint` and `/arena` to Leaderboard. Completed sprint results are repriced
-  rather than finalized and persisted.
+  rather than finalized and persisted. Sprint and Arena are not currently
+  shipped product features — they exist only as backend/legacy code, and would
+  only become user-facing if a future decision is made to launch them.
 - The FX provider is a static development provider for USD, TRY, EUR, and GBP.
 - Google login is optional. Apple authentication code is not routed, and no
   Apple frontend flow exists.
@@ -424,9 +430,10 @@ portfolio mutation, and the live database calculation remains the fallback.
 ## Legacy, transitional, and planned
 
 - **Legacy/unreachable:** Arena and sprint frontend components remain in the
-  source tree, but their routes redirect to Leaderboard. Legacy achievement
-  tables remain for migration compatibility; current awards use benchmark
-  achievement storage.
+  source tree, but their routes redirect to Leaderboard. Arena and Sprint are
+  not currently product features; they would only be built out and shipped if
+  a future decision is made to add them. Legacy achievement tables remain for
+  migration compatibility; current awards use benchmark achievement storage.
 - **Transitional:** users begin newly verified badge eligibility at their first
   trusted ranked snapshot after migration; legacy archive points are not
   backfilled. Existing awards are preserved and marked `archive_model_v0`.

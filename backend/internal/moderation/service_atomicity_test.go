@@ -225,7 +225,8 @@ func TestInMemoryRepo_ResolveReportFailureStagesLeaveNoPartialState(t *testing.T
 				}
 			}
 			assert.Equal(t, 0, count, "no audit action should be recorded after a failure at stage %s", stage)
-			_ = users
+			_, suspended := users.suspended["target-1"]
+			assert.False(t, suspended, "no suspension should survive a failure at stage %s", stage)
 		})
 	}
 }

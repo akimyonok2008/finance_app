@@ -751,6 +751,10 @@ The active frontend does not expose sprint screens. Completed standings are not
 finalized; querying them later reprices the frozen composition with then-current
 quotes. Provider failures skip an entrant.
 
+Sprint (and Arena) are not currently product features — this API exists as
+backend/legacy code only, and would only be built out into a user-facing
+feature if a future decision is made to add it.
+
 ## Achievements
 
 The current catalogue is twenty code-defined, permanent benchmark badges:
@@ -939,11 +943,16 @@ features because they do not reveal the size of the account.
 
 Profiles currently start private with weight sharing disabled. Public profile
 access requires `is_public`, and Explore additionally requires
-`show_portfolio_weights` and a nonempty allocation. Those controls govern
+`show_public_weights` and a nonempty allocation. Those controls govern
 profile discovery and presentation; they do not redefine symbols or
 percentages as monetary secrets. Current public projections return exposure,
 concentration, DNA/style, and aggregate performance-driver signals even when
 exact weights are hidden.
+
+When both controls are enabled, symbol-level composition may also feed public
+weights, closed-symbol returns, contributor/detractor attribution, Compare,
+Copy, trending holdings, and leaderboard enrichment. The repository-wide
+policy and visibility matrix are in [`../PRIVACY.md`](../PRIVACY.md).
 
 Profile headline performance and public history both use persistent ranked
 performance. The profile benchmark panel is currently a placeholder. Private
@@ -1029,6 +1038,8 @@ future work.
 - **Legacy/transitional:** archive-model award evidence, private cost-basis
   archives, compatibility leaderboard fields, old achievement tables,
   prototype Yahoo, and competition/Arena code with no active frontend route.
+  Sprint and Arena are not currently product features and would only be
+  developed further if a future decision is made to add them.
 - **Removed:** Coach routes, services, and UI.
 - **Not implemented:** brokerage execution, AI advice, Apple HTTP login, live
   FX, finalized sprint results, refresh tokens, per-device session management,

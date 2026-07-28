@@ -29,7 +29,11 @@ func (h *Handler) Explore(w http.ResponseWriter, r *http.Request) {
 
 	out, err := h.svc.Explore(r.Context(), userID, filter)
 	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "could not load explore page")
+		if errors.Is(err, ErrRankedDataUnavailable) {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "ranked performance data unavailable")
+		} else {
+			httpx.WriteError(w, http.StatusInternalServerError, "could not load explore page")
+		}
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,6 +15,16 @@ import (
 type captureEmailSender struct {
 	verificationURL string
 	resetURL        string
+}
+
+type failingVerificationSender struct{ err error }
+
+func (s failingVerificationSender) SendVerification(context.Context, string, string) error {
+	return s.err
+}
+
+func (failingVerificationSender) SendPasswordReset(context.Context, string, string) error {
+	return nil
 }
 
 func (s *captureEmailSender) SendVerification(_ context.Context, _ string, value string) error {
@@ -60,6 +71,44 @@ func TestLifecycle_UnverifiedPasswordUserCannotLogin(t *testing.T) {
 
 	_, _, err = svc.Login("user@example.com", "StrongPassword123")
 	assert.ErrorIs(t, err, ErrEmailVerificationRequired)
+}
+
+func TestLifecycle_RegistrationEmailFailureRemainsRetryable(t *testing.T) {
+	repo := NewInMemoryUserRepository()
+	svc := NewService(repo, NewTokenManager("lifecycle-test-secret", time.Hour))
+	svc.ConfigureLifecycle(LifecycleConfig{
+		EmailSender: failingVerificationSender{err: errors.New("smtp unavailable")},
+	})
+
+	user, token, err := svc.Register(validInput())
+	require.NoError(t, err, "durably queued delivery must make registration successful")
+	assert.Empty(t, token)
+	require.NotNil(t, user)
+
+	stored, err := repo.FindByEmail(user.Email)
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, stored.ID)
+
+	repo.mu.Lock()
+	require.Len(t, repo.emailOutbox, 1)
+	assert.Nil(t, repo.emailOutbox[0].DeliveredAt)
+	assert.Contains(t, repo.emailOutbox[0].LastError, "smtp unavailable")
+	repo.emailOutbox[0].AvailableAt = time.Now().Add(-time.Second)
+	repo.mu.Unlock()
+
+	capture := &captureEmailSender{}
+	svc.ConfigureLifecycle(LifecycleConfig{EmailSender: capture})
+	delivered, err := svc.ProcessEmailOutboxOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, delivered)
+	assert.NotEmpty(t, capture.verificationURL)
+
+	verified, jwt, err := svc.VerifyEmail(
+		context.Background(), tokenFromURL(capture.verificationURL),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, verified.ID)
+	assert.NotEmpty(t, jwt)
 }
 
 func TestLifecycle_VerificationTokenSucceedsOnce(t *testing.T) {

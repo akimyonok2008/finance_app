@@ -116,8 +116,23 @@ func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, sy
 	// the corporate action.
 	sortActivitiesOldestFirst(activities)
 	sym := normalizeSymbol(symbol)
+
+	// A corrected buy/sell posts a NEW activity carrying the corrected
+	// quantity/price rather than editing the original (see
+	// Service.CorrectActivity), so the original's own quantity effect must be
+	// excluded here or it would double-count alongside the correction.
+	correctedAway := make(map[string]bool)
+	for _, a := range activities {
+		if id, _ := a.Metadata["correction_of_activity_id"].(string); id != "" {
+			correctedAway[id] = true
+		}
+	}
+
 	qty := money.ZeroQuantity()
 	for _, a := range activities {
+		if correctedAway[a.ID] {
+			continue
+		}
 		matches := instrumentID != "" && a.InstrumentID == instrumentID
 		if !matches && instrumentID == "" {
 			matches = normalizeSymbol(a.Symbol) == sym

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ardakimyonok/finance_app/internal/achievements"
@@ -27,6 +28,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/instrument"
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
+	"github.com/ardakimyonok/finance_app/internal/leaderlock"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
 	"github.com/ardakimyonok/finance_app/internal/moderation"
 	"github.com/ardakimyonok/finance_app/internal/money"
@@ -264,9 +266,21 @@ func benchmarkComparisonDataType(meta benchmark.BenchmarkEvaluationMetadata) str
 
 // portfolioSnapshotAdapter preserves the private daily cost-basis/composition
 // archive. Ranked leaderboards, profiles, and achievements do not consume it.
+//
+// SnapshotAllDaily is called on every worker tick (default 60s), but a
+// snapshot is only ever needed once per user per UTC day. Without the
+// SnapshottedUserIDsToday pre-filter below, every tick for the other ~23h59m
+// of the day would still pay for a full RecordDailySnapshot valuation
+// (portfolio.Service.Summary) per user, only to have CreateArchiveSnapshot's
+// unique index discard it — an unbounded, steady-state cost that scales with
+// total user count on a short ticker. batchSize additionally caps how many
+// still-pending users get valued in a single tick, so a burst right after UTC
+// midnight (when everyone is newly pending at once) is spread across several
+// ticks instead of one large pass.
 type portfolioSnapshotAdapter struct {
 	portfolio *portfolio.Service
 	users     *auth.Service
+	batchSize int // <= 0 means unbounded
 }
 
 func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, error) {
@@ -274,8 +288,21 @@ func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, er
 	if err != nil {
 		return 0, err
 	}
-	recorded := 0
+	done, err := a.portfolio.SnapshottedUserIDsToday(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pending := make([]auth.User, 0, len(users))
 	for _, u := range users {
+		if !done[u.ID] {
+			pending = append(pending, u)
+		}
+	}
+	if a.batchSize > 0 && len(pending) > a.batchSize {
+		pending = pending[:a.batchSize]
+	}
+	recorded := 0
+	for _, u := range pending {
 		wrote, err := a.portfolio.RecordDailySnapshot(ctx, u.ID)
 		if err != nil {
 			slog.Warn("daily snapshot failed for user", "user_id", u.ID, "error", err)
@@ -485,6 +512,11 @@ type repositories struct {
 	// performs block-creation + follow-removal as a single transaction. The
 	// memory provider falls back to safety.Service's non-coordinator path.
 	blockCoordinator safety.BlockCoordinator
+	// pgPool is non-nil only for the postgres provider. It backs the leader
+	// election used to keep the non-multi-instance-safe periodic jobs
+	// (leaderboard/sprint refresh, daily snapshots, quote refresh) running on
+	// exactly one replica; see internal/leaderlock.
+	pgPool *pgxpool.Pool
 }
 
 // authAdminAdapter bridges auth.Service to the moderation.UserAdmin and
@@ -630,6 +662,7 @@ func main() {
 			safety:           safety.NewPostgresRepository(pool),
 			moderation:       moderation.NewPostgresRepository(pool),
 			blockCoordinator: safety.NewPostgresBlockCoordinator(pool),
+			pgPool:           pool,
 		}
 		corpActionStorer = corpactions.NewPostgresStore(pool)
 		incomeStorer = income.NewPostgresStore(pool)
@@ -732,6 +765,14 @@ func main() {
 		GoogleVerifier: auth.NewGoogleVerifier(cfg.GoogleClientID),
 		AppleVerifier:  auth.NewAppleVerifier(cfg.AppleClientID),
 	})
+	// Reuses the JWT secret as an HMAC pepper for SignupIPHash — this is an
+	// internal correlation signal (multi-account detection), not a security
+	// boundary of its own, so a dedicated secret would be pure overhead.
+	authSvc.ConfigureSignupIPHashing(cfg.JWTSecret)
+	// Authentication mail is correctness-critical, not an optional analytics
+	// job. Registration commits its verification email to a durable outbox, so
+	// this processor runs even when ENABLE_BACKGROUND_WORKERS is false.
+	authSvc.StartEmailOutboxProcessor(ctx, 5*time.Second)
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
 	var identityProvider instrument.IdentityProvider
@@ -968,11 +1009,29 @@ func main() {
 	}
 
 	// --- background workers ---
+	// leaderboardSvc's own RefreshCache batching (SetRefreshBatchSize below)
+	// bounds per-tick valuation cost; the leader elector on top of that
+	// ensures only one replica pays that bounded cost at a time, rather than
+	// every replica doing its own full unpaginated pass. It's non-nil only
+	// for the postgres provider (repos.pgPool) — a nil *leaderlock.Elector is
+	// treated as "always leader", so memory-mode/single-instance dev is
+	// unaffected. The outbox and ranked-snapshot workers below are not gated:
+	// they already claim work per-row via SELECT ... FOR UPDATE SKIP LOCKED /
+	// evaluation claims and are safe across replicas without coordination.
+	var leader *leaderlock.Elector
+	if repos.pgPool != nil {
+		leader = leaderlock.New(repos.pgPool)
+		go leader.Run(ctx)
+	}
+	leaderboardSvc.SetRefreshBatchSize(cfg.RefreshBatchSize)
 	if optionalJobs {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
+		worker.SetLeaderElector(leader)
 		// Private daily portfolio archives remain available for owner analytics;
 		// ranked achievements use the independent canonical snapshot worker below.
-		worker.SetPortfolioSnapshotter(portfolioSnapshotAdapter{portfolio: portfolioSvc, users: authSvc})
+		worker.SetPortfolioSnapshotter(portfolioSnapshotAdapter{
+			portfolio: portfolioSvc, users: authSvc, batchSize: cfg.RefreshBatchSize,
+		})
 		worker.Start(ctx)
 		rankedWorker := jobs.NewRankedSnapshotWorker(rankedSnapshotJobAdapter{
 			users: authSvc, history: historySvc, achievements: achievementsSvc,
@@ -983,6 +1042,7 @@ func main() {
 	}
 	if cfg.EnableQuoteRefreshWorker {
 		quoteWorker := marketdata.NewQuoteRefreshWorker(marketDataSvc, repos.portfolio, cfg.QuoteRefreshInterval)
+		quoteWorker.SetLeaderElector(leader)
 		quoteWorker.Start(ctx)
 		slog.Info("quote refresh worker enabled", "interval", cfg.QuoteRefreshInterval.String())
 	} else {

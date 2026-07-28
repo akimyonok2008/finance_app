@@ -30,7 +30,7 @@ const (
 )
 
 // Report is the persisted report record. The reporter_user_id/reported_user_id
-// FK columns are nullable at the DB layer: a future hard account deletion
+// FK columns are nullable at the DB layer: a hard account deletion
 // sets the FK to NULL (see migration 0028_moderation_retention.sql) rather
 // than cascading the report away. Report surfaces that as ReporterUserID/
 // ReportedUserID == "" (a UUID is never empty, so this is an unambiguous
@@ -38,7 +38,7 @@ const (
 // already treats these as plain strings; ReporterDeleted/ReportedDeleted
 // spell the same fact out explicitly for callers that want it.
 // reporterSubjectID/reportedSubjectID are opaque, non-reversible per-user
-// ids assigned by that same migration's moderation_subject_ids table; they
+// ids copied from that same migration's moderation_subject_ids table; they
 // let a moderator recognize "the same reporter/target across multiple
 // reports" even after the live user_id has been nulled out. They are
 // deliberately unexported so no JSON encoding of Report (there is none
@@ -62,19 +62,25 @@ type Report struct {
 	ModeratorNotes    string
 }
 
-// Evidence is an immutable snapshot captured at report-creation time. It
-// remains available to moderators regardless of later hides/removals/account
-// deletion, and is never exposed through ordinary messaging endpoints.
+// Evidence is an immutable content snapshot captured at report-creation time.
+// Persistent repositories store only its opaque subject/conversation ids;
+// the raw identifier fields are nullable legacy read fields and are scrubbed
+// by migration 0030. Evidence remains available to moderators regardless of
+// later hides/removals/account deletion and is never exposed through ordinary
+// messaging endpoints.
 type Evidence struct {
-	ID               string
-	ReportID         string
-	MessageID        *string
-	ConversationID   *string
-	SenderID         *string
-	ParticipantIDs   []string
-	MessageText      *string
-	MessageCreatedAt *time.Time
-	ReportCreatedAt  time.Time
+	ID                    string
+	ReportID              string
+	MessageID             *string
+	ConversationID        *string
+	SenderID              *string
+	ParticipantIDs        []string
+	SenderSubjectID       string
+	ParticipantSubjectIDs []string
+	ConversationSubjectID string
+	MessageText           *string
+	MessageCreatedAt      *time.Time
+	ReportCreatedAt       time.Time
 }
 
 // Moderation action types.

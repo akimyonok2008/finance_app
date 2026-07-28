@@ -9,6 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/httpx"
 )
 
@@ -128,12 +129,21 @@ func (l *redisRateLimiter) allow(ctx context.Context, key string) bool {
 	return count <= int64(l.limit)
 }
 
+type rateLimitKeyFunc func(*http.Request) string
+
 // rateLimitMiddleware enforces limiter per client IP. It must run after
 // middleware.RealIP so r.RemoteAddr reflects the real client behind a proxy.
 func rateLimitMiddleware(limiter rateLimiter) func(http.Handler) http.Handler {
+	return rateLimitMiddlewareByKey(limiter, clientIP)
+}
+
+func rateLimitMiddlewareByKey(
+	limiter rateLimiter,
+	keyFor rateLimitKeyFunc,
+) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.allow(r.Context(), clientIP(r)) {
+			if !limiter.allow(r.Context(), keyFor(r)) {
 				httpx.WriteError(w, http.StatusTooManyRequests, "too many requests; try again shortly")
 				return
 			}
@@ -148,4 +158,11 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func authenticatedUserOrIPKey(r *http.Request) string {
+	if userID, ok := auth.UserIDFromContext(r.Context()); ok && userID != "" {
+		return "user:" + userID
+	}
+	return "ip:" + clientIP(r)
 }

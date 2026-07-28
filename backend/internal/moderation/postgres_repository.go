@@ -143,10 +143,24 @@ func (r *PostgresRepository) createReportTx(ctx context.Context, rep Report, ev 
 
 	if ev != nil {
 		ev.ReportID = saved.ID
+		senderSubject := reportedSubject
+		participantSubjects := make([]string, 0, len(ev.ParticipantIDs))
+		for _, participantID := range ev.ParticipantIDs {
+			participantSubject, err := subjectID(ctx, tx, participantID)
+			if err != nil {
+				return Report{}, err
+			}
+			participantSubjects = append(participantSubjects, participantSubject)
+		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO report_evidence (id, report_id, message_id, conversation_id, sender_id, participant_ids, message_text, message_created_at, report_created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`, ev.ID, ev.ReportID, ev.MessageID, ev.ConversationID, ev.SenderID, ev.ParticipantIDs, ev.MessageText, ev.MessageCreatedAt, ev.ReportCreatedAt); err != nil {
+			INSERT INTO report_evidence (
+				id, report_id, message_id, conversation_id, sender_id, participant_ids,
+				sender_subject_id, participant_subject_ids,
+				message_text, message_created_at, report_created_at
+			)
+			VALUES ($1, $2, $3, NULL, NULL, '{}', $4, $5, $6, $7, $8)
+		`, ev.ID, ev.ReportID, ev.MessageID, senderSubject, participantSubjects,
+			ev.MessageText, ev.MessageCreatedAt, ev.ReportCreatedAt); err != nil {
 			// Evidence insert failed: the whole transaction (including the
 			// report insert above) rolls back via the deferred Rollback, so
 			// no evidence-less report is left behind.
@@ -220,9 +234,15 @@ func nullIfEmpty(s string) *string {
 func (r *PostgresRepository) GetEvidence(ctx context.Context, reportID string) (Evidence, bool, error) {
 	var e Evidence
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, report_id, message_id, conversation_id, sender_id, participant_ids, message_text, message_created_at, report_created_at
+		SELECT id, report_id, message_id, conversation_id, sender_id, participant_ids,
+		       sender_subject_id, participant_subject_ids, conversation_subject_id,
+		       message_text, message_created_at, report_created_at
 		FROM report_evidence WHERE report_id = $1
-	`, reportID).Scan(&e.ID, &e.ReportID, &e.MessageID, &e.ConversationID, &e.SenderID, &e.ParticipantIDs, &e.MessageText, &e.MessageCreatedAt, &e.ReportCreatedAt)
+	`, reportID).Scan(
+		&e.ID, &e.ReportID, &e.MessageID, &e.ConversationID, &e.SenderID, &e.ParticipantIDs,
+		&e.SenderSubjectID, &e.ParticipantSubjectIDs, &e.ConversationSubjectID,
+		&e.MessageText, &e.MessageCreatedAt, &e.ReportCreatedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Evidence{}, false, nil
 	}
@@ -232,17 +252,67 @@ func (r *PostgresRepository) GetEvidence(ctx context.Context, reportID string) (
 	return e, true, nil
 }
 
-// ResolveReport locks the report row with SELECT ... FOR UPDATE and, if it
-// is not already resolved, persists the audit action, the report update,
-// and the notification in the same transaction as build's ExternalApply
-// side effect (the account mutation, e.g. suspend/ban, which lives behind
-// another package's own pool and so cannot literally join this pgx.Tx —
-// running it here, while the row lock is held and immediately before
-// commit, keeps the unsafe window to a single round trip instead of the
-// whole resolution). If anything fails, the transaction rolls back and the
-// report is left exactly as it was; a concurrent resolver blocked on the
-// row lock will then see it still unresolved and can retry safely. If the
-// report is already resolved, build is never invoked and no write happens.
+// applyResolutionEffect performs the durable account/content mutation through
+// the same transaction that owns the report row lock and audit writes. This is
+// intentionally SQL-local: calling auth/social repositories here would borrow
+// another pool connection and recreate the partial-commit window this command
+// is designed to eliminate.
+func applyResolutionEffect(ctx context.Context, tx pgx.Tx, write ResolveWrite) error {
+	var (
+		tag pgconn.CommandTag
+		err error
+	)
+	switch write.ActionType {
+	case ActionTemporarySuspension:
+		if write.SuspendUntil == nil {
+			return ErrInvalidAction
+		}
+		tag, err = tx.Exec(ctx, `
+			UPDATE users
+			SET suspended_until = $2, suspension_reason = $3, updated_at = $4
+			WHERE id = $1 AND deleted_at IS NULL
+		`, write.Action.TargetUserID, write.SuspendUntil, write.Action.Reason, write.Action.CreatedAt)
+	case ActionPermanentBan:
+		tag, err = tx.Exec(ctx, `
+			UPDATE users
+			SET banned_at = $2, ban_reason = $3, updated_at = $2
+			WHERE id = $1 AND deleted_at IS NULL
+		`, write.Action.TargetUserID, write.Action.CreatedAt, write.Action.Reason)
+	case ActionContentRemoval:
+		if write.Report.MessageID == nil {
+			// Account deletion may already have cascaded the live message away.
+			// The retained evidence and final moderation decision are still
+			// valid, so treating that deleted-target case as an idempotent
+			// content removal keeps the report operationally reviewable.
+			if write.Report.ReportedDeleted {
+				return nil
+			}
+			return ErrInvalidAction
+		}
+		tag, err = tx.Exec(ctx, `
+			UPDATE dm_messages
+			SET removed_at = $2, removed_by = $3
+			WHERE id = $1
+		`, *write.Report.MessageID, write.Action.CreatedAt, write.Action.ModeratorID)
+	default:
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 &&
+		!(write.ActionType == ActionContentRemoval && write.Report.ReportedDeleted) {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ResolveReport locks the report row with SELECT ... FOR UPDATE and, if it is
+// not already resolved, writes the audit action, notification, report update,
+// and account/content effect through one pgx.Tx. A commit failure therefore
+// rolls back the suspension, ban, or message tombstone together with every
+// moderation record. If the report is already resolved, build is never invoked
+// and no write happens.
 func (r *PostgresRepository) ResolveReport(ctx context.Context, reportID string, build ResolveBuilder) (Report, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -269,15 +339,18 @@ func (r *PostgresRepository) ResolveReport(ctx context.Context, reportID string,
 	if err != nil {
 		return Report{}, false, err
 	}
-	targetSubject, err := subjectID(ctx, tx, write.Action.TargetUserID)
-	if err != nil {
-		return Report{}, false, err
+	targetSubject := current.reportedSubjectID
+	if write.Action.TargetUserID != "" {
+		targetSubject, err = subjectID(ctx, tx, write.Action.TargetUserID)
+		if err != nil {
+			return Report{}, false, err
+		}
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO moderation_actions (id, moderator_id, target_user_id, report_id, action_type, reason, created_at, expires_at, moderator_subject_id, target_subject_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, write.Action.ID, write.Action.ModeratorID, write.Action.TargetUserID, write.Action.ReportID,
+	`, write.Action.ID, write.Action.ModeratorID, nullIfEmpty(write.Action.TargetUserID), write.Action.ReportID,
 		write.Action.ActionType, write.Action.Reason, write.Action.CreatedAt, write.Action.ExpiresAt,
 		moderatorSubject, targetSubject); err != nil {
 		return Report{}, false, err
@@ -311,10 +384,8 @@ func (r *PostgresRepository) ResolveReport(ctx context.Context, reportID string,
 		return Report{}, false, err
 	}
 
-	if write.ExternalApply != nil {
-		if err := write.ExternalApply(ctx); err != nil {
-			return Report{}, false, err
-		}
+	if err := applyResolutionEffect(ctx, tx, write); err != nil {
+		return Report{}, false, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

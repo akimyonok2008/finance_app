@@ -31,23 +31,19 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
   const [quantity, setQuantity] = useState("");
   const [executionPrice, setExecutionPrice] = useState("");
   const [fee, setFee] = useState("");
-  const [effectiveAt, setEffectiveAt] = useState("");
   const [showExecutionDetails, setShowExecutionDetails] = useState(false);
 
   // Optional execution details. Blank values are simply omitted, so the backend
-  // estimates the price from the latest quote, assumes no fee, and uses now.
+  // estimates the price from the latest quote and assumes no fee.
   const trimmedPrice = executionPrice.trim();
   const hasEnteredPrice =
     trimmedPrice !== "" && isValidDecimalString(trimmedPrice) && compareDecimal(trimmedPrice, "0") > 0;
   const trimmedFee = fee.trim();
   const hasEnteredFee =
     trimmedFee !== "" && isValidDecimalString(trimmedFee) && compareDecimal(trimmedFee, "0") >= 0;
-  const parsedDate = effectiveAt.trim() === "" ? null : new Date(effectiveAt);
-  const hasValidDate = parsedDate !== null && !Number.isNaN(parsedDate.getTime());
   const executionDetails = {
     ...(hasEnteredPrice ? { execution_price: trimmedPrice } : {}),
     ...(hasEnteredFee && compareDecimal(trimmedFee, "0") > 0 ? { fee: trimmedFee } : {}),
-    ...(hasValidDate ? { effective_at: parsedDate.toISOString() } : {}),
   };
 
   const trimmedQuantity = quantity.trim();
@@ -78,7 +74,6 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
       setQuantity("");
       setExecutionPrice("");
       setFee("");
-      setEffectiveAt("");
       setShowExecutionDetails(false);
     }
     onOpenChange(nextOpen);
@@ -171,15 +166,6 @@ export function ClosePositionDialog({ position, open, onOpenChange }: Props) {
                     value={fee}
                     placeholder="0"
                     onChange={(event) => setFee(event.target.value)}
-                  />
-                </label>
-                <label className="grid gap-1 text-zinc-300">
-                  Trade date — leave blank for now
-                  <input
-                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2"
-                    type="datetime-local"
-                    value={effectiveAt}
-                    onChange={(event) => setEffectiveAt(event.target.value)}
                   />
                 </label>
               </div>

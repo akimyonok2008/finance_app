@@ -65,6 +65,31 @@ beforeEach(() => {
   getReportMock.mockResolvedValue(report);
 });
 
+describe("ReportsQueuePage status filter", () => {
+  it("mounts the real Radix Select without an empty-string item value", async () => {
+    vi.doUnmock("@/components/ui/select");
+    vi.resetModules();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ReportsQueuePage: RealReportsQueuePage } = await import(
+      "@/pages/moderation/ReportsQueuePage"
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <RealReportsQueuePage />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("harassment")).toBeTruthy());
+
+    expect(
+      errorSpy.mock.calls.some((call) =>
+        String(call[0]).includes("must have a value prop that is not an empty string"),
+      ),
+    ).toBe(false);
+    errorSpy.mockRestore();
+  });
+});
+
 describe("ReportsQueuePage moderation resolution", () => {
   it("disables the resolution buttons while a resolve request is pending, preventing a double-submit", async () => {
     let resolvePromise: (v: unknown) => void = () => {};

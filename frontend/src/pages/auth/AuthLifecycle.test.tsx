@@ -12,6 +12,8 @@ const { VerifyEmailPage } = await import("@/pages/auth/VerifyEmailPage");
 const { ForgotPasswordPage } = await import("@/pages/auth/ForgotPasswordPage");
 const { ResetPasswordPage } = await import("@/pages/auth/ResetPasswordPage");
 const { apiRequest } = await import("@/api/client");
+const { loginWithEmailRequest } = await import("@/api/authApi");
+const { readStorage, writeStorage } = await import("@/auth/authStorage");
 
 function jsonResponse(body: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), {
@@ -102,5 +104,35 @@ describe("authentication lifecycle pages", () => {
       expect(localStorage.getItem("finance_app_token")).toBeNull();
       expect(localStorage.getItem("finance_app_user")).toBeNull();
     });
+  });
+
+  it("preserves moderator account state through login normalization and storage", async () => {
+    const response = {
+      token: "moderator-jwt",
+      user: {
+        id: "mod-1",
+        email: "moderator@example.com",
+        display_name: "Moderator",
+        email_verified: true,
+        has_password: true,
+        role: "moderator",
+        suspended_until: "2026-08-01T00:00:00Z",
+        suspension_reason: "review",
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn(() => jsonResponse(response)));
+
+    const session = await loginWithEmailRequest({
+      email: response.user.email,
+      password: "Password123",
+    });
+    expect(session.user).toMatchObject({
+      role: "moderator",
+      suspended_until: "2026-08-01T00:00:00Z",
+      suspension_reason: "review",
+    });
+
+    writeStorage(session.token, session.user);
+    expect(readStorage()).toEqual(session);
   });
 });

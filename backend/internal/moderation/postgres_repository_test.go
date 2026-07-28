@@ -133,6 +133,7 @@ func TestPostgresRepository_ResolveReportAtomicAndIdempotent(t *testing.T) {
 	saved, err := repo.CreateUserReport(ctx, rep)
 	require.NoError(t, err)
 
+	var expectedUntil time.Time
 	build := func(ctx context.Context, current Report) (ResolveWrite, error) {
 		now := time.Now().UTC()
 		reviewer := moderator
@@ -142,6 +143,7 @@ func TestPostgresRepository_ResolveReportAtomicAndIdempotent(t *testing.T) {
 		updated.ReviewedAt = &now
 		updated.ReviewerID = &reviewer
 		until := now.AddDate(0, 0, 3)
+		expectedUntil = until
 		return ResolveWrite{
 			Report: updated,
 			Action: ModerationAction{
@@ -156,6 +158,16 @@ func TestPostgresRepository_ResolveReportAtomicAndIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, applied)
 	assert.Equal(t, StatusResolvedActionTaken, final.Status)
+
+	var suspendedUntil *time.Time
+	var suspensionReason *string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT suspended_until, suspension_reason FROM users WHERE id = $1
+	`, target).Scan(&suspendedUntil, &suspensionReason))
+	require.NotNil(t, suspendedUntil)
+	require.NotNil(t, suspensionReason)
+	assert.WithinDuration(t, expectedUntil, *suspendedUntil, time.Second)
+	assert.Equal(t, "test", *suspensionReason)
 
 	// Retry: build must not be invoked again, and the existing resolution is
 	// returned unchanged (idempotent — no double action, no expiration drift).
@@ -174,6 +186,125 @@ func TestPostgresRepository_ResolveReportAtomicAndIdempotent(t *testing.T) {
 	assert.Equal(t, 1, actionCount, "exactly one audit action must exist after the retry")
 }
 
+func TestPostgresRepository_CommitFailureRollsBackDurableResolutionEffects(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	// A deferred constraint trigger raises from tx.Commit, after ResolveReport
+	// has already executed the account/content UPDATE. This reproduces the
+	// exact failure window that used to leave an external mutation committed.
+	_, err := pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION moderation_test_fail_resolution_commit()
+		RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.reason = 'force deferred commit failure' THEN
+				RAISE EXCEPTION 'forced deferred commit failure';
+			END IF;
+			RETURN NEW;
+		END
+		$$;
+		DROP TRIGGER IF EXISTS moderation_test_fail_resolution_commit ON moderation_actions;
+		CREATE CONSTRAINT TRIGGER moderation_test_fail_resolution_commit
+			AFTER INSERT ON moderation_actions
+			DEFERRABLE INITIALLY DEFERRED
+			FOR EACH ROW EXECUTE FUNCTION moderation_test_fail_resolution_commit();
+	`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS moderation_test_fail_resolution_commit ON moderation_actions;
+			DROP FUNCTION IF EXISTS moderation_test_fail_resolution_commit();
+		`)
+	})
+
+	for _, actionType := range []string{
+		ActionTemporarySuspension,
+		ActionPermanentBan,
+		ActionContentRemoval,
+	} {
+		t.Run(actionType, func(t *testing.T) {
+			repo := NewPostgresRepository(pool)
+			reporter := newPGUser(t, pool, "Reporter")
+			target := newPGUser(t, pool, "Target")
+			moderator := newPGUser(t, pool, "Moderator")
+			now := time.Now().UTC()
+
+			rep := Report{
+				ID: uuid.NewString(), ReporterUserID: reporter, ReportedUserID: target,
+				Category: CategoryHarassment, Status: StatusOpen, CreatedAt: now,
+			}
+			var messageID string
+			if actionType == ActionContentRemoval {
+				messageID = newPGMessage(t, pool, target, reporter, "reported message")
+				rep.MessageID = &messageID
+				_, err = repo.CreateMessageReport(ctx, rep, Evidence{
+					ID: uuid.NewString(), ReportID: rep.ID, MessageID: &messageID,
+					ParticipantIDs: []string{reporter, target}, ReportCreatedAt: now,
+				})
+			} else {
+				_, err = repo.CreateUserReport(ctx, rep)
+			}
+			require.NoError(t, err)
+
+			_, applied, err := repo.ResolveReport(ctx, rep.ID, func(_ context.Context, current Report) (ResolveWrite, error) {
+				reviewer := moderator
+				updated := current
+				updated.Status = StatusResolvedActionTaken
+				updated.Decision = "action_taken"
+				updated.ReviewedAt = &now
+				updated.ReviewerID = &reviewer
+				var until *time.Time
+				if actionType == ActionTemporarySuspension {
+					value := now.Add(72 * time.Hour)
+					until = &value
+				}
+				return ResolveWrite{
+					Report: updated,
+					Action: ModerationAction{
+						ID: uuid.NewString(), ModeratorID: moderator, TargetUserID: target,
+						ReportID: &current.ID, ActionType: actionType,
+						Reason: "force deferred commit failure", CreatedAt: now, ExpiresAt: until,
+					},
+					ActionType: actionType, SuspendUntil: until,
+				}, nil
+			})
+			require.Error(t, err)
+			assert.False(t, applied)
+
+			current, getErr := repo.GetReport(ctx, rep.ID)
+			require.NoError(t, getErr)
+			assert.Equal(t, StatusOpen, current.Status)
+
+			var actionCount int
+			require.NoError(t, pool.QueryRow(ctx,
+				`SELECT count(*) FROM moderation_actions WHERE report_id = $1`, rep.ID,
+			).Scan(&actionCount))
+			assert.Zero(t, actionCount)
+
+			switch actionType {
+			case ActionTemporarySuspension:
+				var affected bool
+				require.NoError(t, pool.QueryRow(ctx,
+					`SELECT suspended_until IS NOT NULL FROM users WHERE id = $1`, target,
+				).Scan(&affected))
+				assert.False(t, affected, "commit failure must roll back suspension")
+			case ActionPermanentBan:
+				var affected bool
+				require.NoError(t, pool.QueryRow(ctx,
+					`SELECT banned_at IS NOT NULL FROM users WHERE id = $1`, target,
+				).Scan(&affected))
+				assert.False(t, affected, "commit failure must roll back ban")
+			case ActionContentRemoval:
+				var affected bool
+				require.NoError(t, pool.QueryRow(ctx,
+					`SELECT removed_at IS NOT NULL FROM dm_messages WHERE id = $1`, messageID,
+				).Scan(&affected))
+				assert.False(t, affected, "commit failure must roll back message removal")
+			}
+		})
+	}
+}
+
 func TestPostgresRepository_SetNullOnAccountHardDeleteRetainsReport(t *testing.T) {
 	pool := testPool(t)
 	repo := NewPostgresRepository(pool)
@@ -181,12 +312,25 @@ func TestPostgresRepository_SetNullOnAccountHardDeleteRetainsReport(t *testing.T
 
 	reporter := newPGUser(t, pool, "Reporter")
 	target := newPGUser(t, pool, "Target")
+	moderator := newPGUser(t, pool, "Moderator")
+	messageID := newPGMessage(t, pool, target, reporter, "retained evidence")
+	var conversationID string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT conversation_id FROM dm_messages WHERE id = $1`, messageID,
+	).Scan(&conversationID))
 
 	rep := Report{
 		ID: uuid.NewString(), ReporterUserID: reporter, ReportedUserID: target,
-		Category: CategoryHarassment, Status: StatusOpen, CreatedAt: time.Now().UTC(),
+		MessageID: &messageID, Category: CategoryHarassment,
+		Status: StatusOpen, CreatedAt: time.Now().UTC(),
 	}
-	saved, err := repo.CreateUserReport(ctx, rep)
+	senderID := target
+	saved, err := repo.CreateMessageReport(ctx, rep, Evidence{
+		ID: uuid.NewString(), ReportID: rep.ID, MessageID: &messageID,
+		ConversationID: &conversationID, SenderID: &senderID,
+		ParticipantIDs:  []string{reporter, target},
+		ReportCreatedAt: rep.CreatedAt,
+	})
 	require.NoError(t, err)
 
 	// Simulate a hard delete of the reported (target) account directly —
@@ -205,4 +349,65 @@ func TestPostgresRepository_SetNullOnAccountHardDeleteRetainsReport(t *testing.T
 	var subjectID string
 	require.NoError(t, pool.QueryRow(ctx, `SELECT reported_subject_id FROM user_reports WHERE id = $1`, saved.ID).Scan(&subjectID))
 	assert.NotEmpty(t, subjectID, "the pseudonymous subject id must be retained even though the live FK is now null")
+
+	var (
+		rawSender             *string
+		rawConversation       *string
+		rawParticipants       []string
+		senderSubject         string
+		participantSubjectIDs []string
+		conversationSubject   string
+	)
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT sender_id, conversation_id, participant_ids, sender_subject_id,
+		       participant_subject_ids, conversation_subject_id
+		FROM report_evidence WHERE report_id = $1
+	`, saved.ID).Scan(
+		&rawSender, &rawConversation, &rawParticipants, &senderSubject,
+		&participantSubjectIDs, &conversationSubject,
+	))
+	assert.Nil(t, rawSender)
+	assert.Nil(t, rawConversation)
+	assert.Empty(t, rawParticipants)
+	assert.Equal(t, subjectID, senderSubject)
+	assert.Contains(t, participantSubjectIDs, subjectID)
+	assert.NotEmpty(t, conversationSubject)
+
+	var mappingCount int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM moderation_subject_ids WHERE user_id = $1`, target,
+	).Scan(&mappingCount))
+	assert.Zero(t, mappingCount, "account erasure must destroy the raw user-to-subject mapping")
+
+	// A final content-removal decision remains writable even though account
+	// deletion already cascaded the live message away. The audit row copies
+	// the report's subject id and leaves target_user_id NULL.
+	_, applied, err := repo.ResolveReport(ctx, saved.ID, func(_ context.Context, current Report) (ResolveWrite, error) {
+		now := time.Now().UTC()
+		reviewer := moderator
+		updated := current
+		updated.Status = StatusResolvedActionTaken
+		updated.Decision = "action_taken"
+		updated.ReviewedAt = &now
+		updated.ReviewerID = &reviewer
+		return ResolveWrite{
+			Report: updated,
+			Action: ModerationAction{
+				ID: uuid.NewString(), ModeratorID: moderator, TargetUserID: current.ReportedUserID,
+				ReportID: &current.ID, ActionType: ActionContentRemoval, CreatedAt: now,
+			},
+			ActionType: ActionContentRemoval,
+		}, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	var actionTarget *string
+	var actionTargetSubject string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT target_user_id, target_subject_id
+		FROM moderation_actions WHERE report_id = $1
+	`, saved.ID).Scan(&actionTarget, &actionTargetSubject))
+	assert.Nil(t, actionTarget)
+	assert.Equal(t, subjectID, actionTargetSubject)
 }

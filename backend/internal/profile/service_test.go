@@ -70,22 +70,44 @@ func (h testHistory) RankedHistory(_ context.Context, userID string, _, _ time.T
 	return append([]PublicPerformancePoint(nil), h[userID]...), nil
 }
 
+type testRanked map[string]RankedPerformance
+
+func (r testRanked) CurrentRankedPerformance(_ context.Context, userID string) (RankedPerformance, error) {
+	if performance, ok := r[userID]; ok {
+		return performance, nil
+	}
+	return RankedPerformance{RankedIndex: 100}, nil
+}
+
+type failingRanked struct{ err error }
+
+func (f failingRanked) CurrentRankedPerformance(context.Context, string) (RankedPerformance, error) {
+	return RankedPerformance{}, f.err
+}
+
+func useTestRanked(svc *Service) {
+	svc.SetRankedPerformanceProvider(testRanked{
+		"u1": {RankedIndex: 121.5, RankedReturnPercentage: 21.5},
+		"u2": {RankedIndex: 100, RankedReturnPercentage: 0},
+	})
+}
+
 func testService() *Service {
 	svc := NewService(NewInMemoryRepository(), testUsers{
 		"u1": {ID: "u1", Email: "private@example.com", DisplayName: "Alpha User", AvatarKey: "blue"},
 		"u2": {ID: "u2", Email: "other@example.com", DisplayName: "Beta User", AvatarKey: "green"},
 	}, testSummaries{
 		"u1": {
-			UserID: "u1", PortfolioID: "secret-portfolio", CurrentValue: 1000,
-			TotalCostBasis: 800, GainLoss: 200, GainLossPercentage: 25, PortfolioIndex: 125,
+			UserID: "u1", PortfolioID: "secret-portfolio", CurrentValue: money.AmountFromFloat64(1000),
+			TotalCostBasis: money.AmountFromFloat64(800), GainLoss: money.AmountFromFloat64(200), GainLossPercentage: 25, PortfolioIndex: 125,
 			Positions: []portfolio.PositionSummary{
 				{PositionID: "secret-position", Symbol: "AAPL", AssetType: "stock", Quantity: money.QuantityFromFloat64(10), AverageBuyPrice: money.PriceFromFloat64(50), CostBasisBase: money.AmountFromFloat64(480), CurrentValueBase: money.AmountFromFloat64(700), GainLossBase: money.AmountFromFloat64(220), CurrentPriceCurrency: "USD"},
 				{PositionID: "secret-position-2", Symbol: "BTC-USD", AssetType: "crypto", Quantity: money.QuantityFromFloat64(1), AverageBuyPrice: money.PriceFromFloat64(100), CostBasisBase: money.AmountFromFloat64(320), CurrentValueBase: money.AmountFromFloat64(300), GainLossBase: money.AmountFromFloat64(-20), CurrentPriceCurrency: "USD"},
 			},
-			ActiveCostBasisBase:    800,
-			ActiveCurrentValueBase: 1000,
-			UnrealizedGainLossBase: 200,
-			RealizedGainLossBase:   100,
+			ActiveCostBasisBase:    money.AmountFromFloat64(800),
+			ActiveCurrentValueBase: money.AmountFromFloat64(1000),
+			UnrealizedGainLossBase: money.AmountFromFloat64(200),
+			RealizedGainLossBase:   money.AmountFromFloat64(100),
 			ClosedPositions: []portfolio.ClosedPositionSummary{
 				{
 					ID: "secret-closed-position", Symbol: "MSFT", AssetType: "stock",
@@ -97,6 +119,7 @@ func testService() *Service {
 			},
 		},
 	})
+	useTestRanked(svc)
 	svc.SetPerformanceHistoryProvider(testHistory{
 		"u1": {
 			{CapturedAt: "2026-07-01T00:00:00Z", PortfolioIndex: 118.12, ReturnPercentage: 18.12},
@@ -223,6 +246,57 @@ func TestPublicProfilePrivacyVisibilityAndHiddenWeights(t *testing.T) {
 	assert.NotContains(t, string(body), "secret-portfolio")
 }
 
+func TestPublicProfilePerformanceComesOnlyFromRankedProvider(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	require.NoError(t, repo.Create(ctx, Profile{
+		UserID: "u1", Handle: "ranked_user", DisplayName: "Ranked User",
+		StrategyTag: DefaultStrategyTag, IsPublic: true,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}))
+	svc := NewService(repo, testUsers{"u1": {ID: "u1"}}, testSummaries{
+		"u1": {PortfolioIndex: 187, GainLossPercentage: 87},
+	})
+	svc.SetRankedPerformanceProvider(testRanked{
+		"u1": {RankedIndex: 112.34, RankedReturnPercentage: 12.34},
+	})
+
+	out, err := svc.GetPublic(ctx, "", "ranked_user")
+	require.NoError(t, err)
+	assert.Equal(t, 112.34, out.PortfolioIndex)
+	assert.Equal(t, 12.34, out.ReturnPercentage)
+}
+
+func TestPublicProfileFailsClosedWhenRankedDataUnavailable(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryRepository()
+	require.NoError(t, repo.Create(ctx, Profile{
+		UserID: "u1", Handle: "ranked_user", DisplayName: "Ranked User",
+		StrategyTag: DefaultStrategyTag, IsPublic: true,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}))
+	summaries := testSummaries{
+		"u1": {PortfolioIndex: 187, GainLossPercentage: 87},
+	}
+
+	t.Run("provider error", func(t *testing.T) {
+		svc := NewService(repo, testUsers{"u1": {ID: "u1"}}, summaries)
+		svc.SetRankedPerformanceProvider(failingRanked{err: errors.New("ranked store offline")})
+
+		out, err := svc.GetPublic(ctx, "", "ranked_user")
+		assert.ErrorIs(t, err, ErrRankedDataUnavailable)
+		assert.Equal(t, PublicProfile{}, out)
+	})
+
+	t.Run("provider not configured", func(t *testing.T) {
+		svc := NewService(repo, testUsers{"u1": {ID: "u1"}}, summaries)
+
+		out, err := svc.GetPublic(ctx, "", "ranked_user")
+		assert.ErrorIs(t, err, ErrRankedDataUnavailable)
+		assert.Equal(t, PublicProfile{}, out)
+	})
+}
+
 // TestPublicInfoForUser_PrefersCheapWeightsProvider is the leaderboard
 // enrichment path (PublicInfoForUser). When a PublicWeightsProvider is wired,
 // it must be used instead of the full ledger-scanning SummaryProvider: that
@@ -235,18 +309,19 @@ func TestPublicInfoForUser_PrefersCheapWeightsProvider(t *testing.T) {
 
 	var fullCalls int
 	full := countingSummaries{calls: &fullCalls, data: map[string]*portfolio.PortfolioSummary{
-		"u1": {CurrentValue: 1000, Positions: []portfolio.PositionSummary{
+		"u1": {CurrentValue: money.AmountFromFloat64(1000), Positions: []portfolio.PositionSummary{
 			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 		}},
 	}}
 	var cheapCalls int
 	cheap := countingWeights{calls: &cheapCalls, data: map[string]*portfolio.PortfolioSummary{
-		"u1": {CurrentValue: 500, Positions: []portfolio.PositionSummary{
+		"u1": {CurrentValue: money.AmountFromFloat64(500), Positions: []portfolio.PositionSummary{
 			{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(500), CurrentPriceCurrency: "USD"},
 		}},
 	}}
 
 	svc := NewService(repo, users, full)
+	useTestRanked(svc)
 	svc.SetPublicWeightsProvider(cheap)
 
 	_, err := svc.GetMe(ctx, "u1")
@@ -272,10 +347,11 @@ func TestPublicInfoForUser_FallsBackToSummaryProviderWhenUnwired(t *testing.T) {
 	ctx := context.Background()
 	repo := NewInMemoryRepository()
 	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
-	full := testSummaries{"u1": {CurrentValue: 1000, Positions: []portfolio.PositionSummary{
+	full := testSummaries{"u1": {CurrentValue: money.AmountFromFloat64(1000), Positions: []portfolio.PositionSummary{
 		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 	}}}
 	svc := NewService(repo, users, full)
+	useTestRanked(svc)
 	// SetPublicWeightsProvider intentionally left unset.
 
 	_, err := svc.GetMe(ctx, "u1")
@@ -302,14 +378,15 @@ func TestExploreSummaryProvider_IsIsolatedFromOwnerAndPublicViews(t *testing.T) 
 	repo := NewInMemoryRepository()
 	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
 
-	shared := testSummaries{"u1": {CurrentValue: 1000, PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
+	shared := testSummaries{"u1": {CurrentValue: money.AmountFromFloat64(1000), PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
 		{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 	}}}
-	exploreOnly := testSummaries{"u1": {CurrentValue: 2000, PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
+	exploreOnly := testSummaries{"u1": {CurrentValue: money.AmountFromFloat64(2000), PortfolioIndex: 100, Positions: []portfolio.PositionSummary{
 		{Symbol: "MSFT", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(2000), CurrentPriceCurrency: "USD"},
 	}}}
 
 	svc := NewService(repo, users, shared)
+	useTestRanked(svc)
 	svc.SetExploreSummaryProvider(exploreOnly)
 
 	_, err := svc.GetMe(ctx, "u1")
@@ -339,7 +416,7 @@ func TestExploreSummaryProvider_DefaultsToSharedProviderWhenUnset(t *testing.T) 
 	// SetExploreSummaryProvider intentionally left unset.
 	resolved, err := svc.exploreSummaryProvider().GetSummary(context.Background(), "u1")
 	require.NoError(t, err)
-	assert.Equal(t, 1000.0, resolved.CurrentValue)
+	assert.Equal(t, 1000.0, resolved.CurrentValue.Float64())
 }
 
 // TestPublicProfile_DisclosesSelfReportedExecutionPrices: the ranked index
@@ -352,13 +429,14 @@ func TestPublicProfile_DisclosesSelfReportedExecutionPrices(t *testing.T) {
 	repo := NewInMemoryRepository()
 	users := testUsers{"u1": {ID: "u1", Email: "a@example.com", DisplayName: "Alpha User", AvatarKey: "blue"}}
 	flagged := testSummaries{"u1": {
-		CurrentValue: 1000, PortfolioIndex: 110, ActiveCostBasisBase: 800, ActiveCurrentValueBase: 1000,
-		UnrealizedGainLossBase: 200, HasSelfReportedExecutionPrice: true,
+		CurrentValue: money.AmountFromFloat64(1000), PortfolioIndex: 110, ActiveCostBasisBase: money.AmountFromFloat64(800), ActiveCurrentValueBase: money.AmountFromFloat64(1000),
+		UnrealizedGainLossBase: money.AmountFromFloat64(200), HasSelfReportedExecutionPrice: true,
 		Positions: []portfolio.PositionSummary{
 			{Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(1000), CurrentPriceCurrency: "USD"},
 		},
 	}}
 	svc := NewService(repo, users, flagged)
+	useTestRanked(svc)
 
 	_, err := svc.GetMe(ctx, "u1")
 	require.NoError(t, err)

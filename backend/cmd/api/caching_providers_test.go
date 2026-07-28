@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/ttlcache"
 )
@@ -21,7 +22,7 @@ func (c *countingWeightsSource) GetPublicWeights(context.Context, string) (*port
 }
 
 func TestCachingWeightsProvider_DedupesRepeatedCalls(t *testing.T) {
-	src := &countingWeightsSource{value: &portfolio.PortfolioSummary{CurrentValue: 100}}
+	src := &countingWeightsSource{value: &portfolio.PortfolioSummary{CurrentValue: money.AmountFromFloat64(100)}}
 	cached := cachingWeightsProvider{inner: src, cache: ttlcache.New[*portfolio.PortfolioSummary](leaderboardCacheTTL)}
 
 	for i := 0; i < 5; i++ {
@@ -29,7 +30,7 @@ func TestCachingWeightsProvider_DedupesRepeatedCalls(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if summary.CurrentValue != 100 {
+		if summary.CurrentValue.Float64() != 100 {
 			t.Fatalf("got %v, want 100", summary.CurrentValue)
 		}
 	}
@@ -39,7 +40,7 @@ func TestCachingWeightsProvider_DedupesRepeatedCalls(t *testing.T) {
 }
 
 func TestCachingWeightsProvider_DifferentUsersDoNotShareEntries(t *testing.T) {
-	src := &countingWeightsSource{value: &portfolio.PortfolioSummary{CurrentValue: 100}}
+	src := &countingWeightsSource{value: &portfolio.PortfolioSummary{CurrentValue: money.AmountFromFloat64(100)}}
 	cached := cachingWeightsProvider{inner: src, cache: ttlcache.New[*portfolio.PortfolioSummary](leaderboardCacheTTL)}
 
 	if _, err := cached.GetPublicWeights(context.Background(), "u1"); err != nil {
@@ -78,7 +79,7 @@ func (c *countingSummarySource) GetSummary(context.Context, string) (*portfolio.
 }
 
 func TestCachingSummaryProvider_DedupesRepeatedCalls(t *testing.T) {
-	src := &countingSummarySource{value: &portfolio.PortfolioSummary{CurrentValue: 250}}
+	src := &countingSummarySource{value: &portfolio.PortfolioSummary{CurrentValue: money.AmountFromFloat64(250)}}
 	cached := cachingSummaryProvider{inner: src, cache: ttlcache.New[*portfolio.PortfolioSummary](leaderboardCacheTTL)}
 
 	for i := 0; i < 5; i++ {

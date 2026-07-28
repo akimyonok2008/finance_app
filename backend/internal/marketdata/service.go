@@ -187,11 +187,23 @@ func (s *Service) GetLatestPrice(ctx context.Context, symbol string) (*prices.Pr
 }
 
 func (s *Service) RefreshSymbols(ctx context.Context, symbols []string) (int, error) {
-	resp, err := s.Quotes(ctx, symbols)
-	if err != nil {
-		return 0, err
+	normalized := dedupeSymbols(symbols)
+	if len(normalized) == 0 {
+		return 0, nil
 	}
-	return len(resp.Quotes), nil
+	totalQuotes := 0
+	for i := 0; i < len(normalized); i += s.cfg.MaxQuoteBatchSize {
+		end := i + s.cfg.MaxQuoteBatchSize
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		resp, err := s.Quotes(ctx, normalized[i:end])
+		if err != nil {
+			return totalQuotes, err
+		}
+		totalQuotes += len(resp.Quotes)
+	}
+	return totalQuotes, nil
 }
 
 func mergeInstruments(a, b []Instrument, query string, limit int) []Instrument {

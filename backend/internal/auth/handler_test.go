@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -136,6 +137,19 @@ func TestHandlerLogin_Returns401ForUnknownEmail(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestHandlerLogin_Returns403WithoutTokenForBannedAccount(t *testing.T) {
+	_, svc, router := newTestHandler()
+	reg := registerAndLogin(t, router)
+	require.NoError(t, svc.Ban(context.Background(), reg.User.ID, "permanent ban"))
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), ErrAccountBanned.Error())
+	assert.NotContains(t, rec.Body.String(), `"token"`)
+}
+
 func TestHandlerForgotPasswordDoesNotRevealAccountExistence(t *testing.T) {
 	_, _, router := newTestHandler()
 	doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
@@ -207,6 +221,29 @@ func TestHandlerGoogle_ReturnsJWTForVerifiedCredential(t *testing.T) {
 	assert.Equal(t, "Google User", resp.User.DisplayName)
 	assertNoPasswordLeak(t, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "google-sub-1")
+}
+
+func TestHandlerGoogle_Returns403WithoutTokenForBannedAccount(t *testing.T) {
+	_, svc, router := newTestHandler()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	require.NoError(t, svc.repo.CreateIdentity(&AuthIdentity{
+		ID: "identity-banned-handler", UserID: user.ID, Provider: ProviderGoogle,
+		ProviderSubject: "google-sub-banned-handler", Email: user.Email, EmailVerified: true,
+	}))
+	require.NoError(t, svc.Ban(context.Background(), user.ID, "permanent ban"))
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Subject: "google-sub-banned-handler", Email: user.Email, EmailVerified: true,
+		}},
+	})
+
+	rec := doJSON(t, router, http.MethodPost, "/auth/google", `{"credential":"id-token"}`, "")
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), ErrAccountBanned.Error())
+	assert.NotContains(t, rec.Body.String(), `"token"`)
 }
 
 func TestHandlerMe_Returns200WithValidToken(t *testing.T) {

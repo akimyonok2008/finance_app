@@ -12,7 +12,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
-func (s *Service) publicProjection(ctx context.Context, p Profile) PublicProfile {
+func (s *Service) publicProjection(ctx context.Context, p Profile) (PublicProfile, error) {
 	out := PublicProfile{
 		Handle:                p.Handle,
 		DisplayName:           p.DisplayName,
@@ -29,6 +29,16 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) PublicProfile
 		Insights:              s.buildProfileInsights(ctx, nil, p.ShowPublicWeights),
 	}
 
+	if s.ranked == nil {
+		return PublicProfile{}, ErrRankedDataUnavailable
+	}
+	ranked, err := s.ranked.CurrentRankedPerformance(ctx, p.UserID)
+	if err != nil {
+		return PublicProfile{}, ErrRankedDataUnavailable
+	}
+	out.PortfolioIndex = round2(ranked.RankedIndex)
+	out.ReturnPercentage = round2(ranked.RankedReturnPercentage)
+
 	hasSummary := false
 
 	// Public performance is the PERSISTENT ranked index (the single trusted source
@@ -37,14 +47,6 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) PublicProfile
 	// user opted in.
 	if summary, err := s.summaries.GetSummary(ctx, p.UserID); err == nil && summary != nil {
 		hasSummary = true
-		out.PortfolioIndex = round2(summary.PortfolioIndex)
-		out.ReturnPercentage = round2(summary.GainLossPercentage)
-		if s.ranked != nil {
-			if rp, err := s.ranked.CurrentRankedPerformance(ctx, p.UserID); err == nil {
-				out.PortfolioIndex = round2(rp.RankedIndex)
-				out.ReturnPercentage = round2(rp.RankedReturnPercentage)
-			}
-		}
 		out.PublicWeights, out.AssetTypeExposure, out.CurrencyExposure, out.Concentration = buildComposition(summary)
 		out.Insights = s.buildProfileInsights(ctx, summary, p.ShowPublicWeights)
 		if !p.ShowPublicWeights {
@@ -92,7 +94,7 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) PublicProfile
 			out.GlobalRank = &rank
 		}
 	}
-	return out
+	return out, nil
 }
 
 type contributionSignal struct {
@@ -137,10 +139,13 @@ func (s *Service) buildProfileInsights(ctx context.Context, summary *portfolio.P
 	}
 	insights.BenchmarkContext.InvestorIndex = round2(summary.PortfolioIndex)
 
-	openPoints := contributionPoints(summary.UnrealizedGainLossBase, summary.TotalCostBasis)
-	closedPoints := contributionPoints(summary.RealizedGainLossBase, summary.TotalCostBasis)
-	openReturn := percentage(summary.UnrealizedGainLossBase, summary.ActiveCostBasisBase)
-	closedReturn := percentage(summary.RealizedGainLossBase, summary.ClosedCostBasisBase)
+	// The *.Float64() calls below are a documented boundary conversion:
+	// internal/profile is out of scope for the exact-decimal migration and
+	// only ever does display-only percentage/points math with these values.
+	openPoints := contributionPoints(summary.UnrealizedGainLossBase.Float64(), summary.TotalCostBasis.Float64())
+	closedPoints := contributionPoints(summary.RealizedGainLossBase.Float64(), summary.TotalCostBasis.Float64())
+	openReturn := percentage(summary.UnrealizedGainLossBase.Float64(), summary.ActiveCostBasisBase.Float64())
+	closedReturn := percentage(summary.RealizedGainLossBase.Float64(), summary.ClosedCostBasisBase.Float64())
 	insights.OpenClosedPerformance = ProfileOpenClosedPerformance{
 		OpenReturnPercentage:       round2(openReturn),
 		ClosedReturnPercentage:     round2(closedReturn),
@@ -162,9 +167,10 @@ func (s *Service) buildProfileInsights(ctx context.Context, summary *portfolio.P
 // side); only symbol, asset type, currency, and percentage weight cross into the
 // scorer — no monetary values, quantities, or identifiers.
 func dnaInputsFromSummary(summary *portfolio.PortfolioSummary) []dna.PositionDNAInput {
-	if summary == nil || summary.CurrentValue <= 0 {
+	if summary == nil || summary.CurrentValue.Sign() <= 0 {
 		return nil
 	}
+	currentValue := summary.CurrentValue.Float64()
 	inputs := make([]dna.PositionDNAInput, 0, len(summary.Positions))
 	for _, position := range summary.Positions {
 		if position.CurrentValueBase.Sign() <= 0 {
@@ -174,15 +180,15 @@ func dnaInputsFromSummary(summary *portfolio.PortfolioSummary) []dna.PositionDNA
 			Symbol:    position.Symbol,
 			AssetType: position.AssetType,
 			Currency:  position.CurrentPriceCurrency,
-			Weight:    position.CurrentValueBase.Float64() / summary.CurrentValue,
+			Weight:    position.CurrentValueBase.Float64() / currentValue,
 		})
 	}
 	return inputs
 }
 
 func buildPerformanceDrivers(summary *portfolio.PortfolioSummary, focusAreas []string, showComposition bool) ProfilePerformanceDrivers {
-	openPoints := contributionPoints(summary.UnrealizedGainLossBase, summary.TotalCostBasis)
-	closedPoints := contributionPoints(summary.RealizedGainLossBase, summary.TotalCostBasis)
+	openPoints := contributionPoints(summary.UnrealizedGainLossBase.Float64(), summary.TotalCostBasis.Float64())
+	closedPoints := contributionPoints(summary.RealizedGainLossBase.Float64(), summary.TotalCostBasis.Float64())
 	source := "open positions"
 	if math.Abs(closedPoints) > math.Abs(openPoints) {
 		source = "closed positions"
@@ -232,16 +238,17 @@ func buildPerformanceDrivers(summary *portfolio.PortfolioSummary, focusAreas []s
 
 func buildContributors(summary *portfolio.PortfolioSummary) ([]ProfileContributor, []ProfileContributor) {
 	signals := make([]contributionSignal, 0, len(summary.Positions)+len(summary.ClosedPositions))
+	totalCostBasis := summary.TotalCostBasis.Float64()
 	for _, position := range summary.Positions {
 		signals = append(signals, contributionSignal{
 			symbol: position.Symbol,
-			points: contributionPoints(position.GainLossBase.Float64(), summary.TotalCostBasis),
+			points: contributionPoints(position.GainLossBase.Float64(), totalCostBasis),
 		})
 	}
 	for _, position := range summary.ClosedPositions {
 		signals = append(signals, contributionSignal{
 			symbol: position.Symbol,
-			points: contributionPoints(position.RealizedGainLossBase.Float64(), summary.TotalCostBasis),
+			points: contributionPoints(position.RealizedGainLossBase.Float64(), totalCostBasis),
 		})
 	}
 	contributors := []ProfileContributor{}
@@ -326,26 +333,27 @@ func buildClosedPositions(positions []portfolio.ClosedPositionSummary) []PublicC
 
 func buildComposition(summary *portfolio.PortfolioSummary) ([]PublicWeight, []Exposure, []Exposure, Concentration) {
 	weights := []PublicWeight{}
-	if summary == nil || summary.CurrentValue <= 0 {
+	if summary == nil || summary.CurrentValue.Sign() <= 0 {
 		return weights, []Exposure{}, []Exposure{}, Concentration{}
 	}
+	currentValue := summary.CurrentValue.Float64()
 
 	assetTypes := map[string]float64{}
 	currencies := map[string]float64{}
 	for _, position := range summary.Positions {
-		weight := round2(position.CurrentValueBase.Float64() / summary.CurrentValue * 100)
+		weight := round2(position.CurrentValueBase.Float64() / currentValue * 100)
 		weights = append(weights, PublicWeight{
 			Symbol: position.Symbol, AssetType: position.AssetType, Weight: weight,
 		})
 		assetTypes[position.AssetType] += position.CurrentValueBase.Float64()
 		currencies[position.CurrentPriceCurrency] += position.CurrentValueBase.Float64()
 	}
-	if summary.TotalCashValueBase > 0 {
+	if summary.TotalCashValueBase.Sign() > 0 {
 		weights = append(weights, PublicWeight{
 			Symbol: "CASH", AssetType: portfolio.AssetTypeCash,
-			Weight: round2(summary.TotalCashValueBase / summary.CurrentValue * 100),
+			Weight: round2(summary.TotalCashValueBase.Float64() / currentValue * 100),
 		})
-		assetTypes[portfolio.AssetTypeCash] += summary.TotalCashValueBase
+		assetTypes[portfolio.AssetTypeCash] += summary.TotalCashValueBase.Float64()
 		for _, balance := range summary.CashBalances {
 			// balance.ValueBase.Float64() is a documented boundary conversion:
 			// internal/profile is out of scope for this section's decimal
@@ -369,7 +377,7 @@ func buildComposition(summary *portfolio.PortfolioSummary) ([]PublicWeight, []Ex
 	}
 	concentration.TopThree = round2(concentration.TopThree)
 
-	return weights, exposureList(assetTypes, summary.CurrentValue), exposureList(currencies, summary.CurrentValue), concentration
+	return weights, exposureList(assetTypes, currentValue), exposureList(currencies, currentValue), concentration
 }
 
 func exposureList(values map[string]float64, total float64) []Exposure {

@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -104,6 +105,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		Password:    req.Password,
 		DisplayName: req.DisplayName,
 		AvatarKey:   req.AvatarKey,
+		SignupIP:    clientIP(r),
 	})
 	if err != nil {
 		writeError(w, statusForError(err), err.Error())
@@ -356,6 +358,8 @@ func statusForError(err error) int {
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrEmailVerificationRequired):
 		return http.StatusForbidden
+	case errors.Is(err, ErrAccountBanned):
+		return http.StatusForbidden
 	case errors.Is(err, ErrInvalidLifecycleToken), errors.Is(err, ErrReauthenticationRequired):
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrPasswordAlreadySet):
@@ -376,9 +380,22 @@ func writeProviderError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusServiceUnavailable, "This sign-in method is not configured.")
 	case errors.Is(err, ErrProviderEmailUnverified), errors.Is(err, ErrInvalidProviderToken):
 		writeError(w, http.StatusUnauthorized, fallback)
+	case errors.Is(err, ErrAccountBanned):
+		writeError(w, http.StatusForbidden, ErrAccountBanned.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, fallback)
 	}
+}
+
+// clientIP reads the request's remote host, stripping the port. It must run
+// behind chi's middleware.RealIP (see server/router.go) so r.RemoteAddr
+// reflects the real client rather than a reverse proxy's own address.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func decodeJSON(r *http.Request, dst any) error {

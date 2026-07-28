@@ -52,14 +52,14 @@ func TestCashFundedBuyWeightedAverageAndPartialSale(t *testing.T) {
 
 	summary, err := svc.Summary(ctx(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, 3000, summary.Valuation.OpenHoldingsMarketValueBase, 0.01)
-	assert.InDelta(t, 3050, summary.Valuation.CashValueBase, 0.01)
-	assert.InDelta(t, 6050, summary.Valuation.CurrentPortfolioValueBase, 0.01)
-	assert.InDelta(t, 2212.5, summary.OpenHoldings.CostBasisBase, 0.01)
-	assert.InDelta(t, 787.5, summary.OpenHoldings.UnrealizedPnLBase, 0.01)
-	assert.InDelta(t, 262.5, summary.Realized.RealizedPnLBase, 0.01)
+	assert.InDelta(t, 3000, summary.Valuation.OpenHoldingsMarketValueBase.Float64(), 0.01)
+	assert.InDelta(t, 3050, summary.Valuation.CashValueBase.Float64(), 0.01)
+	assert.InDelta(t, 6050, summary.Valuation.CurrentPortfolioValueBase.Float64(), 0.01)
+	assert.InDelta(t, 2212.5, summary.OpenHoldings.CostBasisBase.Float64(), 0.01)
+	assert.InDelta(t, 787.5, summary.OpenHoldings.UnrealizedPnLBase.Float64(), 0.01)
+	assert.InDelta(t, 262.5, summary.Realized.RealizedPnLBase.Float64(), 0.01)
 	require.NotNil(t, summary.EconomicPerformance.TotalPnLBase)
-	assert.InDelta(t, 1050, *summary.EconomicPerformance.TotalPnLBase, 0.01)
+	assert.InDelta(t, 1050, summary.EconomicPerformance.TotalPnLBase.Float64(), 0.01)
 	assert.True(t, summary.EconomicPerformance.IsComplete)
 	assert.True(t, summary.Reconciliation.IsConsistent)
 }
@@ -125,9 +125,9 @@ func TestSellFee_IsCountedOnceAndPartialEpisodeRemainsOpen(t *testing.T) {
 
 	summary, err := svc.Summary(ctx(), "u1")
 	require.NoError(t, err)
-	assert.Equal(t, 5.0, summary.Fees.TransactionFeesBase)
+	assert.Equal(t, 5.0, summary.Fees.TransactionFeesBase.Float64())
 	require.NotNil(t, summary.EconomicPerformance.TotalPnLBase)
-	assert.Equal(t, -5.0, *summary.EconomicPerformance.TotalPnLBase)
+	assert.Equal(t, -5.0, summary.EconomicPerformance.TotalPnLBase.Float64())
 }
 
 func TestFullSaleClosesEpisodeAndRebuyCreatesNewEpisode(t *testing.T) {

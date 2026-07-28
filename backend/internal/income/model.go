@@ -80,8 +80,8 @@ const (
 	StatusUnresolved           Status = "unresolved"
 	StatusFailedRetryable      Status = "failed_retryable"
 	StatusFailedPermanent      Status = "failed_permanent"
-	// StatusProcessedNoEntitlement is non-terminal: a later backdated trade,
-	// identity resolution, or provider correction can make the event eligible.
+	// StatusProcessedNoEntitlement is non-terminal: later identity resolution
+	// or a provider correction can still make the event eligible.
 	StatusProcessedNoEntitlement Status = "processed_no_entitlement"
 )
 

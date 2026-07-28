@@ -1,91 +1,31 @@
 import { apiRequest } from "@/api/client";
-import type { ProfileBadge } from "@/types/profile";
+import {
+  assertShape,
+  leaderboardResponseSchema,
+  leaderboardStandingSchema,
+} from "@/api/schemas";
 import type {
-  LeaderboardEntry,
   LeaderboardGlobalResponse,
   LeaderboardQueryParams,
   LeaderboardStanding,
-  PublicAssetType,
-  PublicWeight,
 } from "@/types/leaderboard";
-import { isValidDecimalString, type DecimalString } from "@/utils/decimal";
-
-function numberValue(value: unknown): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/**
- * Preserves an authoritative decimal-string field exactly as sent by the
- * backend (ranked_index, ranked_return_percentage, return_gap_percentage).
- * Falls back to "0" only for a genuinely missing/malformed value — never
- * silently rounds through `Number`.
- */
-function decimalValue(value: unknown): DecimalString {
-  if (typeof value === "string" && isValidDecimalString(value)) return value;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  return "0";
-}
-
-function publicWeights(value: unknown): PublicWeight[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-    .map((item) => ({
-      symbol: String(item.symbol ?? "").toUpperCase(),
-      asset_type: String(item.asset_type ?? "other") as PublicAssetType,
-      weight_percentage: numberValue(item.weight_percentage), // presentation float64, not part of the money contract
-    }))
-    .filter((item) => item.symbol.length > 0);
-}
-
-function badges(value: unknown): ProfileBadge[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-    .map((item) => ({
-      key: String(item.key ?? ""),
-      name: String(item.name ?? ""),
-      icon_key: item.icon_key ? String(item.icon_key) : undefined,
-      unlocked_at: item.unlocked_at ? String(item.unlocked_at) : undefined,
-    }))
-    .filter((item) => item.key.length > 0);
-}
-
-function normalizeEntry(raw: Record<string, unknown>): LeaderboardEntry {
-  return {
-    rank: numberValue(raw.rank),
-    display_name: String(raw.display_name ?? "Anonymous investor"),
-    handle: raw.handle ? String(raw.handle) : undefined,
-    avatar_key: raw.avatar_key ? String(raw.avatar_key) : undefined,
-    strategy_tag: raw.strategy_tag ? String(raw.strategy_tag) : undefined,
-    ranked_index: decimalValue(raw.ranked_index ?? raw.portfolio_index ?? "100"),
-    ranked_return_percentage: decimalValue(
-      raw.ranked_return_percentage ?? raw.gain_loss_percentage,
-    ),
-    public_weights: publicWeights(raw.public_weights),
-    badges: badges(raw.badges),
-    is_me: Boolean(raw.is_me),
-  };
-}
 
 export async function getGlobalLeaderboard(
   params: LeaderboardQueryParams,
+  signal?: AbortSignal,
 ): Promise<LeaderboardGlobalResponse> {
   const response = await apiRequest<unknown>(
     `/leaderboard?timeframe=${encodeURIComponent(params.timeframe)}`,
+    { signal },
   );
-  // The endpoint returns a bare array; tolerate an {entries:[...]} envelope too.
-  const rawEntries = Array.isArray(response)
-    ? response
-    : response && typeof response === "object" && Array.isArray((response as Record<string, unknown>).entries)
-      ? ((response as Record<string, unknown>).entries as unknown[])
-      : [];
+  const entries = assertShape(
+    leaderboardResponseSchema,
+    response,
+    "GET /leaderboard",
+  );
   return {
     timeframe: params.timeframe,
-    entries: rawEntries
-      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-      .map(normalizeEntry),
+    entries,
   };
 }
 
@@ -93,47 +33,19 @@ export async function getLeaderboardStanding(
   timeframe: LeaderboardQueryParams["timeframe"],
   signal?: AbortSignal,
 ): Promise<LeaderboardStanding> {
-  const raw = await apiRequest<Record<string, unknown>>(
+  const response = await apiRequest<unknown>(
     `/leaderboard/me?timeframe=${encodeURIComponent(timeframe)}`,
     { signal },
   );
-  return {
-    timeframe,
-    eligible: Boolean(raw.eligible),
-    rank: raw.rank === null || raw.rank === undefined ? null : numberValue(raw.rank),
-    previous_rank:
-      raw.previous_rank === null || raw.previous_rank === undefined
-        ? null
-        : numberValue(raw.previous_rank),
-    rank_delta:
-      raw.rank_delta === null || raw.rank_delta === undefined
-        ? null
-        : numberValue(raw.rank_delta),
-    best_rank:
-      raw.best_rank === null || raw.best_rank === undefined
-        ? null
-        : numberValue(raw.best_rank),
-    participant_count: numberValue(raw.participant_count ?? raw.total_participants),
-    total_participants: numberValue(raw.total_participants ?? raw.participant_count),
-    percentile: numberValue(raw.percentile),
-    ranked_return_percentage: decimalValue(raw.ranked_return_percentage),
-    ranked_index: decimalValue(raw.ranked_index),
-    paused: Boolean(raw.paused),
-    next_milestone:
-      raw.next_milestone && typeof raw.next_milestone === "object"
-        ? {
-            label: String((raw.next_milestone as Record<string, unknown>).label ?? ""),
-            target_rank: numberValue(
-              (raw.next_milestone as Record<string, unknown>).target_rank,
-            ),
-            rank_gap: numberValue(
-              (raw.next_milestone as Record<string, unknown>).rank_gap,
-            ),
-            return_gap_percentage: decimalValue(
-              (raw.next_milestone as Record<string, unknown>).return_gap_percentage,
-            ),
-          }
-        : null,
-    reason: raw.reason ? String(raw.reason) : "",
-  };
+  const standing = assertShape(
+    leaderboardStandingSchema,
+    response,
+    "GET /leaderboard/me",
+  );
+  if (standing.timeframe !== timeframe) {
+    throw new Error(
+      `Contract violation in GET /leaderboard/me: timeframe: expected ${timeframe}, received ${standing.timeframe}`,
+    );
+  }
+  return standing;
 }

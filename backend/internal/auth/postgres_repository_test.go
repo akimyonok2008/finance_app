@@ -66,6 +66,33 @@ func TestPostgresUserRepository_DuplicateEmailFails(t *testing.T) {
 	assert.ErrorIs(t, repo.Create(dup), ErrEmailExists)
 }
 
+func TestPostgresUserRepository_CreateWithVerificationIsAtomic(t *testing.T) {
+	repo := NewPostgresUserRepository(testPool(t))
+	ctx := context.Background()
+	user := newPGUser("Atomic Registration")
+	now := time.Now().UTC()
+
+	err := repo.CreateWithVerification(ctx, user, LifecycleToken{
+		ID: uuid.NewString(), UserID: user.ID, TokenHash: "token-hash",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}, EmailOutboxMessage{
+		ID: uuid.NewString(), UserID: user.ID,
+		Kind: "invalid-kind", Recipient: user.Email,
+		VerificationURL: "https://example.test/verify?token=secret",
+		CreatedAt:       now, AvailableAt: now,
+	})
+	require.Error(t, err)
+
+	_, err = repo.FindByID(user.ID)
+	assert.ErrorIs(t, err, ErrUserNotFound,
+		"outbox insertion failure must roll back the user and token")
+	var tokenCount int
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT count(*) FROM email_verification_tokens WHERE user_id = $1`, user.ID,
+	).Scan(&tokenCount))
+	assert.Zero(t, tokenCount)
+}
+
 func TestPostgresUserRepository_FindMissingReturnsNotFound(t *testing.T) {
 	repo := NewPostgresUserRepository(testPool(t))
 	_, err := repo.FindByID(uuid.NewString())

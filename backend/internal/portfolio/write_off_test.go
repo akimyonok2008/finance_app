@@ -137,10 +137,10 @@ func TestWriteOffUnpriceablePosition_ReconcilesCleanly(t *testing.T) {
 
 	sum, err := svc.Summary(ctx(), "u1")
 	require.NoError(t, err)
-	assert.InDelta(t, -1950.0, sum.Realized.RealizedPnLBase, 0.01,
+	assert.InDelta(t, -1950.0, sum.Realized.RealizedPnLBase.Float64(), 0.01,
 		"the write-off's realized loss must be reflected in the accounting summary")
 	assert.True(t, sum.Reconciliation.IsConsistent, "reasons: %v", sum.Reconciliation.Reasons)
-	assert.Equal(t, 0.0, sum.Reconciliation.Difference)
+	assert.Equal(t, 0.0, sum.Reconciliation.Difference.Float64())
 }
 
 func TestWriteOffUnpriceablePosition_RejectsOtherUsersPosition(t *testing.T) {

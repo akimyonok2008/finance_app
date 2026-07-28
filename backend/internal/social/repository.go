@@ -20,6 +20,9 @@ type Repository interface {
 	IsParticipant(ctx context.Context, conversationID, userID string) (bool, error)
 	OtherParticipant(ctx context.Context, conversationID, userID string) (string, error)
 	AddMessage(ctx context.Context, msg Message) error
+	// CreateMessage atomically enforces sender/conversation abuse policy,
+	// persists the message, and creates its notification.
+	CreateMessage(ctx context.Context, write MessageWrite, policy MessageAbusePolicy) error
 	// ListMessages returns visible messages for viewerID: messages that
 	// viewerID has hidden-for-me are excluded; moderator-removed messages are
 	// still returned but with a tombstone body (see Service.messageDTO).

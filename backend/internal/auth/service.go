@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -32,6 +33,7 @@ type Service struct {
 	verificationTTL time.Duration
 	resetTTL        time.Duration
 	reauthTTL       time.Duration
+	signupIPPepper  string
 }
 
 // AccountDeletionHook lets non-database stores erase user-owned data before
@@ -99,6 +101,27 @@ func (s *Service) ConfigureProviderAuth(cfg ProviderAuthConfig) {
 	s.appleVerifier = cfg.AppleVerifier
 }
 
+// ConfigureSignupIPHashing sets the HMAC key used to derive SignupIPHash from
+// a registering client's IP. It never stores the raw IP — only a keyed hash,
+// so the value is useless for anything except comparing whether two accounts
+// were created from the same address. Passing an empty pepper disables the
+// hash (SignupIPHash is left blank on every new registration).
+func (s *Service) ConfigureSignupIPHashing(pepper string) {
+	s.signupIPPepper = pepper
+}
+
+// hashSignupIP derives SignupIPHash for a registering client. Returns "" if
+// hashing is unconfigured or no IP was supplied, so this never blocks
+// registration or requires a schema backfill for existing rows.
+func (s *Service) hashSignupIP(ip string) string {
+	if s.signupIPPepper == "" || ip == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(s.signupIPPepper))
+	mac.Write([]byte(ip))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // Register validates the input, persists an unverified password account, and
 // sends a single-use verification link. It intentionally returns no JWT.
 func (s *Service) Register(in RegisterInput) (*User, string, error) {
@@ -138,21 +161,27 @@ func (s *Service) RegisterContext(ctx context.Context, in RegisterInput) (*User,
 		PasswordHash: string(hash),
 		HasPassword:  true,
 		AuthVersion:  1,
+		SignupIPHash: s.hashSignupIP(in.SignupIP),
 	}
-	if err := s.repo.Create(user); err != nil {
-		return nil, "", err // ErrEmailExists bubbles up unchanged
-	}
-
 	rawToken, record, err := newLifecycleToken(user.ID, s.verificationTTL)
 	if err != nil {
 		return nil, "", err
 	}
-	if err := s.repo.SaveEmailVerificationToken(ctx, record); err != nil {
+	now := time.Now().UTC()
+	message := EmailOutboxMessage{
+		ID: uuid.NewString(), UserID: user.ID, Kind: EmailKindVerification,
+		Recipient:       user.Email,
+		VerificationURL: s.publicAppURL + "/verify-email?token=" + rawToken,
+		CreatedAt:       now, AvailableAt: now,
+	}
+	if err := s.repo.CreateWithVerification(ctx, user, record, message); err != nil {
 		return nil, "", err
 	}
-	if err := s.emailSender.SendVerification(ctx, user.Email, s.publicAppURL+"/verify-email?token="+rawToken); err != nil {
-		return nil, "", err
-	}
+	// Low-latency best effort after the atomic commit. Failure is deliberately
+	// not returned to the client: the durable outbox retains the message and
+	// the mandatory processor retries it, so registration cannot be stranded
+	// or misleadingly invite a duplicate registration attempt.
+	_ = s.deliverEmailOutboxByID(ctx, message.ID)
 	return user, "", nil
 }
 
@@ -178,11 +207,7 @@ func (s *Service) Login(email, password string) (*User, string, error) {
 		return nil, "", ErrEmailVerificationRequired
 	}
 
-	token, err := s.tokens.Generate(user.ID, user.Email, user.AuthVersion)
-	if err != nil {
-		return nil, "", err
-	}
-	return user, token, nil
+	return s.issue(user)
 }
 
 // ChangePassword verifies currentPassword, replaces the password hash, and
@@ -332,6 +357,12 @@ func (s *Service) createProviderUser(email, displayName, avatarKey string) (*Use
 }
 
 func (s *Service) issue(user *User) (*User, string, error) {
+	// Token issuance is the common final boundary for password, Google, Apple,
+	// and email-verification authentication. Keep the ban check here so no
+	// authentication path can accidentally mint a JWT for a banned account.
+	if user.IsBanned() {
+		return nil, "", ErrAccountBanned
+	}
 	token, err := s.tokens.Generate(user.ID, user.Email, user.AuthVersion)
 	if err != nil {
 		return nil, "", err

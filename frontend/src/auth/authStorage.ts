@@ -3,6 +3,12 @@ import type { AuthUser } from "@/types/auth";
 export const TOKEN_KEY = "finance_app_token";
 export const USER_KEY = "finance_app_user";
 
+function accountRole(value: unknown): AuthUser["role"] {
+  return value === "user" || value === "moderator" || value === "admin"
+    ? value
+    : undefined;
+}
+
 export function readStorage(): { token: string | null; user: AuthUser | null } {
   try {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -18,6 +24,13 @@ export function readStorage(): { token: string | null; user: AuthUser | null } {
           // sessions came from password accounts and were already active.
           email_verified: parsed.email_verified ?? true,
           has_password: parsed.has_password ?? true,
+          role: accountRole(parsed.role),
+          suspended_until: parsed.suspended_until
+            ? String(parsed.suspended_until)
+            : undefined,
+          suspension_reason: parsed.suspension_reason
+            ? String(parsed.suspension_reason)
+            : undefined,
         }
       : null;
     return { token, user };

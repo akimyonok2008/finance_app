@@ -153,13 +153,22 @@ func New(d Deps) http.Handler {
 	// are Redis-backed when d.RateLimitRedis is set, so every replica behind a
 	// load balancer shares one budget instead of each getting its own.
 	authLimiter := newRateLimiter(d.RateLimitRedis, "auth", 20, 5*time.Minute)
+	// registerLimiter is deliberately much stricter than authLimiter and keyed
+	// on a much longer window: it exists to bound how many accounts one IP can
+	// create per day, not to stop credential-stuffing (that's authLimiter's
+	// job). Without it, the cheapest version of leaderboard "survivorship
+	// gaming" — spin up many accounts from one machine, invest each
+	// differently, only publicize whichever got lucky — costs an attacker
+	// nothing.
+	registerLimiter := newRateLimiter(d.RateLimitRedis, "register", 5, 24*time.Hour)
 	accountLimiter := newRateLimiter(d.RateLimitRedis, "account", 10, 5*time.Minute)
 	recoveryLimiter := newRateLimiter(d.RateLimitRedis, "auth-recovery", 5, 15*time.Minute)
 	// Social-safety abuse limits: reporting is rate-limited to deter report
 	// spam/harassment-via-reporting; block/unblock is looser since it's a
 	// purely defensive, self-directed action; message sending is limited
-	// per-sender to bound unsolicited-message volume even within the
-	// friends-only messaging policy.
+	// per-authenticated-user to bound unsolicited-message volume even within
+	// the friends-only messaging policy. The social service also enforces
+	// durable sender/conversation/duplicate/burst limits at write time.
 	reportLimiter := newRateLimiter(d.RateLimitRedis, "reports", 5, 15*time.Minute)
 	blockLimiter := newRateLimiter(d.RateLimitRedis, "blocks", 30, 5*time.Minute)
 	messageLimiter := newRateLimiter(d.RateLimitRedis, "messages", 30, time.Minute)
@@ -168,7 +177,7 @@ func New(d Deps) http.Handler {
 	r.Route("/auth", func(r chi.Router) {
 		r.Use(rateLimitMiddleware(authLimiter))
 		if !d.DisablePasswordRegistration {
-			r.Post("/register", authHandler.Register)
+			r.With(rateLimitMiddleware(registerLimiter)).Post("/register", authHandler.Register)
 		}
 		r.Post("/login", authHandler.Login)
 		r.Post("/google", authHandler.Google)
@@ -205,7 +214,8 @@ func New(d Deps) http.Handler {
 			r.Get("/dm/conversations", socialHandler.Conversations)
 			r.Post("/dm/conversations", socialHandler.CreateConversation)
 			r.Get("/dm/conversations/{conversationId}/messages", socialHandler.Messages)
-			r.With(rateLimitMiddleware(messageLimiter)).Post("/dm/conversations/{conversationId}/messages", socialHandler.SendMessage)
+			r.With(rateLimitMiddlewareByKey(messageLimiter, authenticatedUserOrIPKey)).
+				Post("/dm/conversations/{conversationId}/messages", socialHandler.SendMessage)
 			r.Post("/dm/conversations/{conversationId}/read", socialHandler.MarkRead)
 			r.Get("/dm/unread-count", socialHandler.UnreadCount)
 			r.Delete("/dm/messages/{messageId}", socialHandler.HideMessage)

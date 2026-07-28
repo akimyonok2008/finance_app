@@ -148,7 +148,7 @@ export function PortfolioSummaryCards() {
         holdingsReturn === null
           ? "No open holdings cost basis"
           : `${formatPercent(holdingsReturn)} · Open holdings only`,
-      tone: (holdingsPnl ?? 0) < 0 ? "rose" : "emerald",
+      tone: Number(holdingsPnl ?? 0) < 0 ? "rose" : "emerald",
     },
     {
       key: "basis",

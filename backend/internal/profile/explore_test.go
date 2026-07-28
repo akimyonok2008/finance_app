@@ -55,7 +55,7 @@ func exploreTestService(t *testing.T) *Service {
 
 	summaries := testSummaries{
 		"u1": {
-			UserID: "u1", PortfolioID: "p1", CurrentValue: 100, GainLossPercentage: 24.6, PortfolioIndex: 124.6,
+			UserID: "u1", PortfolioID: "p1", CurrentValue: money.AmountFromFloat64(100), GainLossPercentage: 24.6, PortfolioIndex: 124.6,
 			Positions: []portfolio.PositionSummary{
 				{PositionID: "x1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(40), CurrentPriceCurrency: "USD"},
 				{PositionID: "x2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(35), CurrentPriceCurrency: "USD"},
@@ -63,14 +63,14 @@ func exploreTestService(t *testing.T) *Service {
 			},
 		},
 		"u2": {
-			UserID: "u2", PortfolioID: "p2", CurrentValue: 100, GainLossPercentage: 10, PortfolioIndex: 110,
+			UserID: "u2", PortfolioID: "p2", CurrentValue: money.AmountFromFloat64(100), GainLossPercentage: 10, PortfolioIndex: 110,
 			Positions: []portfolio.PositionSummary{
 				{PositionID: "y1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(50), CurrentPriceCurrency: "USD"},
 				{PositionID: "y2", Symbol: "MSFT", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(50), CurrentPriceCurrency: "USD"},
 			},
 		},
 		"u3": {
-			UserID: "u3", PortfolioID: "p3", CurrentValue: 100, GainLossPercentage: 5, PortfolioIndex: 105,
+			UserID: "u3", PortfolioID: "p3", CurrentValue: money.AmountFromFloat64(100), GainLossPercentage: 5, PortfolioIndex: 105,
 			Positions: []portfolio.PositionSummary{
 				{PositionID: "z1", Symbol: "NVDA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(60), CurrentPriceCurrency: "USD"},
 				{PositionID: "z2", Symbol: "AAPL", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(40), CurrentPriceCurrency: "USD"},
@@ -81,6 +81,11 @@ func exploreTestService(t *testing.T) *Service {
 		"u1": {ID: "u1"}, "u2": {ID: "u2"}, "u3": {ID: "u3"}, "u4": {ID: "u4"},
 	}
 	svc := NewService(repo, users, summaries)
+	svc.SetRankedPerformanceProvider(testRanked{
+		"u1": {RankedIndex: 124.6, RankedReturnPercentage: 24.6},
+		"u2": {RankedIndex: 110, RankedReturnPercentage: 10},
+		"u3": {RankedIndex: 105, RankedReturnPercentage: 5},
+	})
 	svc.SetGlobalRankProvider(fakeGlobalRanks{"u1": 2, "u2": 1})
 	return svc
 }

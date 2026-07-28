@@ -1,5 +1,8 @@
 import { apiRequest } from "@/api/client";
-import { getLeaderboardStanding } from "@/api/leaderboardApi";
+import {
+  getGlobalLeaderboard,
+  getLeaderboardStanding,
+} from "@/api/leaderboardApi";
 import { decimalToChartNumber } from "@/utils/decimal";
 import type {
   Achievement,
@@ -28,8 +31,22 @@ export function getAchievements(signal?: AbortSignal): Promise<Achievement[]> {
   return apiRequest<Achievement[]>("/achievements", { signal });
 }
 
-export function getLeaderboard(signal?: AbortSignal): Promise<LeaderboardEntry[]> {
-  return apiRequest<LeaderboardEntry[]>("/leaderboard", { signal });
+export async function getLeaderboard(signal?: AbortSignal): Promise<LeaderboardEntry[]> {
+  const { entries } = await getGlobalLeaderboard({ timeframe: "ALL" }, signal);
+  return entries.map((entry) => {
+    const gainLossPercentage = decimalToChartNumber(entry.ranked_return_percentage);
+    const portfolioIndex = decimalToChartNumber(entry.ranked_index);
+    if (gainLossPercentage === null || portfolioIndex === null) {
+      throw new Error("Contract violation in GET /leaderboard: ranked decimal is out of display range");
+    }
+    return {
+      rank: entry.rank,
+      display_name: entry.display_name,
+      avatar_key: entry.avatar_key ?? "",
+      gain_loss_percentage: gainLossPercentage,
+      portfolio_index: portfolioIndex,
+    };
+  });
 }
 
 export function getSprintLeaderboard(
@@ -51,13 +68,22 @@ export async function getLeaderboardMe(
   signal?: AbortSignal,
 ): Promise<LeaderboardMe> {
   const standing = await getLeaderboardStanding("ALL", signal);
+  const gainLossPercentage = decimalToChartNumber(
+    standing.ranked_return_percentage,
+  );
+  const portfolioIndex = decimalToChartNumber(standing.ranked_index);
+  if (gainLossPercentage === null || portfolioIndex === null) {
+    throw new Error(
+      "Contract violation in GET /leaderboard/me: ranked decimal is out of display range",
+    );
+  }
   return {
     rank: standing.rank,
     total_participants: standing.total_participants,
     // LeaderboardMe is a display-only aggregate DTO (not itself a backend
     // response); converting here is the sanctioned chart/display boundary.
-    gain_loss_percentage: decimalToChartNumber(standing.ranked_return_percentage) ?? 0,
-    portfolio_index: decimalToChartNumber(standing.ranked_index) ?? 100,
+    gain_loss_percentage: gainLossPercentage,
+    portfolio_index: portfolioIndex,
     rank_delta: null,
   };
 }

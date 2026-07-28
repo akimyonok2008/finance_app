@@ -3,6 +3,7 @@ package social
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -195,6 +196,72 @@ func (r *InMemoryRepository) AddMessage(_ context.Context, msg Message) error {
 	c.LastMessageAt = &t
 	r.conversations[msg.ConversationID] = c
 	return nil
+}
+
+func (r *InMemoryRepository) CreateMessage(
+	ctx context.Context,
+	write MessageWrite,
+	policy MessageAbusePolicy,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	msg := write.Message
+	c, ok := r.conversations[msg.ConversationID]
+	if !ok {
+		return ErrConversationNotFound
+	}
+
+	var userCount, conversationCount, repeatedCount, burstCount int
+	normalizedBody := normalizeMessageBody(msg.Body)
+	for conversationID, messages := range r.messages {
+		for _, existing := range messages {
+			if existing.SenderUserID == msg.SenderUserID &&
+				!existing.CreatedAt.Before(msg.CreatedAt.Add(-policy.UserWindow)) {
+				userCount++
+			}
+			if conversationID == msg.ConversationID &&
+				!existing.CreatedAt.Before(msg.CreatedAt.Add(-policy.ConversationWindow)) {
+				conversationCount++
+			}
+			if existing.SenderUserID == msg.SenderUserID &&
+				!existing.CreatedAt.Before(msg.CreatedAt.Add(-policy.RepeatedWindow)) &&
+				normalizeMessageBody(existing.Body) == normalizedBody {
+				repeatedCount++
+			}
+			if existing.SenderUserID == msg.SenderUserID &&
+				!existing.CreatedAt.Before(msg.CreatedAt.Add(-policy.BurstWindow)) {
+				burstCount++
+			}
+		}
+	}
+	if policy.UserLimit > 0 && userCount >= policy.UserLimit {
+		return ErrMessageRateLimited
+	}
+	if policy.ConversationLimit > 0 && conversationCount >= policy.ConversationLimit {
+		return ErrConversationLimited
+	}
+	if policy.RepeatedLimit > 0 && repeatedCount >= policy.RepeatedLimit {
+		return ErrRepeatedMessage
+	}
+	if policy.BurstLimit > 0 && burstCount >= policy.BurstLimit {
+		return ErrSpamBurst
+	}
+	if write.VolatileNotify != nil {
+		if err := write.VolatileNotify(ctx); err != nil {
+			return err
+		}
+	}
+	r.messages[msg.ConversationID] = append(r.messages[msg.ConversationID], msg)
+	r.messageByID[msg.ID] = msg.ConversationID
+	c.UpdatedAt = msg.CreatedAt
+	t := msg.CreatedAt
+	c.LastMessageAt = &t
+	r.conversations[msg.ConversationID] = c
+	return nil
+}
+
+func normalizeMessageBody(body string) string {
+	return strings.ToLower(strings.Join(strings.Fields(body), " "))
 }
 
 func (r *InMemoryRepository) ListMessages(_ context.Context, conversationID, viewerID string, limit int) ([]Message, error) {

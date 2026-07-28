@@ -1,5 +1,7 @@
-// Privacy guard: Arena UI must never render portfolio values, holdings,
-// quantities, symbols, average buy prices, email, user id, or portfolio id.
+// Arena deliberately shows rank and percentage performance only. The broader
+// product policy permits symbols on separately opted-in public profiles, but
+// this DTO must never render portfolio values, holdings, quantities, symbols,
+// average buy prices, email, user id, or portfolio id.
 
 export type ActiveSprint = {
   id: string;

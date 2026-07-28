@@ -131,6 +131,58 @@ func TestRegister_RawPasswordNeverStored(t *testing.T) {
 	assert.NotContains(t, stored.PasswordHash, "StrongPassword123")
 }
 
+// TestRegister_SignupIPHashedNotStoredRaw: SignupIPHash exists purely to let
+// a later investigation find accounts created from the same network (no
+// multi-account/identity check otherwise exists), so it must never be
+// recoverable to the raw IP, and must be deterministic for the same IP.
+func TestRegister_SignupIPHashedNotStoredRaw(t *testing.T) {
+	repo := NewInMemoryUserRepository()
+	svc := NewService(repo, NewTokenManager("test-secret", time.Hour))
+	svc.ConfigureSignupIPHashing("test-pepper")
+
+	in := validInput()
+	in.SignupIP = "203.0.113.7"
+	_, _, err := svc.Register(in)
+	require.NoError(t, err)
+
+	stored, err := repo.FindByEmail("user@example.com")
+	require.NoError(t, err)
+	require.NotEmpty(t, stored.SignupIPHash)
+	assert.NotContains(t, stored.SignupIPHash, "203.0.113.7", "the raw IP must never appear in the stored hash")
+
+	// Same IP, different account, must hash identically so shared-network
+	// accounts can be correlated.
+	repo2 := NewInMemoryUserRepository()
+	svc2 := NewService(repo2, NewTokenManager("test-secret", time.Hour))
+	svc2.ConfigureSignupIPHashing("test-pepper")
+	other := validInput()
+	other.Email = "second@example.com"
+	other.SignupIP = "203.0.113.7"
+	_, _, err = svc2.Register(other)
+	require.NoError(t, err)
+	stored2, err := repo2.FindByEmail("second@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, stored.SignupIPHash, stored2.SignupIPHash, "the same IP must hash identically across accounts")
+}
+
+// TestRegister_SignupIPHashingUnconfiguredLeavesHashBlank: hashing must be
+// opt-in — a deployment that never calls ConfigureSignupIPHashing (or the
+// test harness) must not silently store anything, and registration must not
+// fail just because no IP was available (e.g. an internal/test caller).
+func TestRegister_SignupIPHashingUnconfiguredLeavesHashBlank(t *testing.T) {
+	repo := NewInMemoryUserRepository()
+	svc := NewService(repo, NewTokenManager("test-secret", time.Hour))
+
+	in := validInput()
+	in.SignupIP = "203.0.113.7"
+	_, _, err := svc.Register(in)
+	require.NoError(t, err)
+
+	stored, err := repo.FindByEmail("user@example.com")
+	require.NoError(t, err)
+	assert.Empty(t, stored.SignupIPHash)
+}
+
 func TestLogin_ValidCredentialsReturnsUserAndToken(t *testing.T) {
 	svc := newTestService()
 	_, _, err := svc.Register(validInput())
@@ -170,6 +222,19 @@ func TestLogin_UnknownEmailFails(t *testing.T) {
 	_, _, err := svc.Login("nobody@example.com", "whatever123")
 
 	assert.ErrorIs(t, err, ErrInvalidCredentials)
+}
+
+func TestLogin_BannedAccountCannotReceiveToken(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	require.NoError(t, svc.Ban(context.Background(), user.ID, "permanent ban"))
+
+	loggedIn, token, err := svc.Login("user@example.com", "StrongPassword123")
+
+	assert.ErrorIs(t, err, ErrAccountBanned)
+	assert.Nil(t, loggedIn)
+	assert.Empty(t, token)
 }
 
 func TestRepository_FindByIDUnknownReturnsNotFound(t *testing.T) {
@@ -220,6 +285,30 @@ func TestProviderLogin_ExistingIdentityLogsInUser(t *testing.T) {
 	assert.Equal(t, user.ID, loggedIn.ID)
 	assert.Equal(t, user.Email, loggedIn.Email)
 	assert.NotEmpty(t, token)
+}
+
+func TestProviderLogin_BannedExistingIdentityCannotReceiveToken(t *testing.T) {
+	svc := newTestService()
+	user, _, err := svc.Register(validInput())
+	require.NoError(t, err)
+	require.NoError(t, svc.repo.CreateIdentity(&AuthIdentity{
+		ID: "identity-banned", UserID: user.ID, Provider: ProviderGoogle,
+		ProviderSubject: "google-sub-banned", Email: user.Email, EmailVerified: true,
+	}))
+	require.NoError(t, svc.Ban(context.Background(), user.ID, "permanent ban"))
+	svc.ConfigureProviderAuth(ProviderAuthConfig{
+		GoogleEnabled: true,
+		GoogleVerifier: fakeVerifier{claims: ProviderClaims{
+			Provider: ProviderGoogle, Subject: "google-sub-banned",
+			Email: user.Email, EmailVerified: true,
+		}},
+	})
+
+	loggedIn, token, err := svc.LoginWithGoogle(context.Background(), "id-token")
+
+	assert.ErrorIs(t, err, ErrAccountBanned)
+	assert.Nil(t, loggedIn)
+	assert.Empty(t, token)
 }
 
 func TestProviderLogin_VerifiedEmailLinksExistingUser(t *testing.T) {

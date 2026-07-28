@@ -25,15 +25,15 @@ func NewPostgresUserRepository(pool *pgxpool.Pool) *PostgresUserRepository {
 
 const userColumns = `id, email, password_hash, display_name, avatar_key,
 	email_verified_at, auth_version, has_password,
-	role, suspended_until, suspension_reason, banned_at, ban_reason`
+	role, suspended_until, suspension_reason, banned_at, ban_reason, signup_ip_hash`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
 	var passwordHash *string
-	var suspensionReason, banReason *string
+	var suspensionReason, banReason, signupIPHash *string
 	if err := row.Scan(&u.ID, &u.Email, &passwordHash, &u.DisplayName, &u.AvatarKey,
 		&u.EmailVerifiedAt, &u.AuthVersion, &u.HasPassword,
-		&u.Role, &u.SuspendedUntil, &suspensionReason, &u.BannedAt, &banReason); err != nil {
+		&u.Role, &u.SuspendedUntil, &suspensionReason, &u.BannedAt, &banReason, &signupIPHash); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
@@ -48,6 +48,9 @@ func scanUser(row pgx.Row) (*User, error) {
 	if banReason != nil {
 		u.BanReason = *banReason
 	}
+	if signupIPHash != nil {
+		u.SignupIPHash = *signupIPHash
+	}
 	return &u, nil
 }
 
@@ -61,10 +64,10 @@ func (r *PostgresUserRepository) Create(user *User) error {
 	_, err := r.pool.Exec(context.Background(),
 		`INSERT INTO users (
 			id, email, password_hash, display_name, avatar_key,
-			email_verified_at, auth_version, has_password
-		 ) VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8)`,
+			email_verified_at, auth_version, has_password, signup_ip_hash
+		 ) VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, NULLIF($9, ''))`,
 		user.ID, normalizeEmail(user.Email), user.PasswordHash, user.DisplayName, user.AvatarKey,
-		user.EmailVerifiedAt, authVersion, hasPassword,
+		user.EmailVerifiedAt, authVersion, hasPassword, user.SignupIPHash,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -72,6 +75,173 @@ func (r *PostgresUserRepository) Create(user *User) error {
 			return ErrEmailExists
 		}
 		return fmt.Errorf("auth repository: create user: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresUserRepository) CreateWithVerification(
+	ctx context.Context,
+	user *User,
+	token LifecycleToken,
+	email EmailOutboxMessage,
+) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("auth repository: begin registration: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	authVersion := user.AuthVersion
+	if authVersion == 0 {
+		authVersion = 1
+	}
+	hasPassword := user.HasPassword || user.PasswordHash != ""
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO users (
+			id, email, password_hash, display_name, avatar_key,
+			email_verified_at, auth_version, has_password, signup_ip_hash
+		) VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, NULLIF($9, ''))
+	`, user.ID, normalizeEmail(user.Email), user.PasswordHash, user.DisplayName, user.AvatarKey,
+		user.EmailVerifiedAt, authVersion, hasPassword, user.SignupIPHash); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrEmailExists
+		}
+		return fmt.Errorf("auth repository: create registration user: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO email_verification_tokens
+			(id, user_id, token_hash, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, token.ID, token.UserID, token.TokenHash, token.ExpiresAt, token.CreatedAt); err != nil {
+		return fmt.Errorf("auth repository: create registration token: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO auth_email_outbox (
+			id, user_id, kind, recipient, delivery_url, created_at, available_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, email.ID, email.UserID, email.Kind, normalizeEmail(email.Recipient),
+		email.VerificationURL, email.CreatedAt, email.AvailableAt); err != nil {
+		return fmt.Errorf("auth repository: enqueue registration email: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("auth repository: commit registration: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresUserRepository) ClaimEmailOutbox(
+	ctx context.Context,
+	limit int,
+	now time.Time,
+) ([]EmailOutboxMessage, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+	rows, err := r.pool.Query(ctx, `
+		UPDATE auth_email_outbox
+		SET claimed_at = $2, attempts = attempts + 1
+		WHERE id IN (
+			SELECT id
+			FROM auth_email_outbox
+			WHERE delivered_at IS NULL
+			  AND available_at <= $2
+			  AND (claimed_at IS NULL OR claimed_at < $2 - $3::interval)
+			ORDER BY created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		RETURNING id, user_id, kind, recipient, delivery_url, created_at,
+		          available_at, claimed_at, delivered_at, attempts,
+		          COALESCE(last_error, '')
+	`, limit, now, emailOutboxLeaseTTL.String())
+	if err != nil {
+		return nil, fmt.Errorf("auth repository: claim email outbox: %w", err)
+	}
+	defer rows.Close()
+	out := make([]EmailOutboxMessage, 0, limit)
+	for rows.Next() {
+		var message EmailOutboxMessage
+		if err := rows.Scan(
+			&message.ID, &message.UserID, &message.Kind, &message.Recipient,
+			&message.VerificationURL, &message.CreatedAt, &message.AvailableAt,
+			&message.ClaimedAt, &message.DeliveredAt, &message.Attempts,
+			&message.LastError,
+		); err != nil {
+			return nil, fmt.Errorf("auth repository: scan email outbox: %w", err)
+		}
+		out = append(out, message)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresUserRepository) ClaimEmailOutboxByID(
+	ctx context.Context,
+	id string,
+	now time.Time,
+) (EmailOutboxMessage, bool, error) {
+	var message EmailOutboxMessage
+	err := r.pool.QueryRow(ctx, `
+		UPDATE auth_email_outbox
+		SET claimed_at = $2, attempts = attempts + 1
+		WHERE id = $1
+		  AND delivered_at IS NULL
+		  AND available_at <= $2
+		  AND (claimed_at IS NULL OR claimed_at < $2 - $3::interval)
+		RETURNING id, user_id, kind, recipient, delivery_url, created_at,
+		          available_at, claimed_at, delivered_at, attempts,
+		          COALESCE(last_error, '')
+	`, id, now, emailOutboxLeaseTTL.String()).Scan(
+		&message.ID, &message.UserID, &message.Kind, &message.Recipient,
+		&message.VerificationURL, &message.CreatedAt, &message.AvailableAt,
+		&message.ClaimedAt, &message.DeliveredAt, &message.Attempts,
+		&message.LastError,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EmailOutboxMessage{}, false, nil
+	}
+	if err != nil {
+		return EmailOutboxMessage{}, false,
+			fmt.Errorf("auth repository: claim email outbox message: %w", err)
+	}
+	return message, true, nil
+}
+
+func (r *PostgresUserRepository) MarkEmailOutboxDelivered(
+	ctx context.Context,
+	id string,
+	deliveredAt time.Time,
+) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE auth_email_outbox
+		SET delivered_at = $2, claimed_at = NULL, last_error = NULL,
+		    delivery_url = ''
+		WHERE id = $1 AND delivered_at IS NULL
+	`, id, deliveredAt)
+	if err != nil {
+		return fmt.Errorf("auth repository: mark email delivered: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrEmailOutboxNotFound
+	}
+	return nil
+}
+
+func (r *PostgresUserRepository) MarkEmailOutboxFailed(
+	ctx context.Context,
+	id, failure string,
+	retryAt time.Time,
+) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE auth_email_outbox
+		SET claimed_at = NULL, available_at = $2, last_error = $3
+		WHERE id = $1 AND delivered_at IS NULL
+	`, id, retryAt, failure)
+	if err != nil {
+		return fmt.Errorf("auth repository: mark email failed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrEmailOutboxNotFound
 	}
 	return nil
 }

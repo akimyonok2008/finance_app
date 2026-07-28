@@ -106,7 +106,8 @@ export function PerformanceChartCard({
     }))
     .filter((point): point is { label: string; index: number } => point.index !== null);
   const currency = summary?.base_currency ?? "USD";
-  const isEmpty = !summary || summary.valuation.current_portfolio_value_base === 0;
+  const isEmpty =
+    !summary || Number(summary.valuation.current_portfolio_value_base) === 0;
   const holdingsPnl = summary?.open_holdings.unrealized_pnl_base;
   const holdingsTone = getPerformanceTone(holdingsPnl ?? 0);
   const totalPnl = summary?.economic_performance.total_pnl_base;

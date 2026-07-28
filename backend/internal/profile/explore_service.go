@@ -47,7 +47,10 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 		if blocked[p.UserID] {
 			continue
 		}
-		card := s.publicProjection(ctx, p)
+		card, err := s.publicProjection(ctx, p)
+		if err != nil {
+			return ExploreResponse{}, err
+		}
 		if len(card.PublicWeights) == 0 {
 			continue
 		}
@@ -65,7 +68,10 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 	trending := buildTrendingHoldings(allCards)
 	// Similar strategies are computed against the caller's own composition,
 	// independent of the q/symbol filter (a global discovery section).
-	similar := s.buildSimilar(ctx, callerID, all)
+	similar, err := s.buildSimilar(ctx, callerID, all)
+	if err != nil {
+		return ExploreResponse{}, err
+	}
 
 	filtered := make([]scoredCard, 0, len(all))
 	for _, sc := range all {
@@ -146,9 +152,9 @@ func (s *Service) exploreRankings(ctx context.Context, timeframe string) (map[st
 // buildSimilar returns deterministic, quality-thresholded matches using symbol,
 // asset-type, DNA, strategy-tag and concentration similarity. MMR selection
 // adds light symbol diversity after the candidates are scored.
-func (s *Service) buildSimilar(ctx context.Context, callerID string, all []scoredCard) []PublicProfile {
+func (s *Service) buildSimilar(ctx context.Context, callerID string, all []scoredCard) ([]PublicProfile, error) {
 	if callerID == "" {
-		return []PublicProfile{}
+		return []PublicProfile{}, nil
 	}
 
 	var current exploreCandidate
@@ -157,14 +163,15 @@ func (s *Service) buildSimilar(ctx context.Context, callerID string, all []score
 		weights, _, _, concentration := buildComposition(summary)
 		current.card.PublicWeights = weights
 		current.card.Concentration = concentration
-		current.card.PortfolioIndex = summary.PortfolioIndex
-		current.hasIndex = finitePositive(summary.PortfolioIndex)
-		if s.ranked != nil {
-			if rp, rerr := s.ranked.CurrentRankedPerformance(ctx, callerID); rerr == nil {
-				current.card.PortfolioIndex = rp.RankedIndex
-				current.hasIndex = finitePositive(rp.RankedIndex)
-			}
+		if s.ranked == nil {
+			return nil, ErrRankedDataUnavailable
 		}
+		rp, err := s.ranked.CurrentRankedPerformance(ctx, callerID)
+		if err != nil {
+			return nil, ErrRankedDataUnavailable
+		}
+		current.card.PortfolioIndex = rp.RankedIndex
+		current.hasIndex = finitePositive(rp.RankedIndex)
 		if result, dnaErr := s.dna.Calculate(ctx, dnaInputsFromSummary(summary)); dnaErr == nil && result.HasData {
 			current.dna = dnaScoreVector(result.Scores)
 			current.hasDNA = true
@@ -177,7 +184,7 @@ func (s *Service) buildSimilar(ctx context.Context, callerID string, all []score
 	for _, sc := range all {
 		candidates = append(candidates, candidateFromCard(sc))
 	}
-	return selectSimilarProfiles(current, candidates, maxSimilar)
+	return selectSimilarProfiles(current, candidates, maxSimilar), nil
 }
 
 // matchesQuery is a case-insensitive substring match over handle, display name,

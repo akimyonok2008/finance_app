@@ -30,19 +30,19 @@ func round4(v float64) float64 {
 //
 // Percentage performance is calculated from base-currency values. This keeps
 // each position consistent with the mixed-currency portfolio total.
-func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceCurrency string, costBasisBase, currentValueBase float64, baseCurrency string) PositionSummary {
+func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceCurrency string, costBasisBase, currentValueBase money.Amount, baseCurrency string) PositionSummary {
 	// pos.Quantity/AverageBuyPrice are exact decimal; costBasis is computed
-	// with exact MulPrice and only converted to float64 (documented boundary)
-	// for this display-only local-currency figure. currentPrice stays float64
-	// (a live quote, not yet part of this section's scope).
-	costBasis := pos.Quantity.MulPrice(pos.AverageBuyPrice).Float64()
-	currentValue := pos.Quantity.Float64() * currentPrice
-	gainLoss := currentValue - costBasis
-	gainLossBase := currentValueBase - costBasisBase
+	// with exact MulPrice. currentPrice stays float64 (a live quote, not yet
+	// part of this section's scope) and is wrapped via money.PriceFromFloat64
+	// immediately so the local-currency figures stay in exact decimal space.
+	costBasis := pos.Quantity.MulPrice(pos.AverageBuyPrice)
+	currentValue := pos.Quantity.MulPrice(money.PriceFromFloat64(currentPrice))
+	gainLoss := currentValue.Sub(costBasis)
+	gainLossBase := currentValueBase.Sub(costBasisBase)
 
 	gainLossPct := 0.0
-	if costBasisBase != 0 {
-		gainLossPct = gainLossBase / costBasisBase * 100
+	if costBasisBase.Sign() != 0 {
+		gainLossPct = gainLossBase.Float64() / costBasisBase.Float64() * 100
 	}
 
 	return PositionSummary{
@@ -53,14 +53,14 @@ func CalculatePositionSummary(pos *Position, currentPrice float64, currentPriceC
 		AverageBuyPrice:      pos.AverageBuyPrice,
 		CurrentPrice:         money.PriceFromFloat64(currentPrice),
 		CurrentPriceCurrency: currentPriceCurrency,
-		CostBasis:            money.AmountFromFloat64(round2(costBasis)),
-		CurrentValue:         money.AmountFromFloat64(round2(currentValue)),
-		GainLoss:             money.AmountFromFloat64(round2(gainLoss)),
+		CostBasis:            money.QuantizeValue(costBasis),
+		CurrentValue:         money.QuantizeValue(currentValue),
+		GainLoss:             money.QuantizeValue(gainLoss),
 		GainLossPercentage:   round2(gainLossPct),
 		Currency:             pos.Currency,
-		CostBasisBase:        money.AmountFromFloat64(round2(costBasisBase)),
-		CurrentValueBase:     money.AmountFromFloat64(round2(currentValueBase)),
-		GainLossBase:         money.AmountFromFloat64(round2(gainLossBase)),
+		CostBasisBase:        money.QuantizeValue(costBasisBase),
+		CurrentValueBase:     money.QuantizeValue(currentValueBase),
+		GainLossBase:         money.QuantizeValue(gainLossBase),
 		BaseCurrency:         baseCurrency,
 	}
 }
@@ -83,41 +83,44 @@ func CalculatePortfolioSummary(userID, portfolioID, baseCurrency string, positio
 	if len(closedInput) > 0 {
 		closed = closedInput[0]
 	}
-	var activeCostBasis, activeCurrentValue, closedCostBasis, realizedGainLoss float64
+	activeCostBasis := money.ZeroAmount()
+	activeCurrentValue := money.ZeroAmount()
+	closedCostBasis := money.ZeroAmount()
+	realizedGainLoss := money.ZeroAmount()
 	for _, p := range positions {
-		activeCostBasis += p.CostBasisBase.Float64()
-		activeCurrentValue += p.CurrentValueBase.Float64()
+		activeCostBasis = activeCostBasis.Add(p.CostBasisBase)
+		activeCurrentValue = activeCurrentValue.Add(p.CurrentValueBase)
 	}
 	for _, p := range closed {
-		closedCostBasis += p.ClosedCostBasisBase.Float64()
-		realizedGainLoss += p.RealizedGainLossBase.Float64()
+		closedCostBasis = closedCostBasis.Add(p.ClosedCostBasisBase)
+		realizedGainLoss = realizedGainLoss.Add(p.RealizedGainLossBase)
 	}
-	unrealizedGainLoss := activeCurrentValue - activeCostBasis
+	unrealizedGainLoss := activeCurrentValue.Sub(activeCostBasis)
 	// Closed proceeds are assets only when represented by cash. Do not synthesize
 	// them here or realized gain would be counted twice once sale proceeds enter
 	// portfolio_cash_balances.
 	currentValue := activeCurrentValue
 
 	gainLossPct := 0.0
-	if activeCostBasis != 0 {
-		gainLossPct = unrealizedGainLoss / activeCostBasis * 100
+	if activeCostBasis.Sign() != 0 {
+		gainLossPct = unrealizedGainLoss.Float64() / activeCostBasis.Float64() * 100
 	}
 
 	return PortfolioSummary{
 		UserID:                 userID,
 		PortfolioID:            portfolioID,
 		BaseCurrency:           baseCurrency,
-		TotalCostBasis:         round2(activeCostBasis),
-		CurrentValue:           round2(currentValue),
-		GainLoss:               round2(unrealizedGainLoss),
+		TotalCostBasis:         money.QuantizeValue(activeCostBasis),
+		CurrentValue:           money.QuantizeValue(currentValue),
+		GainLoss:               money.QuantizeValue(unrealizedGainLoss),
 		GainLossPercentage:     round2(gainLossPct),
 		PortfolioIndex:         100,
 		Positions:              positions,
 		ClosedPositions:        closed,
-		ActiveCostBasisBase:    round2(activeCostBasis),
-		ActiveCurrentValueBase: round2(activeCurrentValue),
-		UnrealizedGainLossBase: round2(unrealizedGainLoss),
-		ClosedCostBasisBase:    round2(closedCostBasis),
-		RealizedGainLossBase:   round2(realizedGainLoss),
+		ActiveCostBasisBase:    money.QuantizeValue(activeCostBasis),
+		ActiveCurrentValueBase: money.QuantizeValue(activeCurrentValue),
+		UnrealizedGainLossBase: money.QuantizeValue(unrealizedGainLoss),
+		ClosedCostBasisBase:    money.QuantizeValue(closedCostBasis),
+		RealizedGainLossBase:   money.QuantizeValue(realizedGainLoss),
 	}
 }

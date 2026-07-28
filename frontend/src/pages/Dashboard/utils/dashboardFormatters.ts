@@ -18,13 +18,19 @@ export function getDaysRemaining(endsAt: string | undefined): number | null {
   return Math.max(0, Math.ceil((end - now) / (1000 * 60 * 60 * 24)));
 }
 
+/**
+ * Accepts either a plain `number` (e.g. a percentage/ratio field) or a
+ * decimal-string money field. The string form is only parsed here, at this
+ * display boundary, never for arithmetic.
+ */
 export function getPerformanceTone(
-  value: number | undefined | null,
+  value: number | string | undefined | null,
 ): PerformanceTone {
-  if (value === undefined || value === null || !Number.isFinite(value)) {
+  const n = typeof value === "string" ? Number(value) : value;
+  if (n === undefined || n === null || !Number.isFinite(n)) {
     return "neutral";
   }
-  if (value > 0) return "positive";
-  if (value < 0) return "negative";
+  if (n > 0) return "positive";
+  if (n < 0) return "negative";
   return "neutral";
 }

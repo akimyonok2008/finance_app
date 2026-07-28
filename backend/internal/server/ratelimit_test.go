@@ -10,6 +10,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/ardakimyonok/finance_app/internal/auth"
 )
 
 func TestIPRateLimiter_AllowsUpToLimitThenBlocks(t *testing.T) {
@@ -28,6 +30,36 @@ func TestIPRateLimiter_KeysAreIndependent(t *testing.T) {
 
 	assert.True(t, l.allow(ctx, "1.2.3.4"))
 	assert.True(t, l.allow(ctx, "5.6.7.8"), "a different key must have its own budget")
+}
+
+func TestAuthenticatedRateLimitUsesUserIDNotSharedIP(t *testing.T) {
+	limiter := newIPRateLimiter(1, time.Minute)
+	tokens := auth.NewTokenManager("rate-limit-test-secret", time.Hour)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := auth.RequireAuth(tokens)(
+		rateLimitMiddlewareByKey(limiter, authenticatedUserOrIPKey)(next),
+	)
+	tokenFor := func(userID string) string {
+		token, err := tokens.Generate(userID, userID+"@example.com", 1)
+		assert.NoError(t, err)
+		return token
+	}
+	request := func(token string) int {
+		req := httptest.NewRequest(http.MethodPost, "/dm/messages", nil)
+		req.RemoteAddr = "203.0.113.5:54321"
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	userOne := tokenFor("user-one")
+	assert.Equal(t, http.StatusNoContent, request(userOne))
+	assert.Equal(t, http.StatusTooManyRequests, request(userOne))
+	assert.Equal(t, http.StatusNoContent, request(tokenFor("user-two")),
+		"a second authenticated user behind the same IP must have an independent budget")
 }
 
 func newTestRedisLimiter(t *testing.T, name string, limit int, window time.Duration) (*redisRateLimiter, *miniredis.Miniredis) {

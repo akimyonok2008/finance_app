@@ -220,34 +220,19 @@ func TestSummary_ReturnsCalculatedSummary(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	// Fresh position: baseline = today's price, so the index starts at 100.
-	assert.Equal(t, 1950.0, body["total_cost_basis"])
-	assert.Equal(t, 1950.0, body["current_value"])
-	assert.Equal(t, 0.0, body["gain_loss"])
+	// Money fields now serialize as decimal strings.
+	assert.Equal(t, "1950", body["total_cost_basis"])
+	assert.Equal(t, "1950", body["current_value"])
+	assert.Equal(t, "0", body["gain_loss"])
 	assert.InDelta(t, 100.0, body["portfolio_index"], 0.01)
 }
 
-// TestBuyPosition_RejectsFutureEffectiveAt: a trade can't be "effective"
-// tomorrow. Allowing a future date would let a public profile show
-// performance for a period that hasn't happened yet.
-func TestBuyPosition_RejectsFutureEffectiveAt(t *testing.T) {
-	e := newTestEnv()
-	token := e.token(t, "user-1")
-	future := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
-
-	rec := e.doWithKey(t, http.MethodPost, "/portfolio/buys",
-		`{"symbol":"AAPL","asset_type":"stock","quantity":1,"effective_at":"`+future+`"}`,
-		token, "buy-future")
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assertError(t, rec.Body.Bytes())
-}
-
-// TestBuyPosition_AllowsBackdatedEffectiveAt: backdating is a deliberate,
-// supported feature (a real trade recorded after the fact) and must keep
-// working — only a future date is rejected. A backdated trade also requires
-// an explicit execution_price (there is no live quote for a past date to
-// estimate from), so this supplies one.
-func TestBuyPosition_AllowsBackdatedEffectiveAt(t *testing.T) {
+// TestBuyPosition_RejectsEffectiveAtField: there is no backdating for
+// buys/sells — every trade is recorded against the live quote at entry time.
+// The request body has no effective_at field at all, so submitting one (past
+// or future) is rejected as an unrecognized field rather than silently
+// accepted or applied.
+func TestBuyPosition_RejectsEffectiveAtField(t *testing.T) {
 	e := newTestEnv()
 	token := e.token(t, "user-1")
 	past := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
@@ -256,7 +241,8 @@ func TestBuyPosition_AllowsBackdatedEffectiveAt(t *testing.T) {
 		`{"symbol":"AAPL","asset_type":"stock","quantity":1,"execution_price":190,"effective_at":"`+past+`"}`,
 		token, "buy-past")
 
-	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertError(t, rec.Body.Bytes())
 }
 
 // TestRecordFee_RejectsFutureEffectiveAt covers the same guard on the fee

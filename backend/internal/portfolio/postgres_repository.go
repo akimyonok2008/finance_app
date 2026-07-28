@@ -398,3 +398,26 @@ func (r *PostgresRepository) ListArchiveSnapshots(ctx context.Context, userID st
 	}
 	return out, rows.Err()
 }
+
+// SnapshottedUserIDs queries the generated captured_date column directly
+// (see migration 0010's daily-uniqueness index), so it's an index-only
+// membership check rather than a valuation.
+func (r *PostgresRepository) SnapshottedUserIDs(ctx context.Context, date time.Time) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT DISTINCT user_id FROM portfolio_archive_snapshots WHERE captured_date = $1`,
+		date.UTC().Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list snapshotted user ids: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, fmt.Errorf("portfolio: scan snapshotted user id: %w", err)
+		}
+		out[userID] = true
+	}
+	return out, rows.Err()
+}

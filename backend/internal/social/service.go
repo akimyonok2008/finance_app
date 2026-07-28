@@ -323,11 +323,24 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID, body 
 		Body:           body,
 		CreatedAt:      s.now(),
 	}
-	if err := s.repo.AddMessage(ctx, msg); err != nil {
-		return MessageResponse{}, err
-	}
+	write := MessageWrite{Message: msg}
 	if s.notifier != nil {
-		_ = s.notifier.Notify(ctx, other, "new_message", "message:"+msg.ID, map[string]string{"conversation_id": conversationID})
+		notification := &MessageNotification{
+			ID: uuid.NewString(), RecipientID: other, Type: "new_message",
+			DedupeKey: "message:" + msg.ID,
+			Payload:   map[string]string{"conversation_id": conversationID},
+			CreatedAt: msg.CreatedAt,
+		}
+		write.Notification = notification
+		write.VolatileNotify = func(ctx context.Context) error {
+			return s.notifier.Notify(
+				ctx, notification.RecipientID, notification.Type,
+				notification.DedupeKey, notification.Payload,
+			)
+		}
+	}
+	if err := s.repo.CreateMessage(ctx, write, defaultMessageAbusePolicy); err != nil {
+		return MessageResponse{}, err
 	}
 	dto, err := s.messageDTO(ctx, userID, msg)
 	if err != nil {

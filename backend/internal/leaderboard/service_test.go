@@ -294,6 +294,60 @@ func TestRefreshCache_ConcurrentWorkersConvergeIdempotently(t *testing.T) {
 	assert.Equal(t, "u2", top[0].UserID)
 }
 
+// TestRefreshCache_BatchedRevaluesBoundedSubsetPerCall locks in the fix for
+// RefreshCache doing an unbounded full-portfolio-valuation pass over every
+// user on every call (a problem on a short ticker interval as user count
+// grows): with SetRefreshBatchSize(1) on three users, each call must only
+// call CurrentRankedPerformance for one user, and three calls must cover all
+// three without ever wrongly evicting the two users not revalued that call.
+func TestRefreshCache_BatchedRevaluesBoundedSubsetPerCall(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "A"), user("u2", "B"), user("u3", "C")}}
+	counts := &countingRanked{byUser: map[string]RankedPerformance{
+		"u1": summary("1", "101"), "u2": summary("2", "102"), "u3": summary("3", "103"),
+	}}
+	svc := NewService(users, counts)
+	cache := newTestCache(t)
+	svc.SetCache(cache)
+	svc.SetRefreshBatchSize(1)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		_, err := svc.RefreshCache(ctx)
+		require.NoError(t, err)
+	}
+
+	// Exactly one valuation per user per full cycle: bounded work per call,
+	// not O(all users) every call.
+	assert.Equal(t, 1, counts.calls["u1"])
+	assert.Equal(t, 1, counts.calls["u2"])
+	assert.Equal(t, 1, counts.calls["u3"])
+
+	// All three must still be present in the cache: a user not revalued on a
+	// given call must never be evicted as if deleted/unrankable.
+	top, err := cache.GetGlobalTop(ctx, 0)
+	require.NoError(t, err)
+	assert.Len(t, top, 3)
+}
+
+// countingRanked wraps fakeRanked's data with a per-user call counter so the
+// batching test can assert exactly which users were (and weren't) revalued.
+type countingRanked struct {
+	byUser map[string]RankedPerformance
+	calls  map[string]int
+}
+
+func (c *countingRanked) CurrentRankedPerformance(_ context.Context, userID string) (RankedPerformance, error) {
+	if c.calls == nil {
+		c.calls = map[string]int{}
+	}
+	c.calls[userID]++
+	rp, ok := c.byUser[userID]
+	if !ok {
+		return RankedPerformance{}, errors.New("no ranked performance")
+	}
+	return rp, nil
+}
+
 func TestCachedReadRemovesUnknownUserMember(t *testing.T) {
 	svc := NewService(
 		fakeUsers{users: []auth.User{user("active", "Active")}},

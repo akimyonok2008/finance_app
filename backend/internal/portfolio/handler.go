@@ -181,11 +181,12 @@ type buyRequest struct {
 	MIC          string         `json:"mic,omitempty"`
 	AssetType    string         `json:"asset_type"`
 	Quantity     money.Quantity `json:"quantity"`
-	// Optional real execution details. Omitted price/fee/date default to the
-	// latest tracked quote / zero / now and are labelled as estimates.
+	// Optional real execution details for the trade happening now. Omitted
+	// price/fee default to the latest tracked quote / zero and are labelled
+	// as estimates. There is no backdating field: every trade is recorded
+	// against the live quote at entry time.
 	ExecutionPrice money.Price  `json:"execution_price,omitempty"`
 	Fee            money.Amount `json:"fee,omitempty"`
-	EffectiveAt    string       `json:"effective_at,omitempty"`
 }
 
 type sellRequest struct {
@@ -194,7 +195,6 @@ type sellRequest struct {
 	Quantity       money.Quantity `json:"quantity"`
 	ExecutionPrice money.Price    `json:"execution_price,omitempty"`
 	Fee            money.Amount   `json:"fee,omitempty"`
-	EffectiveAt    string         `json:"effective_at,omitempty"`
 }
 
 type activityMutationView struct {
@@ -336,7 +336,7 @@ func (h *Handler) ListCash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"cash_balances": balances, "total_cash_value_base": round2(total),
+		"cash_balances": balances, "total_cash_value_base": total,
 		"base_currency": "USD",
 	})
 }
@@ -449,14 +449,10 @@ func (h *Handler) BuyPosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	effectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
-	if !ok {
-		return
-	}
 	res, err := h.svc.BuyPosition(r.Context(), uid, requestID, BuyInput{
 		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
 		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -479,13 +475,9 @@ func (h *Handler) SellPosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	effectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
-	if !ok {
-		return
-	}
 	res, err := h.svc.SellPosition(r.Context(), uid, requestID, SellInput{
 		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -507,14 +499,10 @@ func (h *Handler) PreviewBuy(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	effectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
-	if !ok {
-		return
-	}
 	preview, err := h.svc.PreviewBuy(r.Context(), uid, BuyInput{
 		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
 		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -533,13 +521,9 @@ func (h *Handler) PreviewSell(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	sellEffectiveAt, ok := parseEffectiveAt(w, req.EffectiveAt)
-	if !ok {
-		return
-	}
 	preview, err := h.svc.PreviewSell(r.Context(), uid, SellInput{
 		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
-		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: sellEffectiveAt,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -715,10 +699,10 @@ func (h *Handler) PerformanceSummary(w http.ResponseWriter, r *http.Request) {
 		Ranked:       summary.RankedPerformance,
 		Economic:     summary.EconomicPerformance,
 		Attribution: PerformanceAttribution{
-			UnrealizedPnLBase: summary.OpenHoldings.UnrealizedPnLBase,
-			RealizedPnLBase:   summary.Realized.RealizedPnLBase,
-			IncomeBase:        summary.Income.TotalIncomeBase,
-			FeesBase:          summary.Fees.TotalFeesBase,
+			UnrealizedPnLBase: summary.OpenHoldings.UnrealizedPnLBase.Float64(),
+			RealizedPnLBase:   summary.Realized.RealizedPnLBase.Float64(),
+			IncomeBase:        summary.Income.TotalIncomeBase.Float64(),
+			FeesBase:          summary.Fees.TotalFeesBase.Float64(),
 		},
 		Reconciliation:    summary.Reconciliation,
 		EconomicBreakdown: summary.EconomicAttribution,
@@ -774,7 +758,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrInvalidSaleFee),
 		errors.Is(err, ErrInvalidBuyPrice),
 		errors.Is(err, ErrInvalidBuyFee),
-		errors.Is(err, ErrHistoricalExecutionPriceRequired),
 		errors.Is(err, ErrImplausibleExecutionPrice),
 		errors.Is(err, ErrCorrectionNotSupported),
 		errors.Is(err, ErrNothingToCorrect):
@@ -788,13 +771,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrPositionClosed),
 		errors.Is(err, ErrSymbolChangeConflict),
 		errors.Is(err, ErrActivityAlreadyCorrected),
+		errors.Is(err, ErrCorrectionSupersededByLaterActivity),
+		errors.Is(err, ErrCorrectionRankedConflict),
 		errors.Is(err, ErrPositionIsPriceable):
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrInsufficientCash),
 		errors.Is(err, ErrInsufficientCashForFee),
-		errors.Is(err, ErrHistoricalRankedConflict),
-		errors.Is(err, ErrHistoricalQuantityInsufficient),
-		errors.Is(err, ErrHistoricalEpisodeNotOpen),
 		errors.Is(err, ErrInstrumentIdentityAmbiguous),
 		errors.Is(err, ErrInstrumentIdentityUnresolvedConflict),
 		errors.Is(err, ErrInvalidSaleQuantity):

@@ -136,51 +136,6 @@ func TestPG_BuyIdempotencyConstraint(t *testing.T) {
 	assertQuantityEqual(t, "3", positions[0].Quantity)
 }
 
-// TestPG_HistoricalQuantityValidation proves the conservative historical policy
-// reads the ledger through the aggregate transaction against a real database.
-func TestPG_HistoricalQuantityValidation(t *testing.T) {
-	pool := testPool(t)
-	repo := NewPostgresRepository(pool)
-	userID := seedUser(t, pool)
-	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
-	ctx := context.Background()
-
-	early := time.Now().UTC().Add(-10 * 24 * time.Hour)
-	_, err := svc.BuyPosition(ctx, userID, "pg-hist-1", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("5"), ExecutionPrice: testPrice("195"), EffectiveAt: &early,
-	})
-	require.NoError(t, err)
-	_, err = svc.BuyPosition(ctx, userID, "pg-hist-2", BuyInput{
-		Symbol: "AAPL", AssetType: AssetTypeStock, Quantity: testQuantity("20"),
-	})
-	require.NoError(t, err)
-
-	positions, err := svc.ListPositions(ctx, userID)
-	require.NoError(t, err)
-	require.Len(t, positions, 1)
-	requireQuantityEqual(t, "25", positions[0].Quantity)
-
-	// Only 5 units were held 9 days ago, even though 25 are held now.
-	backdated := early.Add(24 * time.Hour)
-	_, err = svc.SellPosition(ctx, userID, "pg-hist-sell", SellInput{
-		PositionID: positions[0].ID, Quantity: testQuantity("10"), ExecutionPrice: testPrice("195"), EffectiveAt: &backdated,
-	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrHistoricalQuantityInsufficient)
-
-	// The rejection committed nothing.
-	pf, err := repo.GetPortfolioByUser(ctx, userID)
-	require.NoError(t, err)
-	var sells int
-	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT count(*) FROM portfolio_activities WHERE portfolio_id=$1 AND activity_type='sell'`,
-		pf.ID).Scan(&sells))
-	assert.Zero(t, sells)
-	after, err := svc.ListPositions(ctx, userID)
-	require.NoError(t, err)
-	assertQuantityEqual(t, "25", after[0].Quantity)
-}
-
 func TestPG_InstrumentIdentityMatchesMemoryPortfolioFlow(t *testing.T) {
 	pool := testPool(t)
 	repo := NewPostgresRepository(pool)
@@ -261,17 +216,20 @@ func TestPG_IncomeDiscoveryAndEntitlementMatchHistoricalLedger(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	buyAt := now.AddDate(0, 0, -10)
+	svc.Coordinator().SetClock(func() time.Time { return buyAt })
 	buy, err := svc.BuyPosition(ctx, userID, "income-pg-buy", BuyInput{
 		Symbol: ticker, ExchangeCode: "UN", AssetType: AssetTypeStock,
-		Quantity: testQuantity("10"), ExecutionPrice: testPrice("100"), EffectiveAt: &buyAt,
+		Quantity: testQuantity("10"), ExecutionPrice: testPrice("100"),
 	})
 	require.NoError(t, err)
 	require.Equal(t, in.ID, buy.Position.InstrumentID)
 	sellAt := now.AddDate(0, 0, -2)
+	svc.Coordinator().SetClock(func() time.Time { return sellAt })
 	_, err = svc.SellPosition(ctx, userID, "income-pg-sell", SellInput{
-		Symbol: ticker, Quantity: testQuantity("10"), ExecutionPrice: testPrice("105"), EffectiveAt: &sellAt,
+		Symbol: ticker, Quantity: testQuantity("10"), ExecutionPrice: testPrice("105"),
 	})
 	require.NoError(t, err)
+	svc.Coordinator().SetClock(func() time.Time { return time.Now().UTC() })
 
 	discovered, err := svc.IncomeDiscoveryInstruments(ctx, now.AddDate(0, 0, -30))
 	require.NoError(t, err)
