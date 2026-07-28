@@ -5,6 +5,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/httpx"
+	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Handler exposes the leaderboard over HTTP. It assumes it runs behind
@@ -34,27 +35,27 @@ func (h *Handler) GetLeaderboard(w http.ResponseWriter, r *http.Request) {
 // standingView is the privacy-safe shape for GET /leaderboard/me. Rank is null
 // when the caller has no rankable portfolio yet.
 type standingView struct {
-	Timeframe              Timeframe      `json:"timeframe"`
-	Eligible               bool           `json:"eligible"`
-	Rank                   *int           `json:"rank"`
-	PreviousRank           *int           `json:"previous_rank"`
-	RankDelta              *int           `json:"rank_delta"`
-	BestRank               *int           `json:"best_rank"`
-	ParticipantCount       int            `json:"participant_count"`
-	TotalParticipants      int            `json:"total_participants"`
-	Percentile             float64        `json:"percentile"`
-	RankedReturnPercentage float64        `json:"ranked_return_percentage"`
-	RankedIndex            float64        `json:"ranked_index"`
-	Paused                 bool           `json:"paused"`
-	NextMilestone          *milestoneView `json:"next_milestone"`
-	Reason                 string         `json:"reason"`
+	Timeframe              Timeframe        `json:"timeframe"`
+	Eligible               bool             `json:"eligible"`
+	Rank                   *int             `json:"rank"`
+	PreviousRank           *int             `json:"previous_rank"`
+	RankDelta              *int             `json:"rank_delta"`
+	BestRank               *int             `json:"best_rank"`
+	ParticipantCount       int              `json:"participant_count"`
+	TotalParticipants      int              `json:"total_participants"`
+	Percentile             float64          `json:"percentile"`
+	RankedReturnPercentage money.Ratio      `json:"ranked_return_percentage"`
+	RankedIndex            money.IndexValue `json:"ranked_index"`
+	Paused                 bool             `json:"paused"`
+	NextMilestone          *milestoneView   `json:"next_milestone"`
+	Reason                 string           `json:"reason"`
 }
 
 type milestoneView struct {
-	Label               string  `json:"label"`
-	TargetRank          int     `json:"target_rank"`
-	RankGap             int     `json:"rank_gap"`
-	ReturnGapPercentage float64 `json:"return_gap_percentage"`
+	Label               string      `json:"label"`
+	TargetRank          int         `json:"target_rank"`
+	RankGap             int         `json:"rank_gap"`
+	ReturnGapPercentage money.Ratio `json:"return_gap_percentage"`
 }
 
 // GetMyStanding handles GET /leaderboard/me?timeframe=... — the caller's own

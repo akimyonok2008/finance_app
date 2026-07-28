@@ -93,7 +93,7 @@ func TestLeaderboard_ReturnsRankedEntriesWithValidToken(t *testing.T) {
 	assert.Equal(t, 1, board[0].Rank)
 	assert.Equal(t, "AlphaWolf_91", board[0].DisplayName)
 	assert.Equal(t, "fox", board[0].AvatarKey)
-	assert.InDelta(t, 12.4, board[0].GainLossPercentage, 0.001)
+	assert.InDelta(t, 12.4, board[0].GainLossPercentage.Float64(), 0.001)
 
 	assert.Equal(t, 2, board[1].Rank)
 	assert.Equal(t, "SilentBull_77", board[1].DisplayName)
@@ -138,8 +138,8 @@ func TestLeaderboardMe_ReturnsEnhancedStanding(t *testing.T) {
 		ParticipantCount       int                   `json:"participant_count"`
 		TotalParticipants      int                   `json:"total_participants"`
 		Percentile             float64               `json:"percentile"`
-		RankedReturnPercentage float64               `json:"ranked_return_percentage"`
-		RankedIndex            float64               `json:"ranked_index"`
+		RankedReturnPercentage money.Ratio           `json:"ranked_return_percentage"`
+		RankedIndex            money.IndexValue      `json:"ranked_index"`
 		Reason                 string                `json:"reason"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
@@ -152,7 +152,7 @@ func TestLeaderboardMe_ReturnsEnhancedStanding(t *testing.T) {
 	assert.Equal(t, 2, body.ParticipantCount)
 	assert.Equal(t, 2, body.TotalParticipants)
 	assert.InDelta(t, 50.0, body.Percentile, 0.01)
-	assert.InDelta(t, 8.1, body.RankedReturnPercentage, 0.001)
-	assert.InDelta(t, 108.1, body.RankedIndex, 0.001)
+	assert.InDelta(t, 8.1, body.RankedReturnPercentage.Float64(), 0.001)
+	assert.InDelta(t, 108.1, body.RankedIndex.Float64(), 0.001)
 	assert.Empty(t, body.Reason)
 }

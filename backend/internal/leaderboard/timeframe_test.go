@@ -46,8 +46,8 @@ func TestBuildTimeframe_WindowedReturnFromSnapshots(t *testing.T) {
 	require.Len(t, board, 2)
 	// u1 1W = (120/110-1)*100 = 9.09; u2 = (105/104-1)*100 = 0.96 → u1 leads.
 	assert.Equal(t, "Alpha", board[0].DisplayName)
-	assert.InDelta(t, 9.09, board[0].RankedReturnPercentage, 0.05)
-	assert.InDelta(t, 109.09, board[0].RankedIndex, 0.05)
+	assert.InDelta(t, 9.09, board[0].RankedReturnPercentage.Float64(), 0.05)
+	assert.InDelta(t, 109.09, board[0].RankedIndex.Float64(), 0.05)
 }
 
 // TestBuildTimeframe_ExcludesUserWhenSnapshotGapExceedsMaxAge: a base snapshot
@@ -228,8 +228,8 @@ func TestUserStanding(t *testing.T) {
 	require.NotNil(t, st.NextMilestone)
 	assert.Equal(t, "#1", st.NextMilestone.Label)
 	assert.Equal(t, 1, st.NextMilestone.RankGap)
-	assert.InDelta(t, 4.0, st.NextMilestone.ReturnGapPercentage, 0.01)
-	assert.InDelta(t, 8.0, st.RankedReturnPercentage, 0.01)
+	assert.InDelta(t, 4.0, st.NextMilestone.ReturnGapPercentage.Float64(), 0.01)
+	assert.InDelta(t, 8.0, st.RankedReturnPercentage.Float64(), 0.01)
 
 	// Unknown user: not ranked, but total still reported.
 	ghost, err := svc.UserStanding(context.Background(), "ghost", TimeframeAll)
@@ -267,8 +267,8 @@ func TestUserStanding_PausedOverridesAnyCachedRankAndPreservesIndex(t *testing.T
 	require.NoError(t, err)
 	assert.False(t, st.Ranked)
 	assert.True(t, st.Paused)
-	assert.Equal(t, 112.0, st.RankedIndex)
-	assert.Equal(t, 12.0, st.RankedReturnPercentage)
+	assert.Equal(t, 112.0, st.RankedIndex.Float64())
+	assert.Equal(t, 12.0, st.RankedReturnPercentage.Float64())
 	assert.Contains(t, st.Reason, "paused")
 }
 

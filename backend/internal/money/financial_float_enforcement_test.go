@@ -74,11 +74,6 @@ func TestCoreDomainsDoNotAddAuthoritativeFloatFields(t *testing.T) {
 		"benchmark.BenchmarkRecipeVersion.MappedMarketValueTotal":  "provider mapping diagnostic",
 		"leaderboard.CachedLeaderboardScore.Score":                 "Redis IEEE-754 read boundary",
 		"leaderboard.PublicWeight.WeightPercentage":                "public presentation percentage",
-		"leaderboard.UserRanking.RankedReturnPercentage":           "profile presentation projection after exact ordering",
-		"leaderboard.UserRanking.RankedIndex":                      "profile presentation projection after exact ordering",
-		"leaderboard.Standing.RankedReturnPercentage":              "HTTP presentation projection after exact ordering",
-		"leaderboard.Standing.RankedIndex":                         "HTTP presentation projection after exact ordering",
-		"leaderboard.Milestone.ReturnGapPercentage":                "HTTP presentation percentage",
 	}
 
 	for _, pkg := range packages {

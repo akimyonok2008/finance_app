@@ -106,8 +106,8 @@ func TestBuild_EmptyPortfolioIsZeroAndHundred(t *testing.T) {
 	board, err := svc.Build(context.Background())
 	require.NoError(t, err)
 	require.Len(t, board, 1)
-	assert.Equal(t, 0.0, board[0].GainLossPercentage)
-	assert.Equal(t, 100.0, board[0].PortfolioIndex)
+	assert.Equal(t, 0.0, board[0].GainLossPercentage.Float64())
+	assert.Equal(t, 100.0, board[0].PortfolioIndex.Float64())
 }
 
 func TestBuild_TieBrokenByDisplayNameAscending(t *testing.T) {
@@ -189,8 +189,8 @@ func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
 	require.Len(t, board, 2)
 	// Cached scores (50 > 25) win, not the live summaries (2 > 1).
 	assert.Equal(t, "Alpha", board[0].DisplayName)
-	assert.Equal(t, 50.0, board[0].GainLossPercentage)
-	assert.Equal(t, 150.0, board[0].PortfolioIndex, "index derives from cached score")
+	assert.Equal(t, 50.0, board[0].GainLossPercentage.Float64())
+	assert.Equal(t, 150.0, board[0].PortfolioIndex.Float64(), "index derives from cached score")
 	assert.Equal(t, 1, board[0].Rank)
 }
 
@@ -205,7 +205,7 @@ func TestBuild_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, board, 2)
 	assert.Equal(t, "Beta", board[0].DisplayName, "live calculation must be used when cache is empty")
-	assert.InDelta(t, 12.4, board[0].GainLossPercentage, 0.001)
+	assert.InDelta(t, 12.4, board[0].GainLossPercentage.Float64(), 0.001)
 }
 
 func TestRefreshCache_PopulatesScores(t *testing.T) {

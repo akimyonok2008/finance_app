@@ -168,7 +168,7 @@ func (s *Service) enrich(ctx context.Context, userID string, e *LeaderboardEntry
 
 // rankedEntry builds a row, populating both the ranked_* fields and their
 // backward-compatible gain_loss/portfolio aliases with the same values.
-func rankedEntry(rank int, displayName, avatarKey string, returnPct, index float64) LeaderboardEntry {
+func rankedEntry(rank int, displayName, avatarKey string, returnPct money.Ratio, index money.IndexValue) LeaderboardEntry {
 	return LeaderboardEntry{
 		Rank:                   rank,
 		DisplayName:            displayName,
@@ -214,9 +214,12 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 			continue
 		}
 		// portfolio_index = 100 + gain% holds exactly for our formulas.
+		// sc.Score comes from the Redis cache boundary, which is a documented
+		// legacy IEEE-754 read (CachedLeaderboardScore.Score); the exact value
+		// is reconstructed at this float64->money boundary conversion.
 		e := rankedEntry(
 			len(entries)+1, u.DisplayName, u.AvatarKey,
-			round2(sc.Score), round2(100+sc.Score),
+			money.RatioFromFloat64(round2(sc.Score)), money.IndexValueFromFloat64(round2(100+sc.Score)),
 		)
 		s.enrich(ctx, sc.UserID, &e)
 		entries = append(entries, e)
@@ -336,8 +339,8 @@ type Result struct {
 type UserRanking struct {
 	UserID                 string
 	Rank                   int
-	RankedReturnPercentage float64
-	RankedIndex            float64
+	RankedReturnPercentage money.Ratio
+	RankedIndex            money.IndexValue
 }
 
 func (s *Service) UserRankings(ctx context.Context, tf Timeframe) ([]UserRanking, error) {
@@ -437,8 +440,8 @@ type Standing struct {
 	BestRank               *int
 	ParticipantCount       int
 	Percentile             float64
-	RankedReturnPercentage float64
-	RankedIndex            float64
+	RankedReturnPercentage money.Ratio
+	RankedIndex            money.IndexValue
 	Ranked                 bool
 	Paused                 bool
 	Reason                 string
@@ -451,7 +454,7 @@ type Milestone struct {
 	Label               string
 	TargetRank          int
 	RankGap             int
-	ReturnGapPercentage float64
+	ReturnGapPercentage money.Ratio
 }
 
 // UserStanding computes the caller's rank within the timeframe board, plus the
@@ -481,8 +484,8 @@ func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe)
 		// preserved and excluded from ranking) from a user who has never ranked.
 		if rp, err := s.ranked.CurrentRankedPerformance(ctx, userID); err == nil && rp.Paused {
 			st.Paused = true
-			st.RankedIndex = round2(rp.RankedIndex.Float64())
-			st.RankedReturnPercentage = round2(rp.RankedReturnPercentage.Float64())
+			st.RankedIndex = rp.RankedIndex
+			st.RankedReturnPercentage = rp.RankedReturnPercentage
 			st.Reason = "Ranked tracking is paused. Your accumulated index is preserved — add a position to resume from it."
 		} else if _, windowed := tf.window(); windowed {
 			st.Reason = "Not enough ranked history for this timeframe yet."
@@ -564,7 +567,7 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 			}
 			idx = money.MustIndexValue("100").MulRatio(factor)
 		}
-		e := rankedEntry(0, u.DisplayName, u.AvatarKey, round2(retPct.Float64()), round2(idx.Float64()))
+		e := rankedEntry(0, u.DisplayName, u.AvatarKey, retPct, idx)
 		s.enrich(ctx, u.ID, &e)
 		rows = append(rows, rankedRow{userID: u.ID, entry: e, returnPct: retPct, rankedIndex: idx})
 	}
@@ -600,7 +603,7 @@ func percentile(rank, participants int) float64 {
 	return round2(float64(participants-rank+1) / float64(participants) * 100)
 }
 
-func nextMilestone(rows []rankedRow, rank int, returnPct float64) *Milestone {
+func nextMilestone(rows []rankedRow, rank int, returnPct money.Ratio) *Milestone {
 	if rank <= 1 {
 		return nil
 	}
@@ -613,11 +616,11 @@ func nextMilestone(rows []rankedRow, rank int, returnPct float64) *Milestone {
 	case rank > 10:
 		targetRank, label = 10, "Top 10"
 	}
-	gap := 0.0
+	gap := money.ZeroRatio()
 	if targetRank > 0 && targetRank <= len(rows) {
-		gap = round2(rows[targetRank-1].entry.RankedReturnPercentage - returnPct)
-		if gap < 0 {
-			gap = 0
+		gap = rows[targetRank-1].entry.RankedReturnPercentage.Sub(returnPct)
+		if gap.Sign() < 0 {
+			gap = money.ZeroRatio()
 		}
 	}
 	return &Milestone{

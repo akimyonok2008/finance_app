@@ -460,8 +460,8 @@ func (a profileTimeframeRankAdapter) UserRankings(ctx context.Context, timeframe
 		out = append(out, profile.TimeframeRanking{
 			UserID:                 row.UserID,
 			Rank:                   row.Rank,
-			RankedReturnPercentage: row.RankedReturnPercentage,
-			RankedIndex:            row.RankedIndex,
+			RankedReturnPercentage: row.RankedReturnPercentage.Float64(),
+			RankedIndex:            row.RankedIndex.Float64(),
 		})
 	}
 	return out, nil
