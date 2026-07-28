@@ -3,6 +3,7 @@ package social
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -107,6 +108,11 @@ func TestService_ModeratorRemovalCreatesTombstone(t *testing.T) {
 func TestService_UnreadCounts(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestSocialService()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	}
 	friendPair(t, svc, "user-a", "user-b")
 	convo, err := svc.CreateConversation(ctx, "user-a", "beta")
 	require.NoError(t, err)

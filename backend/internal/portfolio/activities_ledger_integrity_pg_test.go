@@ -129,7 +129,7 @@ func TestPG_ReturnOfCapitalPersistsAndReconciles(t *testing.T) {
 	positions, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.Less(t, positions[0].AverageBuyPrice, 40.0, "basis must be reduced by the return of capital")
+	assert.Less(t, positions[0].AverageBuyPrice.Cmp(testPrice("40")), 0, "basis must be reduced by the return of capital")
 }
 
 // TestPG_StockDividendZeroGrossPersistsAndPreservesBasis proves a
@@ -158,7 +158,7 @@ func TestPG_StockDividendZeroGrossPersistsAndPreservesBasis(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res.Position)
-	assert.InDelta(t, 11, res.Position.Quantity, 0.0001)
+	assertQuantityEqual(t, "11", res.Position.Quantity)
 
 	after, err := svc.Summary(ctx, userID)
 	require.NoError(t, err)

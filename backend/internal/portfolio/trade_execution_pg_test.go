@@ -87,13 +87,13 @@ func TestPG_AutomaticFundingGroupPersists(t *testing.T) {
 	require.NoError(t, err)
 	for _, b := range balances {
 		if b.Currency == "USD" {
-			assert.InDelta(t, 0.0, b.Amount, 1e-6)
+			assertAmountEqual(t, "0", b.Amount)
 		}
 	}
 	positions, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 197.0, positions[0].AverageBuyPrice, 1e-6) // (390 + 4) / 2
+	assertPriceEqual(t, "197", positions[0].AverageBuyPrice) // (390 + 4) / 2
 }
 
 // TestPG_BuyIdempotencyConstraint proves the (portfolio_id, request_id) unique
@@ -133,7 +133,7 @@ func TestPG_BuyIdempotencyConstraint(t *testing.T) {
 	positions, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	assert.InDelta(t, 3.0, positions[0].Quantity, 1e-6)
+	assertQuantityEqual(t, "3", positions[0].Quantity)
 }
 
 // TestPG_HistoricalQuantityValidation proves the conservative historical policy
@@ -158,7 +158,7 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 	positions, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
 	require.Len(t, positions, 1)
-	require.InDelta(t, 25.0, positions[0].Quantity, 1e-6)
+	requireQuantityEqual(t, "25", positions[0].Quantity)
 
 	// Only 5 units were held 9 days ago, even though 25 are held now.
 	backdated := early.Add(24 * time.Hour)
@@ -178,7 +178,7 @@ func TestPG_HistoricalQuantityValidation(t *testing.T) {
 	assert.Zero(t, sells)
 	after, err := svc.ListPositions(ctx, userID)
 	require.NoError(t, err)
-	assert.InDelta(t, 25.0, after[0].Quantity, 1e-6)
+	assertQuantityEqual(t, "25", after[0].Quantity)
 }
 
 func TestPG_InstrumentIdentityMatchesMemoryPortfolioFlow(t *testing.T) {

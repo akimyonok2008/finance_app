@@ -135,7 +135,7 @@ func TestPGIndexAtOrBeforeIsEpochSafeAndCompleteOnly(t *testing.T) {
 	index, capturedAt, found, err := repo.IndexAtOrBefore(context.Background(), userID, now, currentEpoch)
 	require.NoError(t, err)
 	require.True(t, found)
-	assert.Equal(t, 110.0, index)
+	assertIndexEqual(t, "110", index)
 	assert.WithinDuration(t, complete.CapturedAt, capturedAt, time.Second)
 }
 

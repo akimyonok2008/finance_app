@@ -148,7 +148,7 @@ func (p *TwelveDataProvider) GetQuotes(ctx context.Context, symbols []string) ([
 	if err := json.Unmarshal(body, &batch); err != nil {
 		return nil, ErrInvalidProviderResponse
 	}
-	out := make([]Quote, 0, len(batch))
+	parsed := make(map[string]Quote, len(batch))
 	for symbol, raw := range batch {
 		quote, err := parseTwelveQuote(symbol, raw, now, p.ttl)
 		if err != nil {
@@ -157,7 +157,13 @@ func (p *TwelveDataProvider) GetQuotes(ctx context.Context, symbols []string) ([
 			}
 			return nil, err
 		}
-		out = append(out, quote)
+		parsed[normalizeSymbol(symbol)] = quote
+	}
+	out := make([]Quote, 0, len(parsed))
+	for _, symbol := range normalized {
+		if quote, ok := parsed[symbol]; ok {
+			out = append(out, quote)
+		}
 	}
 	if len(out) == 0 {
 		return nil, ErrSymbolNotFound

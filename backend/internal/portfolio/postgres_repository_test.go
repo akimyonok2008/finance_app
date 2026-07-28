@@ -223,7 +223,7 @@ func TestPG_CashActivityIsAtomicIdempotentAndConstrained(t *testing.T) {
 	balances, err := repo.ListCashBalances(context.Background(), userID)
 	require.NoError(t, err)
 	require.Len(t, balances, 1)
-	assert.InDelta(t, 25, balances[0].Amount, 1e-9)
+	assertAmountEqual(t, "25", balances[0].Amount)
 	activities, err := repo.ListActivities(context.Background(), userID, 100)
 	require.NoError(t, err)
 	assert.Len(t, activities, 2)
@@ -276,7 +276,7 @@ func TestPG_ConcurrentBuysCannotOverspendCash(t *testing.T) {
 	balances, err := repo.ListCashBalances(context.Background(), userID)
 	require.NoError(t, err)
 	for _, balance := range balances {
-		assert.GreaterOrEqual(t, balance.Amount, 0.0)
+		assert.GreaterOrEqual(t, balance.Amount.Cmp(testAmount("0")), 0)
 	}
 
 	pf, err := repo.GetPortfolioByUser(context.Background(), userID)
