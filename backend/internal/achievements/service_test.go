@@ -314,8 +314,8 @@ func TestRankedSnapshotEvidenceIsVersioned(t *testing.T) {
 	assert.Equal(t, "ranked_snapshot_benchmark_aligned_v2", evidence.EvaluationModel)
 	// Evidence v2 carries benchmark data-integrity provenance.
 	assert.Equal(t, 3, evidence.EvidenceVersion)
-	assert.Equal(t, 100.0, evidence.StartRankedIndex)
-	assert.Equal(t, 125.0, evidence.EndRankedIndex)
+	assert.Equal(t, 100.0, evidence.StartRankedIndex.Float64())
+	assert.Equal(t, 125.0, evidence.EndRankedIndex.Float64())
 	assert.Equal(t, "4h0m0s", evidence.SnapshotFrequency)
 	assert.NotEmpty(t, evidence.TrackingEpoch)
 	assert.NotEmpty(t, evidence.StartSnapshotAt)

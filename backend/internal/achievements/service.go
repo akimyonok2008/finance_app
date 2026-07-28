@@ -403,8 +403,8 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 		evidence.EvaluationModel = "ranked_snapshot_benchmark_aligned_v2"
 		evidence.EvidenceVersion = 3
 		evidence.TrackingEpoch = aligned.StartSnapshot.TrackingStartedAt.Format(time.RFC3339Nano)
-		evidence.StartRankedIndex = aligned.StartSnapshot.RankedIndex.Float64()
-		evidence.EndRankedIndex = aligned.EndSnapshot.RankedIndex.Float64()
+		evidence.StartRankedIndex = aligned.StartSnapshot.RankedIndex
+		evidence.EndRankedIndex = aligned.EndSnapshot.RankedIndex
 		evidence.StartSnapshotAt = aligned.StartSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.EndSnapshotAt = aligned.EndSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.ActiveCoveragePct = round(window.ActiveCoverage * 100)

@@ -85,24 +85,24 @@ type Badge struct {
 // carries only percentages, dates, and the benchmark id — never monetary
 // values, holdings, or identifiers.
 type AchievementEvidence struct {
-	Period              PeriodCode `json:"period"`
-	StartDate           string     `json:"start_date"`
-	EndDate             string     `json:"end_date"`
-	PortfolioReturnPct  float64    `json:"portfolio_return_pct"`
-	BenchmarkReturnPct  float64    `json:"benchmark_return_pct"`
-	EdgePoints          float64    `json:"edge_points"`
-	BenchmarkRecipeID   string     `json:"benchmark_recipe_id"`
-	EvaluationModel     string     `json:"evaluation_model,omitempty"`
-	EvidenceVersion     int        `json:"evidence_version,omitempty"`
-	TrackingEpoch       string     `json:"tracking_epoch,omitempty"`
-	StartRankedIndex    float64    `json:"start_ranked_index,omitempty"`
-	EndRankedIndex      float64    `json:"end_ranked_index,omitempty"`
-	StartSnapshotAt     string     `json:"start_snapshot_at,omitempty"`
-	EndSnapshotAt       string     `json:"end_snapshot_at,omitempty"`
-	ActiveCoveragePct   float64    `json:"active_coverage_percentage,omitempty"`
-	TrustedCoveragePct  float64    `json:"trusted_data_coverage_percentage,omitempty"`
-	BenchmarkDataSource string     `json:"benchmark_data_source,omitempty"`
-	SnapshotFrequency   string     `json:"snapshot_frequency,omitempty"`
+	Period              PeriodCode       `json:"period"`
+	StartDate           string           `json:"start_date"`
+	EndDate             string           `json:"end_date"`
+	PortfolioReturnPct  float64          `json:"portfolio_return_pct"`
+	BenchmarkReturnPct  float64          `json:"benchmark_return_pct"`
+	EdgePoints          float64          `json:"edge_points"`
+	BenchmarkRecipeID   string           `json:"benchmark_recipe_id"`
+	EvaluationModel     string           `json:"evaluation_model,omitempty"`
+	EvidenceVersion     int              `json:"evidence_version,omitempty"`
+	TrackingEpoch       string           `json:"tracking_epoch,omitempty"`
+	StartRankedIndex    money.IndexValue `json:"start_ranked_index,omitempty"`
+	EndRankedIndex      money.IndexValue `json:"end_ranked_index,omitempty"`
+	StartSnapshotAt     string           `json:"start_snapshot_at,omitempty"`
+	EndSnapshotAt       string           `json:"end_snapshot_at,omitempty"`
+	ActiveCoveragePct   float64          `json:"active_coverage_percentage,omitempty"`
+	TrustedCoveragePct  float64          `json:"trusted_data_coverage_percentage,omitempty"`
+	BenchmarkDataSource string           `json:"benchmark_data_source,omitempty"`
+	SnapshotFrequency   string           `json:"snapshot_frequency,omitempty"`
 
 	// Benchmark data-integrity provenance (evidence v2). These record exactly
 	// which recipe version, price methodology, data quality and verification
