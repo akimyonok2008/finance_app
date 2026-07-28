@@ -4,7 +4,27 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func validProductionConfig() Config {
+	return Config{
+		AppEnv:                      "production",
+		JWTSecret:                   "0123456789abcdef0123456789abcdef",
+		StorageProvider:             "postgres",
+		DatabaseURL:                 "postgres://app:secret@db/finance",
+		CORSAllowedOrigins:          []string{"https://app.example.com"},
+		PriceProvider:               "twelvedata",
+		EnableRealMarketData:        true,
+		TwelveDataAPIKey:            "ci-provider-key",
+		BaseCurrency:                "USD",
+		BenchmarkAwardMode:          "verified_only",
+		EnableBackgroundWorkers:     true,
+		EnableQuoteRefreshWorker:    true,
+		PasswordRegistrationEnabled: false,
+		EmailSender:                 "development",
+	}
+}
 
 func TestParseDotEnvLine(t *testing.T) {
 	tests := []struct {
@@ -46,7 +66,8 @@ func TestValidateRequiresGoogleClientIDWhenEnabled(t *testing.T) {
 // deployment look healthy while every token is forgeable from the public
 // default secret string.
 func TestValidateRefusesDefaultSecretInProduction(t *testing.T) {
-	cfg := Config{AppEnv: "production", JWTSecret: defaultJWTSecret}
+	cfg := validProductionConfig()
+	cfg.JWTSecret = defaultJWTSecret
 
 	assert.ErrorContains(t, cfg.Validate(), "JWT_SECRET")
 }
@@ -59,13 +80,69 @@ func TestValidateAllowsDefaultSecretOutsideProduction(t *testing.T) {
 }
 
 func TestValidateAllowsProductionWithRealSecret(t *testing.T) {
-	cfg := Config{AppEnv: "production", JWTSecret: "a-real-generated-secret"}
+	cfg := validProductionConfig()
 
 	assert.NoError(t, cfg.Validate())
 }
 
+func TestValidateProductionPasswordRegistrationRequiresSMTP(t *testing.T) {
+	cfg := validProductionConfig()
+	cfg.PasswordRegistrationEnabled = true
+	require.ErrorContains(t, cfg.Validate(), "EMAIL_SENDER=smtp")
+}
+
+func TestValidateProductionPasswordRegistrationAllowsConfiguredSMTP(t *testing.T) {
+	cfg := validProductionConfig()
+	cfg.PasswordRegistrationEnabled = true
+	cfg.EmailSender = "smtp"
+	cfg.SMTPHost = "smtp.example.com"
+	cfg.SMTPFrom = "security@example.com"
+	require.NoError(t, cfg.Validate())
+}
+
 func TestValidateProductionCheckIsCaseInsensitive(t *testing.T) {
-	cfg := Config{AppEnv: "Production", JWTSecret: defaultJWTSecret}
+	cfg := validProductionConfig()
+	cfg.AppEnv = "Production"
+	cfg.JWTSecret = defaultJWTSecret
 
 	assert.ErrorContains(t, cfg.Validate(), "JWT_SECRET")
+}
+
+func TestValidateProductionSafetyRequirements(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		message string
+	}{
+		{name: "short JWT secret", mutate: func(c *Config) { c.JWTSecret = "too-short" }, message: "JWT_SECRET"},
+		{name: "memory storage", mutate: func(c *Config) { c.StorageProvider = "memory" }, message: "STORAGE_PROVIDER=postgres"},
+		{name: "missing database", mutate: func(c *Config) { c.DatabaseURL = "" }, message: "DATABASE_URL"},
+		{name: "missing CORS", mutate: func(c *Config) { c.CORSAllowedOrigins = nil }, message: "CORS_ALLOWED_ORIGINS"},
+		{name: "wildcard CORS", mutate: func(c *Config) { c.CORSAllowedOrigins = []string{"*"} }, message: "cannot use *"},
+		{name: "insecure CORS", mutate: func(c *Config) { c.CORSAllowedOrigins = []string{"http://example.com"} }, message: "must use https"},
+		{name: "mock price outside demo", mutate: func(c *Config) { c.PriceProvider = "mock" }, message: "DEMO_MODE_ENABLED"},
+		{name: "prototype Yahoo provider", mutate: func(c *Config) { c.PriceProvider = "yahoo" }, message: "prototype"},
+		{name: "missing real market switch", mutate: func(c *Config) { c.EnableRealMarketData = false }, message: "ENABLE_REAL_MARKET_DATA"},
+		{name: "missing Twelve Data key", mutate: func(c *Config) { c.TwelveDataAPIKey = "" }, message: "TWELVE_DATA_API_KEY"},
+		{name: "static FX for verified multicurrency", mutate: func(c *Config) { c.BaseCurrency = "EUR" }, message: "historical FX provider"},
+		{name: "background workers disabled", mutate: func(c *Config) { c.EnableBackgroundWorkers = false }, message: "ENABLE_BACKGROUND_WORKERS"},
+		{name: "quote worker disabled", mutate: func(c *Config) { c.EnableQuoteRefreshWorker = false }, message: "ENABLE_QUOTE_REFRESH_WORKER"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validProductionConfig()
+			tt.mutate(&cfg)
+			require.ErrorContains(t, cfg.Validate(), tt.message)
+		})
+	}
+}
+
+func TestValidateProductionExplicitDemoAllowsMockPrices(t *testing.T) {
+	cfg := validProductionConfig()
+	cfg.PriceProvider = "mock"
+	cfg.DemoModeEnabled = true
+	cfg.BenchmarkAwardMode = "demo"
+
+	require.NoError(t, cfg.Validate())
 }

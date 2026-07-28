@@ -26,9 +26,11 @@ func TestExploreHandlerRequiresAuth(t *testing.T) {
 func TestExploreRouteEndToEnd(t *testing.T) {
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
 	authSvc := auth.NewService(auth.NewInMemoryUserRepository(), tokens)
-	_, token, err := authSvc.Register(auth.RegisterInput{
+	user, _, err := authSvc.Register(auth.RegisterInput{
 		Email: "explorer@example.com", Password: "StrongPassword123", DisplayName: "Explorer",
 	})
+	require.NoError(t, err)
+	token, err := tokens.Generate(user.ID, user.Email, user.AuthVersion)
 	require.NoError(t, err)
 
 	repo := NewInMemoryRepository()

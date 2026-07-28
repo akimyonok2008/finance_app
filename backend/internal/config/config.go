@@ -49,6 +49,7 @@ type Config struct {
 	DatabaseURL     string
 	RedisURL        string // empty disables Redis
 	BaseCurrency    string
+	DemoModeEnabled bool
 
 	// CORSAllowedOrigins is the explicit cross-origin allow-list
 	// (CORS_ALLOWED_ORIGINS, comma-separated). Empty means "no explicit
@@ -140,6 +141,24 @@ type Config struct {
 	AppleKeyID        string
 	ApplePrivateKey   string
 	AppleRedirectURI  string
+
+	PasswordRegistrationEnabled bool
+	PublicAppURL                string
+	EmailSender                 string
+	SMTPHost                    string
+	SMTPPort                    string
+	SMTPUsername                string
+	SMTPPassword                string
+	SMTPFrom                    string
+	EmailVerificationTTL        time.Duration
+	PasswordResetTTL            time.Duration
+	ReauthenticationTTL         time.Duration
+
+	// AdminBootstrapEmail, when set, is promoted to role=admin the first time
+	// that account logs in or registers (see auth.Service). Empty disables
+	// bootstrap entirely — role assignment then requires a direct database
+	// action, never a public API.
+	AdminBootstrapEmail string
 }
 
 // Load reads configuration from environment variables, falling back to
@@ -158,6 +177,7 @@ func Load() Config {
 		DatabaseURL:        getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable"),
 		RedisURL:           getEnv("REDIS_URL", ""),
 		BaseCurrency:       getEnv("BASE_CURRENCY", defaultBaseCurrency),
+		DemoModeEnabled:    getEnvBool("DEMO_MODE_ENABLED", false),
 
 		EnableBackgroundWorkers:        getEnvBool("ENABLE_BACKGROUND_WORKERS", defaultEnableBackground),
 		OutboxReadinessMaxPending:      getEnvInt("OUTBOX_READINESS_MAX_PENDING", 1000),
@@ -227,6 +247,20 @@ func Load() Config {
 		AppleKeyID:        getEnv("APPLE_KEY_ID", ""),
 		ApplePrivateKey:   getEnv("APPLE_PRIVATE_KEY", ""),
 		AppleRedirectURI:  getEnv("APPLE_REDIRECT_URI", ""),
+
+		PasswordRegistrationEnabled: getEnvBool("PASSWORD_REGISTRATION_ENABLED", true),
+		PublicAppURL:                getEnv("PUBLIC_APP_URL", "http://localhost:5173"),
+		EmailSender:                 getEnv("EMAIL_SENDER", "development"),
+		SMTPHost:                    getEnv("SMTP_HOST", ""),
+		SMTPPort:                    getEnv("SMTP_PORT", "587"),
+		SMTPUsername:                getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:                getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:                    getEnv("SMTP_FROM", ""),
+		EmailVerificationTTL:        getEnvDuration("EMAIL_VERIFICATION_TTL", 24*time.Hour),
+		PasswordResetTTL:            getEnvDuration("PASSWORD_RESET_TTL", time.Hour),
+		ReauthenticationTTL:         getEnvDuration("REAUTHENTICATION_TTL", 5*time.Minute),
+
+		AdminBootstrapEmail: getEnv("ADMIN_BOOTSTRAP_EMAIL", ""),
 	}
 }
 
@@ -261,8 +295,86 @@ func (c Config) Validate() error {
 	// start instead, matching how the benchmark award policy already treats
 	// APP_ENV=production as the one environment that must not silently
 	// degrade to an insecure default.
-	if strings.EqualFold(c.AppEnv, "production") && c.UsingDefaultSecret() {
-		return fmt.Errorf("APP_ENV=production requires JWT_SECRET to be set (refusing to start with the default development secret)")
+	if strings.EqualFold(c.AppEnv, "production") {
+		if c.UsingDefaultSecret() || len(strings.TrimSpace(c.JWTSecret)) < 32 ||
+			isKnownWeakSecret(c.JWTSecret) {
+			return fmt.Errorf("APP_ENV=production requires a strong, unique JWT_SECRET of at least 32 characters")
+		}
+		if !strings.EqualFold(strings.TrimSpace(c.StorageProvider), "postgres") {
+			return fmt.Errorf("APP_ENV=production requires STORAGE_PROVIDER=postgres")
+		}
+		if strings.TrimSpace(c.DatabaseURL) == "" {
+			return fmt.Errorf("APP_ENV=production requires DATABASE_URL")
+		}
+		if err := validateProductionCORS(c.CORSAllowedOrigins); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(c.PriceProvider), "mock") || strings.TrimSpace(c.PriceProvider) == "" {
+			if !c.DemoModeEnabled || !strings.EqualFold(c.BenchmarkAwardMode, "demo") {
+				return fmt.Errorf("production mock prices require DEMO_MODE_ENABLED=true and BENCHMARK_AWARD_MODE=demo")
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(c.PriceProvider), "yahoo") {
+			return fmt.Errorf("APP_ENV=production cannot use the prototype PRICE_PROVIDER=yahoo")
+		}
+		if strings.EqualFold(strings.TrimSpace(c.PriceProvider), "twelvedata") &&
+			(!c.EnableRealMarketData || strings.TrimSpace(c.TwelveDataAPIKey) == "") {
+			return fmt.Errorf("production PRICE_PROVIDER=twelvedata requires ENABLE_REAL_MARKET_DATA=true and TWELVE_DATA_API_KEY")
+		}
+		if strings.EqualFold(c.BenchmarkAwardMode, "verified_only") &&
+			!strings.EqualFold(strings.TrimSpace(c.BaseCurrency), "USD") {
+			return fmt.Errorf("verified production benchmarks require BASE_CURRENCY=USD until a historical FX provider is configured")
+		}
+		if !c.EnableBackgroundWorkers {
+			return fmt.Errorf("APP_ENV=production requires ENABLE_BACKGROUND_WORKERS=true")
+		}
+		if !c.EnableQuoteRefreshWorker {
+			return fmt.Errorf("APP_ENV=production requires ENABLE_QUOTE_REFRESH_WORKER=true")
+		}
+		if c.PasswordRegistrationEnabled && !strings.EqualFold(c.EmailSender, "smtp") {
+			return fmt.Errorf("production password registration requires EMAIL_SENDER=smtp")
+		}
+	}
+	if strings.EqualFold(c.EmailSender, "smtp") &&
+		(strings.TrimSpace(c.SMTPHost) == "" || strings.TrimSpace(c.SMTPFrom) == "") {
+		return fmt.Errorf("EMAIL_SENDER=smtp requires SMTP_HOST and SMTP_FROM")
+	}
+	if strings.TrimSpace(c.EmailSender) != "" &&
+		!strings.EqualFold(c.EmailSender, "smtp") &&
+		!strings.EqualFold(c.EmailSender, "development") {
+		return fmt.Errorf("EMAIL_SENDER must be development or smtp")
+	}
+	return nil
+}
+
+func isKnownWeakSecret(secret string) bool {
+	value := strings.ToLower(strings.TrimSpace(secret))
+	switch value {
+	case "", "secret", "password", "changeme", "change-me", "jwt-secret",
+		"your-secret-here", "replace-me", "replace-with-secure-secret":
+		return true
+	default:
+		for _, marker := range []string{"dev-secret", "change-me", "changeme", "example", "placeholder"} {
+			if strings.Contains(value, marker) {
+				return true
+			}
+		}
+		return len(strings.Trim(value, string(value[0]))) == 0
+	}
+}
+
+func validateProductionCORS(origins []string) error {
+	if len(origins) == 0 {
+		return fmt.Errorf("APP_ENV=production requires CORS_ALLOWED_ORIGINS")
+	}
+	for _, origin := range origins {
+		trimmed := strings.TrimSpace(origin)
+		if trimmed == "" || trimmed == "*" {
+			return fmt.Errorf("production CORS_ALLOWED_ORIGINS must contain explicit origins and cannot use *")
+		}
+		if !strings.HasPrefix(trimmed, "https://") {
+			return fmt.Errorf("production CORS origin %q must use https", trimmed)
+		}
 	}
 	return nil
 }

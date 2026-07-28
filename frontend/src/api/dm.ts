@@ -4,6 +4,7 @@ import type {
   ConversationsResponse,
   MessageResponse,
   MessagesResponse,
+  UnreadCountResponse,
 } from "@/types/dm";
 
 export function getConversations(signal?: AbortSignal): Promise<ConversationsResponse> {
@@ -38,4 +39,24 @@ export function sendMessage(
       body: { body },
     },
   );
+}
+
+export function hideMessage(messageId: string): Promise<void> {
+  return apiRequest<void>(`/dm/messages/${encodeURIComponent(messageId)}`, {
+    method: "DELETE",
+  });
+}
+
+export function markConversationRead(
+  conversationId: string,
+  lastReadMessageId: string,
+): Promise<void> {
+  return apiRequest<void>(
+    `/dm/conversations/${encodeURIComponent(conversationId)}/read`,
+    { method: "POST", body: { last_read_message_id: lastReadMessageId } },
+  );
+}
+
+export function getUnreadCount(signal?: AbortSignal): Promise<UnreadCountResponse> {
+  return apiRequest<UnreadCountResponse>("/dm/unread-count", { signal });
 }

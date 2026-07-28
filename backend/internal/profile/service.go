@@ -74,6 +74,13 @@ type RankedPerformanceProvider interface {
 	CurrentRankedPerformance(ctx context.Context, userID string) (RankedPerformance, error)
 }
 
+// BlockedPairSource exposes the caller's block-set so public profile view
+// and Explore can filter blocked pairs at the service level — never fetched
+// unfiltered and hidden only in a handler or the browser.
+type BlockedPairSource interface {
+	BlockedPairUserIDs(ctx context.Context, userID string) (map[string]bool, error)
+}
+
 type Service struct {
 	repo             Repository
 	users            UserProvider
@@ -86,8 +93,24 @@ type Service struct {
 	timeframeRanks   TimeframeRankProvider
 	history          PerformanceHistoryProvider
 	ranked           RankedPerformanceProvider
+	blocked          BlockedPairSource
 	dna              *dna.Service
 	now              func() time.Time
+}
+
+// SetBlockedFilter attaches the block-set source used to keep blocked pairs
+// out of public profile views and Explore results.
+func (s *Service) SetBlockedFilter(b BlockedPairSource) { s.blocked = b }
+
+func (s *Service) blockedSet(ctx context.Context, userID string) map[string]bool {
+	if s.blocked == nil || userID == "" {
+		return nil
+	}
+	set, err := s.blocked.BlockedPairUserIDs(ctx, userID)
+	if err != nil {
+		return nil
+	}
+	return set
 }
 
 // SetRankedPerformanceProvider attaches the ranked-performance source used for
@@ -254,7 +277,11 @@ func (s *Service) OnAccountDeleted(ctx context.Context, userID string) error {
 	return s.repo.Update(ctx, p)
 }
 
-func (s *Service) GetPublic(ctx context.Context, handle string) (PublicProfile, error) {
+// GetPublic returns handle's public profile as seen by callerID (empty when
+// unauthenticated). A block in either direction between caller and target
+// returns the same ErrNotFound as a nonexistent handle — a privacy-safe
+// "unavailable" result that never confirms a block exists.
+func (s *Service) GetPublic(ctx context.Context, callerID, handle string) (PublicProfile, error) {
 	handle = strings.ToLower(strings.TrimSpace(handle))
 	p, err := s.repo.GetByHandle(ctx, handle)
 	if errors.Is(err, ErrNotFound) || !p.IsPublic {
@@ -262,6 +289,9 @@ func (s *Service) GetPublic(ctx context.Context, handle string) (PublicProfile, 
 	}
 	if err != nil {
 		return PublicProfile{}, err
+	}
+	if callerID != "" && callerID != p.UserID && s.blockedSet(ctx, callerID)[p.UserID] {
+		return PublicProfile{}, ErrNotFound
 	}
 	return s.publicProjection(ctx, p), nil
 }

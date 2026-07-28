@@ -73,6 +73,7 @@ func (v verifiedHandlerPrices) GetSeries(ctx context.Context, symbol string, sta
 			IsAdjusted: true, IsTotalReturn: true, CorpActionsKnown: true,
 			Quality:     benchmark.DataQualityVerified,
 			RetrievedAt: now, SourceAsOf: now,
+			Currency: "USD",
 		},
 	}, nil
 }

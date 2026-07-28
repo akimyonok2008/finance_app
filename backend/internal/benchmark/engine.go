@@ -4,18 +4,21 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
-// BenchmarkConstructionService builds daily-rebalanced benchmark index returns
-// from recipes. It performs no scoring — only return construction and
-// provenance aggregation.
+// BenchmarkConstructionService builds normalized virtual benchmark indexes
+// from versioned recipes. It performs no scoring—only construction, currency
+// conversion, policy execution, and provenance aggregation.
 type BenchmarkConstructionService struct {
 	prices          HistoricalPriceProvider
 	series          HistoricalSeriesProvider
 	recipes         map[string]BenchmarkRecipe
 	dynamicResolver DynamicRecipeResolver // legacy, retained for compatibility
 	versions        *VersionedRecipeStore
+	fx              HistoricalFXProvider
+	baseCurrency    string
 	now             func() time.Time
 }
 
@@ -33,6 +36,7 @@ func NewBenchmarkConstructionService(prices HistoricalPriceProvider, recipes map
 		dynamicResolver: dynamicResolver,
 		versions:        store,
 		now:             func() time.Time { return time.Now().UTC() },
+		baseCurrency:    "USD",
 	}
 }
 
@@ -40,6 +44,16 @@ func NewBenchmarkConstructionService(prices HistoricalPriceProvider, recipes map
 func (s *BenchmarkConstructionService) SetVersionStore(store *VersionedRecipeStore) {
 	if store != nil {
 		s.versions = store
+	}
+}
+
+func (s *BenchmarkConstructionService) SetHistoricalFXProvider(provider HistoricalFXProvider) {
+	s.fx = provider
+}
+
+func (s *BenchmarkConstructionService) SetBaseCurrency(currency string) {
+	if value := strings.ToUpper(strings.TrimSpace(currency)); value != "" {
+		s.baseCurrency = value
 	}
 }
 
@@ -72,19 +86,21 @@ func (a legacySeriesAdapter) GetSeries(ctx context.Context, symbol string, start
 		Symbol: symbol,
 		Points: pts,
 		Metadata: BenchmarkDataMetadata{
-			Provider:         "legacy_provider",
-			ProviderMode:     "real",
-			PriceType:        PriceTypeRawClose,
-			CorpActionsKnown: false,
-			Quality:          DataQualityAcceptable,
-			RetrievedAt:      now,
-			SourceAsOf:       now,
+			Provider:          "legacy_provider",
+			ProviderMode:      "real",
+			PriceType:         PriceTypeRawClose,
+			CorpActionsKnown:  false,
+			Quality:           DataQualityAcceptable,
+			RetrievedAt:       now,
+			SourceAsOf:        now,
+			Currency:          "USD",
+			CurrencyTreatment: "legacy_provider_declared_usd",
 		},
 	}, nil
 }
 
 // CalculateReturnPct returns the total benchmark return (percentage points) over
-// [start, end] under daily rebalancing. It is the preview-grade wrapper around
+// [start, end] under the recipe's executed policy. It is the preview-grade wrapper around
 // CalculateReturn: it permits synthetic/stale/raw data (no permanent award is
 // issued from a preview) and returns only the number. Award decisions must use
 // CalculateReturn and inspect the provenance.

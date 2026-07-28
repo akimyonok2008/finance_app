@@ -136,7 +136,8 @@ func (s *Service) list(ctx context.Context, userID string, includeProgress bool)
 				evidence.EvidenceVersion = 0
 			}
 			resp.Unlocked, resp.UnlockedAt, resp.Evidence = true, &at, &evidence
-			resp.LegacyEvidence = evidence.EvaluationModel != "ranked_snapshot_v1"
+			resp.LegacyEvidence = evidence.EvaluationModel != "ranked_snapshot_v1" &&
+				evidence.EvaluationModel != "ranked_snapshot_benchmark_aligned_v2"
 		} else if includeProgress {
 			result := windows[badge.Period]
 			resp.Progress = s.progress(ctx, badge, result, benchmarkCache)
@@ -147,22 +148,32 @@ func (s *Service) list(ctx context.Context, userID string, includeProgress bool)
 }
 
 type benchmarkResult struct {
-	value float64
-	err   error
+	result  benchmark.BenchmarkReturnResult
+	aligned performancehistory.Window
+	err     error
 }
 
-func (s *Service) benchmarkReturn(
+func (s *Service) benchmarkEvaluation(
 	ctx context.Context, badge benchmark.Badge, window performancehistory.Window,
-	cache map[string]benchmarkResult,
-) (float64, error) {
+	req benchmark.SeriesRequirement, cache map[string]benchmarkResult,
+) (benchmark.BenchmarkReturnResult, performancehistory.Window, error) {
 	start, end := window.StartSnapshot.CapturedAt, window.EndSnapshot.CapturedAt
-	key := badge.RecipeID + "|" + start.Format(time.RFC3339Nano) + "|" + end.Format(time.RFC3339Nano)
+	key := fmt.Sprintf("%s|%s|%s|%+v", badge.RecipeID,
+		start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), req)
 	if cached, ok := cache[key]; ok {
-		return cached.value, cached.err
+		return cached.result, cached.aligned, cached.err
 	}
-	value, err := s.engine.CalculateReturnPct(ctx, badge.RecipeID, start, end)
-	cache[key] = benchmarkResult{value: value, err: err}
-	return value, err
+	result, err := s.engine.CalculateReturn(ctx, badge.RecipeID, start, end, req)
+	var aligned performancehistory.Window
+	if err == nil {
+		comparison, comparisonErr := performancehistory.CompareWithBenchmarkCloses(
+			window.Points, result.EffectiveStart, result.EffectiveEnd,
+			result.ReturnPercentage,
+		)
+		aligned, err = comparison.Window, comparisonErr
+	}
+	cache[key] = benchmarkResult{result: result, aligned: aligned, err: err}
+	return result, aligned, err
 }
 
 func rankedReturn(window performancehistory.Window) (float64, error) {
@@ -219,18 +230,27 @@ func (s *Service) progress(
 			progress.TrustedDataCoveragePercentage, threshold*100)
 		return progress
 	}
-	portfolioReturn, err := rankedReturn(window)
-	if err != nil {
-		return progress
-	}
-	// Preview-grade benchmark return: always computed so the user sees where they
-	// stand even when the data is not award-grade.
-	benchmarkReturn, err := s.benchmarkReturn(ctx, badge, window, cache)
+	// Construct the benchmark first, then select ranked snapshots at its actual
+	// effective closes through the same alignment function used by Performance.
+	benchResult, aligned, err := s.benchmarkEvaluation(
+		ctx, badge, window, benchmark.RequirementForPreview(), cache,
+	)
 	if err != nil {
 		progress.State = classifyBenchmarkError(err)
 		progress.Reason = benchmarkReasonFor(progress.State)
 		return progress
 	}
+	portfolioReturn, err := rankedReturn(aligned)
+	if err != nil {
+		progress.State = "benchmark_date_alignment"
+		progress.Reason = benchmarkReasonFor(progress.State)
+		return progress
+	}
+	benchmarkReturn := benchResult.ReturnPercentage
+	progress.EffectiveStartAt = aligned.StartSnapshot.CapturedAt.Format(time.RFC3339)
+	progress.EffectiveEndAt = aligned.EndSnapshot.CapturedAt.Format(time.RFC3339)
+	progress.StartDate = benchResult.EffectiveStart.Format("2006-01-02")
+	progress.EndDate = benchResult.EffectiveEnd.Format("2006-01-02")
 	edge := portfolioReturn - benchmarkReturn
 	roundedPortfolio, roundedBenchmark, roundedEdge := round(portfolioReturn), round(benchmarkReturn), round(edge)
 	progress.PortfolioReturnPercentage = &roundedPortfolio
@@ -242,9 +262,9 @@ func (s *Service) progress(
 	if s.policy.Mode == benchmark.AwardModeDisabled {
 		progress.State = "benchmark_unverified"
 		progress.Reason = "Benchmark awards are disabled in this environment; progress is preview-only."
-	} else if _, awardErr := s.engine.CalculateReturn(ctx, badge.RecipeID,
-		window.StartSnapshot.CapturedAt, window.EndSnapshot.CapturedAt,
-		benchmark.RequirementForAwards()); awardErr != nil {
+	} else if _, _, awardErr := s.benchmarkEvaluation(
+		ctx, badge, window, benchmark.RequirementForAwards(), cache,
+	); awardErr != nil {
 		progress.State = classifyBenchmarkError(awardErr)
 		progress.Reason = benchmarkReasonForEdge(progress.State, roundedEdge)
 	} else if s.policy.Mode == benchmark.AwardModeDemo {
@@ -282,6 +302,11 @@ func classifyBenchmarkError(err error) string {
 		return "benchmark_unverified"
 	case errors.Is(err, benchmark.ErrRecipeVersionUnavailable):
 		return "recipe_version_unavailable"
+	case errors.Is(err, performancehistory.ErrBenchmarkDateAlignment),
+		errors.Is(err, benchmark.ErrBenchmarkDateAlignment):
+		return "benchmark_date_alignment"
+	case errors.Is(err, benchmark.ErrHistoricalFXUnavailable):
+		return "benchmark_historical_fx_unavailable"
 	default:
 		return "benchmark_unavailable"
 	}
@@ -297,6 +322,10 @@ func benchmarkReasonFor(state string) string {
 		return "Benchmark data is preview-only and cannot create a verified permanent award."
 	case "recipe_version_unavailable":
 		return "The benchmark recipe for this historical period is unavailable."
+	case "benchmark_date_alignment":
+		return "Benchmark and portfolio dates could not be aligned."
+	case "benchmark_historical_fx_unavailable":
+		return "Historical FX data is unavailable for this benchmark."
 	default:
 		return "Benchmark data is unavailable for the ranked-performance interval."
 	}
@@ -330,10 +359,6 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 			continue
 		}
 		window := period.window
-		portfolioReturn, err := rankedReturn(window)
-		if err != nil {
-			continue
-		}
 		// Award-grade benchmark evaluation. Under verified_only the strict
 		// requirement makes raw, synthetic or stale data fail closed with a typed
 		// error before any award. Under demo mode synthetic data is permitted into
@@ -343,11 +368,13 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 		if s.policy.Mode == benchmark.AwardModeDemo {
 			req = benchmark.RequirementForPreview()
 		}
-		benchResult, err := s.engine.CalculateReturn(
-			ctx, badge.RecipeID,
-			window.StartSnapshot.CapturedAt, window.EndSnapshot.CapturedAt,
-			req,
+		benchResult, aligned, err := s.benchmarkEvaluation(
+			ctx, badge, window, req, map[string]benchmarkResult{},
 		)
+		if err != nil {
+			continue
+		}
+		portfolioReturn, err := rankedReturn(aligned)
 		if err != nil {
 			continue
 		}
@@ -372,13 +399,13 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 			continue
 		}
 		evidence := *result.Evidence
-		evidence.EvaluationModel = "ranked_snapshot_v1"
-		evidence.EvidenceVersion = 2
-		evidence.TrackingEpoch = window.StartSnapshot.TrackingStartedAt.Format(time.RFC3339Nano)
-		evidence.StartRankedIndex = window.StartSnapshot.RankedIndex
-		evidence.EndRankedIndex = window.EndSnapshot.RankedIndex
-		evidence.StartSnapshotAt = window.StartSnapshot.CapturedAt.Format(time.RFC3339Nano)
-		evidence.EndSnapshotAt = window.EndSnapshot.CapturedAt.Format(time.RFC3339Nano)
+		evidence.EvaluationModel = "ranked_snapshot_benchmark_aligned_v2"
+		evidence.EvidenceVersion = 3
+		evidence.TrackingEpoch = aligned.StartSnapshot.TrackingStartedAt.Format(time.RFC3339Nano)
+		evidence.StartRankedIndex = aligned.StartSnapshot.RankedIndex
+		evidence.EndRankedIndex = aligned.EndSnapshot.RankedIndex
+		evidence.StartSnapshotAt = aligned.StartSnapshot.CapturedAt.Format(time.RFC3339Nano)
+		evidence.EndSnapshotAt = aligned.EndSnapshot.CapturedAt.Format(time.RFC3339Nano)
 		evidence.ActiveCoveragePct = round(window.ActiveCoverage * 100)
 		evidence.TrustedCoveragePct = round(window.TrustedCoverage * 100)
 		evidence.BenchmarkDataSource = s.benchmarkDataSource
@@ -388,14 +415,19 @@ func (s *Service) checkAndAwardBadges(ctx context.Context, userID string) ([]Awa
 		evidence.BenchmarkRecipeVersion = benchResult.RecipeVersion.VersionID
 		evidence.RebalancingPolicy = benchResult.RecipeVersion.RebalancingPolicy
 		evidence.BenchmarkInputHash = benchResult.Fingerprint
+		evidence.BenchmarkMethodology = benchResult.DataMetadata.MethodologyVersion
+		evidence.AlignmentMethod = performancehistory.RankedBenchmarkAlignmentMethod
+		evidence.BaseCurrency = benchResult.DataMetadata.BaseCurrency
+		evidence.CurrencyTreatment = benchResult.DataMetadata.CurrencyTreatment
+		evidence.RebalanceDates = benchResult.DataMetadata.RebalanceDates
 		dataEvidence := benchmark.EvidenceFromResult(benchResult)
 		evidence.DataSourceSummary = &dataEvidence
-		if err := s.history.ProtectEvidence(ctx, window.StartSnapshot.ID, window.EndSnapshot.ID); err != nil {
+		if err := s.history.ProtectEvidence(ctx, aligned.StartSnapshot.ID, aligned.EndSnapshot.ID); err != nil {
 			continue
 		}
 		record := AwardedAchievement{
 			UserID: userID, BadgeKey: badge.ID, UnlockedAt: now, Evidence: evidence,
-			StartSnapshotID: window.StartSnapshot.ID, EndSnapshotID: window.EndSnapshot.ID,
+			StartSnapshotID: aligned.StartSnapshot.ID, EndSnapshotID: aligned.EndSnapshot.ID,
 		}
 		if err := s.repo.Award(ctx, record); err != nil {
 			continue

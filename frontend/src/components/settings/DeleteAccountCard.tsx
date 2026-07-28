@@ -18,13 +18,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/auth/useAuth";
 import { useDeleteAccount } from "@/hooks/useAccount";
+import {
+  deleteAccountRequest,
+  reauthenticateWithProviderRequest,
+} from "@/api/accountApi";
+import { GoogleSignInButton } from "@/pages/auth/components/OAuthButtons";
 
 export function DeleteAccountCard() {
   const [open, setOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [providerBusy, setProviderBusy] = useState(false);
   const deleteAccount = useDeleteAccount();
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const navigate = useNavigate();
 
   const handleOpenChange = (next: boolean) => {
@@ -35,6 +41,18 @@ export function DeleteAccountCard() {
     }
   };
 
+  const finishDeletion = () => {
+    toast.success("Account deleted");
+    logout();
+    navigate("/login");
+  };
+
+  const deleteWithProvider = async (credential: string) => {
+    const reauth = await reauthenticateWithProviderRequest("google", credential);
+    await deleteAccountRequest(reauth.reauthentication_token);
+    finishDeletion();
+  };
+
   const handleConfirm = (e: React.MouseEvent) => {
     // Keep the dialog open until the request resolves, so a wrong password
     // can be corrected without re-opening the whole flow.
@@ -42,9 +60,7 @@ export function DeleteAccountCard() {
     setError(null);
     deleteAccount.mutate(password, {
       onSuccess: () => {
-        toast.success("Account deleted");
-        logout();
-        navigate("/login");
+        finishDeletion();
       },
       onError: (err: Error) => setError(err.message),
     });
@@ -76,11 +92,13 @@ export function DeleteAccountCard() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete your account?</AlertDialogTitle>
             <AlertDialogDescription>
-              Enter your password to confirm. This cannot be undone.
+              {user?.has_password
+                ? "Enter your password to confirm. This cannot be undone."
+                : "Confirm with the Google identity linked to this account. This cannot be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
 
-          <div>
+          {user?.has_password ? <div>
             <Label htmlFor="delete_account_password">Password</Label>
             <Input
               id="delete_account_password"
@@ -92,11 +110,24 @@ export function DeleteAccountCard() {
               aria-invalid={!!error}
             />
             {error ? <p className="mt-1.5 text-xs text-rose-300">{error}</p> : null}
-          </div>
+          </div> : (
+            <div>
+              <GoogleSignInButton
+                loading={providerBusy}
+                disabled={providerBusy}
+                onStart={() => setProviderBusy(true)}
+                onDone={() => setProviderBusy(false)}
+                onSuccess={() => undefined}
+                onError={setError}
+                loginWithGoogle={deleteWithProvider}
+              />
+              {error ? <p className="mt-1.5 text-xs text-rose-300">{error}</p> : null}
+            </div>
+          )}
 
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleteAccount.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
+            {user?.has_password ? <AlertDialogAction
               onClick={handleConfirm}
               disabled={deleteAccount.isPending || password.length === 0}
             >
@@ -108,7 +139,7 @@ export function DeleteAccountCard() {
               ) : (
                 "Delete account"
               )}
-            </AlertDialogAction>
+            </AlertDialogAction> : null}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

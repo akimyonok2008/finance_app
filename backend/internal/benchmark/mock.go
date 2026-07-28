@@ -72,6 +72,7 @@ func (m *MockHistoricalPriceProvider) GetSeries(ctx context.Context, symbol stri
 			SourceAsOf:        now,
 			ProviderDataset:   "deterministic_synthetic",
 			CurrencyTreatment: "synthetic_same_currency",
+			Currency:          "USD",
 		},
 	}, nil
 }

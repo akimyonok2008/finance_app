@@ -41,9 +41,11 @@ func (p authUserProvider) GetUserByID(_ context.Context, id string) (*auth.User,
 func TestProfileRoutesAuthenticatedUpdateAndPrivacy(t *testing.T) {
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
 	authSvc := auth.NewService(auth.NewInMemoryUserRepository(), tokens)
-	user, token, err := authSvc.Register(auth.RegisterInput{
+	user, _, err := authSvc.Register(auth.RegisterInput{
 		Email: "owner@example.com", Password: "StrongPassword123", DisplayName: "Route Owner",
 	})
+	require.NoError(t, err)
+	token, err := tokens.Generate(user.ID, user.Email, user.AuthVersion)
 	require.NoError(t, err)
 
 	profileSvc := NewService(NewInMemoryRepository(), authUserProvider{authSvc}, testSummaries{})

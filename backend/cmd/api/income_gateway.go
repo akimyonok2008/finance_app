@@ -51,41 +51,52 @@ func (g incomeGateway) EligibleQuantity(ctx context.Context, userID, instrumentI
 	return g.svc.EligibleQuantity(ctx, userID, instrumentID, symbol, asOf)
 }
 
-// ApplyIncome routes one normalized income component to the correct portfolio
-// mutation. The subtype (and therefore the performance effect) is derived from
-// the trusted classification — never chosen by an API caller.
-func (g incomeGateway) ApplyIncome(ctx context.Context, userID, requestID string, in income.AppliedIncome) error {
-	at := in.PaymentDate
-	base := portfolio.IncomeInput{
-		Symbol:            in.Symbol,
-		AssetType:         in.AssetType,
-		Currency:          in.Currency,
-		Amount:            in.Gross,
-		Withholding:       in.Withholding,
-		Fee:               in.Fee,
-		Estimated:         in.Estimated,
-		ReinvestPrice:     in.ReinvestPrice,
-		PriceMethod:       in.PriceMethod,
-		IncomeEventID:     in.IncomeEventID,
-		TaxClassification: in.TaxClassification,
-		OccurredAt:        &at,
-		Provenance:        portfolio.ProvenanceProviderReported,
-	}
-	switch in.Classification {
-	case income.ClassStockDividend:
-		base.Subtype = portfolio.IncomeStockDividendSub
-		base.StockRatioNum = in.StockRatioNum
-		base.StockRatioDen = in.StockRatioDen
-	case income.ClassReturnOfCapital:
-		base.Subtype = portfolio.IncomeReturnOfCapitalSub
-	default:
-		if in.Reinvest {
-			base.Subtype = portfolio.IncomeReinvestedDiv
-		} else {
-			base.Subtype = incomeSubtype(in.Type)
+// ApplyIncomeEvent routes EVERY component of one economic income event to the
+// portfolio's atomic multi-component mutation. Every component's subtype (and
+// therefore its performance effect) is derived from the trusted
+// classification — never chosen by an API caller. The event applies through
+// the aggregate coordinator in ONE locked transaction: all components commit
+// together, under one activity group, with exactly one combined
+// ranked-performance update, or none of them commit.
+func (g incomeGateway) ApplyIncomeEvent(ctx context.Context, userID, requestID string, in income.AppliedIncomeEvent) error {
+	components := make([]portfolio.IncomeComponentInput, 0, len(in.Components))
+	for _, c := range in.Components {
+		comp := portfolio.IncomeComponentInput{
+			Amount:            c.Gross,
+			Withholding:       c.Withholding,
+			Fee:               c.Fee,
+			Estimated:         c.Estimated,
+			Reinvest:          c.Reinvest,
+			ReinvestPrice:     c.ReinvestPrice,
+			PriceMethod:       c.PriceMethod,
+			TaxClassification: c.TaxClassification,
+			Provenance:        portfolio.ProvenanceProviderReported,
 		}
+		switch c.Classification {
+		case income.ClassStockDividend:
+			comp.Subtype = portfolio.IncomeStockDividendSub
+			comp.StockRatioNum = c.StockRatioNum
+			comp.StockRatioDen = c.StockRatioDen
+		case income.ClassReturnOfCapital:
+			comp.Subtype = portfolio.IncomeReturnOfCapitalSub
+		default:
+			if c.Reinvest {
+				comp.Subtype = portfolio.IncomeReinvestedDiv
+			} else {
+				comp.Subtype = incomeSubtype(c.Type)
+			}
+		}
+		components = append(components, comp)
 	}
-	_, err := g.svc.RecordIncome(ctx, userID, requestID, base)
+	at := in.PaymentDate
+	_, err := g.svc.ApplyIncomeEvent(ctx, userID, requestID, portfolio.IncomeEventInput{
+		IncomeEventID: in.IncomeEventID,
+		Symbol:        in.Symbol,
+		AssetType:     in.AssetType,
+		Currency:      in.Currency,
+		PaymentDate:   at,
+		Components:    components,
+	})
 	return err
 }
 

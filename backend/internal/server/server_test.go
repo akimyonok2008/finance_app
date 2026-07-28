@@ -26,6 +26,19 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/server"
 )
 
+type serverAutoVerifySender struct{ service *auth.Service }
+
+func (s serverAutoVerifySender) SendVerification(ctx context.Context, _ string, verificationURL string) error {
+	index := strings.LastIndex(verificationURL, "=")
+	if index < 0 {
+		return errors.New("verification URL missing token")
+	}
+	_, _, err := s.service.VerifyEmail(ctx, verificationURL[index+1:])
+	return err
+}
+
+func (serverAutoVerifySender) SendPasswordReset(context.Context, string, string) error { return nil }
+
 // --- adapters mirroring cmd/api/main.go ----------------------------------------
 
 type userProvider struct{ s *auth.Service }
@@ -109,6 +122,9 @@ func newFullServerWithHistory(
 	t.Helper()
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
 	authSvc := auth.NewService(auth.NewInMemoryUserRepository(), tokens)
+	authSvc.ConfigureLifecycle(auth.LifecycleConfig{
+		EmailSender: serverAutoVerifySender{service: authSvc},
+	})
 	fxp := fx.NewMockFXProvider()
 	priceProvider := prices.NewMockPriceProvider()
 	portfolioRepo := portfolio.NewInMemoryRepository()
@@ -250,7 +266,9 @@ func TestPrivacy_PublicEndpointsExposeNoSensitiveFields(t *testing.T) {
 	// Register a user, add positions, join the sprint — produce real data.
 	reg := doReq(t, h, http.MethodPost, "/auth/register", `{"email":"alpha@example.com","password":"StrongPassword123","display_name":"AlphaWolf_91","avatar_key":"fox"}`, "")
 	require.Equal(t, http.StatusCreated, reg.Code)
-	token := extractToken(t, reg.Body.String())
+	login := doReq(t, h, http.MethodPost, "/auth/login", `{"email":"alpha@example.com","password":"StrongPassword123"}`, "")
+	require.Equal(t, http.StatusOK, login.Code)
+	token := extractToken(t, login.Body.String())
 
 	rec := doIdempotentReq(t, h, "/portfolio/deposits", `{"currency":"USD","amount":5000}`, token, "privacy-deposit")
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -284,7 +302,7 @@ func extractToken(t *testing.T, body string) string {
 	t.Helper()
 	const marker = `"token":"`
 	i := strings.Index(body, marker)
-	require.GreaterOrEqual(t, i, 0, "register response must contain a token")
+	require.GreaterOrEqual(t, i, 0, "authentication response must contain a token")
 	rest := body[i+len(marker):]
 	return rest[:strings.Index(rest, `"`)]
 }

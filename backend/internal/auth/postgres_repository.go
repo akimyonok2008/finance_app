@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -22,25 +23,48 @@ func NewPostgresUserRepository(pool *pgxpool.Pool) *PostgresUserRepository {
 	return &PostgresUserRepository{pool: pool}
 }
 
-const userColumns = `id, email, password_hash, display_name, avatar_key`
+const userColumns = `id, email, password_hash, display_name, avatar_key,
+	email_verified_at, auth_version, has_password,
+	role, suspended_until, suspension_reason, banned_at, ban_reason`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
-	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.AvatarKey); err != nil {
+	var passwordHash *string
+	var suspensionReason, banReason *string
+	if err := row.Scan(&u.ID, &u.Email, &passwordHash, &u.DisplayName, &u.AvatarKey,
+		&u.EmailVerifiedAt, &u.AuthVersion, &u.HasPassword,
+		&u.Role, &u.SuspendedUntil, &suspensionReason, &u.BannedAt, &banReason); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("auth repository: scan user: %w", err)
+	}
+	if passwordHash != nil {
+		u.PasswordHash = *passwordHash
+	}
+	if suspensionReason != nil {
+		u.SuspensionReason = *suspensionReason
+	}
+	if banReason != nil {
+		u.BanReason = *banReason
 	}
 	return &u, nil
 }
 
 // Create persists a new user. A unique-violation on email maps to ErrEmailExists.
 func (r *PostgresUserRepository) Create(user *User) error {
+	authVersion := user.AuthVersion
+	if authVersion == 0 {
+		authVersion = 1
+	}
+	hasPassword := user.HasPassword || user.PasswordHash != ""
 	_, err := r.pool.Exec(context.Background(),
-		`INSERT INTO users (id, email, password_hash, display_name, avatar_key)
-		 VALUES ($1, $2, $3, $4, $5)`,
+		`INSERT INTO users (
+			id, email, password_hash, display_name, avatar_key,
+			email_verified_at, auth_version, has_password
+		 ) VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8)`,
 		user.ID, normalizeEmail(user.Email), user.PasswordHash, user.DisplayName, user.AvatarKey,
+		user.EmailVerifiedAt, authVersion, hasPassword,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -81,11 +105,11 @@ func (r *PostgresUserRepository) ListUsers(ctx context.Context) ([]User, error) 
 
 	var out []User
 	for rows.Next() {
-		var u User
-		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.AvatarKey); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, fmt.Errorf("auth repository: scan user row: %w", err)
 		}
-		out = append(out, u)
+		out = append(out, *u)
 	}
 	return out, rows.Err()
 }
@@ -93,7 +117,8 @@ func (r *PostgresUserRepository) ListUsers(ctx context.Context) ([]User, error) 
 // UpdatePassword overwrites the stored password hash for a non-deleted user.
 func (r *PostgresUserRepository) UpdatePassword(userID, passwordHash string) error {
 	tag, err := r.pool.Exec(context.Background(),
-		`UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2 AND deleted_at IS NULL`,
+		`UPDATE users SET password_hash = $1, has_password = TRUE, updated_at = now()
+		 WHERE id = $2 AND deleted_at IS NULL`,
 		passwordHash, userID,
 	)
 	if err != nil {
@@ -126,6 +151,42 @@ func (r *PostgresUserRepository) SoftDelete(userID string) error {
 		return ErrUserNotFound
 	}
 	return nil
+}
+
+// SetRole assigns a moderation role for a non-deleted user.
+func (r *PostgresUserRepository) SetRole(ctx context.Context, userID, role string) (*User, error) {
+	row := r.pool.QueryRow(ctx,
+		`UPDATE users SET role = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL
+		 RETURNING `+userColumns,
+		userID, role,
+	)
+	return scanUser(row)
+}
+
+// Suspend sets or clears a temporary suspension window for a non-deleted user.
+func (r *PostgresUserRepository) Suspend(ctx context.Context, userID string, until *time.Time, reason string) (*User, error) {
+	var reasonArg *string
+	if until != nil {
+		reasonArg = &reason
+	}
+	row := r.pool.QueryRow(ctx,
+		`UPDATE users SET suspended_until = $2, suspension_reason = $3, updated_at = now()
+		 WHERE id = $1 AND deleted_at IS NULL
+		 RETURNING `+userColumns,
+		userID, until, reasonArg,
+	)
+	return scanUser(row)
+}
+
+// Ban permanently bans a non-deleted user.
+func (r *PostgresUserRepository) Ban(ctx context.Context, userID string, reason string) (*User, error) {
+	row := r.pool.QueryRow(ctx,
+		`UPDATE users SET banned_at = now(), ban_reason = $2, updated_at = now()
+		 WHERE id = $1 AND deleted_at IS NULL
+		 RETURNING `+userColumns,
+		userID, reason,
+	)
+	return scanUser(row)
 }
 
 func (r *PostgresUserRepository) FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error) {

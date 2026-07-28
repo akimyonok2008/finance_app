@@ -25,15 +25,16 @@ func TestPostgresRecipeVersions_SeededAndConstrained(t *testing.T) {
 	assert.GreaterOrEqual(t, count, 2, "both Berkshire versions must be seeded")
 
 	// Source metadata is recorded for the latest filing.
-	var accession, url string
+	var accession, url, policy string
 	var coverage float64
 	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT source_accession, source_url, mapping_coverage_pct
+		`SELECT source_accession, source_url, mapping_coverage_pct, rebalancing_policy
 		 FROM benchmark_recipe_versions WHERE version_id = 'BUFFETT_13F_2026Q1'`).
-		Scan(&accession, &url, &coverage))
+		Scan(&accession, &url, &coverage, &policy))
 	assert.Equal(t, "0001193125-26-226661", accession)
 	assert.Contains(t, url, "sec.gov")
 	assert.GreaterOrEqual(t, coverage, benchmark.MinMappingCoverage)
+	assert.Equal(t, string(benchmark.RebalanceFilingSnapshot), policy)
 
 	// Uniqueness: re-inserting the same (recipe_id, version_id) is rejected.
 	_, err := pool.Exec(ctx,

@@ -2,7 +2,7 @@ package performancehistory
 
 import (
 	"context"
-	"math"
+	"errors"
 	"time"
 )
 
@@ -31,6 +31,12 @@ type BenchmarkReturn struct {
 type BenchmarkReturner interface {
 	ReturnOver(ctx context.Context, recipeID string, start, end time.Time) (BenchmarkReturn, error)
 }
+
+type BenchmarkUnavailableError struct {
+	Reason string
+}
+
+func (e BenchmarkUnavailableError) Error() string { return e.Reason }
 
 // DefaultBenchmarkRecipeID is the comparison benchmark shown on the Performance
 // tab.
@@ -63,11 +69,12 @@ type BenchmarkComparison struct {
 	PortfolioReturnPercentage  *float64 `json:"portfolio_return_percentage,omitempty"`
 	DifferencePercentagePoints *float64 `json:"difference_percentage_points,omitempty"`
 
-	DataQuality       string `json:"data_quality,omitempty"`
-	DataType          string `json:"data_type"`
-	DataQualityStatus string `json:"data_quality_status"`
-	CurrencyTreatment string `json:"currency_treatment,omitempty"`
-	IsSynthetic       bool   `json:"is_synthetic,omitempty"`
+	DataQuality        string `json:"data_quality,omitempty"`
+	DataType           string `json:"data_type"`
+	DataQualityStatus  string `json:"data_quality_status"`
+	CurrencyTreatment  string `json:"currency_treatment,omitempty"`
+	IsSynthetic        bool   `json:"is_synthetic,omitempty"`
+	VerificationStatus string `json:"verification_status"`
 }
 
 const (
@@ -81,7 +88,10 @@ const (
 // benchmarkComparison aligns the benchmark's own return with the portfolio's
 // ranked return over identical boundary dates.
 func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) BenchmarkComparison {
-	out := BenchmarkComparison{RecipeID: DefaultBenchmarkRecipeID, DataType: "unavailable", DataQualityStatus: "unavailable"}
+	out := BenchmarkComparison{
+		RecipeID: DefaultBenchmarkRecipeID, DataType: "unavailable",
+		DataQualityStatus: "unavailable", VerificationStatus: "unavailable",
+	}
 	if s.benchmark == nil {
 		out.RecipeID = ""
 		out.Reason = reasonBenchmarkUnavailable
@@ -97,7 +107,12 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 		points[0].CapturedAt.UTC(), points[len(points)-1].CapturedAt.UTC(),
 	)
 	if err != nil {
-		out.Reason = reasonBenchmarkNoData
+		var unavailable BenchmarkUnavailableError
+		if errors.As(err, &unavailable) && unavailable.Reason != "" {
+			out.Reason = unavailable.Reason
+		} else {
+			out.Reason = reasonBenchmarkNoData
+		}
 		return out
 	}
 	out.Name = result.Name
@@ -130,22 +145,22 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 	// describe the same calendar interval.
 	from := result.EffectiveStart.UTC()
 	to := result.EffectiveEnd.UTC()
-	startIdx, startOK := indexAtOrBeforeEndOfDay(points, from)
-	endIdx, endOK := indexAtOrBeforeEndOfDay(points, to)
-	if !startOK || !endOK {
-		out.Reason = reasonBenchmarkNoOverlap
-		return out
-	}
-	portfolioReturn, err := TimeframeReturnPercent(startIdx, endIdx)
+	comparison, err := CompareWithBenchmarkCloses(
+		points, from, to, result.ReturnPercentage,
+	)
 	if err != nil {
 		out.Reason = reasonBenchmarkNoOverlap
 		return out
 	}
 
 	benchmarkReturn := round4(result.ReturnPercentage)
-	portfolio := round4(portfolioReturn)
-	difference := round4(portfolio - benchmarkReturn)
+	portfolio := round4(comparison.PortfolioReturnPercentage)
+	difference := round4(comparison.EdgePercentagePoints)
 	out.Available = true
+	out.VerificationStatus = "preview"
+	if result.Quality == "verified" && !result.Synthetic {
+		out.VerificationStatus = "verified"
+	}
 	out.DataQualityStatus = "sufficient_for_comparison"
 	out.AlignedFrom = from.Format("2006-01-02")
 	out.AlignedTo = to.Format("2006-01-02")
@@ -153,21 +168,4 @@ func (s *Service) benchmarkComparison(ctx context.Context, points []Snapshot) Be
 	out.PortfolioReturnPercentage = &portfolio
 	out.DifferencePercentagePoints = &difference
 	return out
-}
-
-// indexAtOrBeforeEndOfDay returns the ranked index of the newest snapshot that
-// is not after the END of the given UTC day.
-func indexAtOrBeforeEndOfDay(points []Snapshot, day time.Time) (float64, bool) {
-	cutoff := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC).
-		AddDate(0, 0, 1)
-	for i := len(points) - 1; i >= 0; i-- {
-		if points[i].CapturedAt.UTC().Before(cutoff) {
-			idx := points[i].RankedIndex
-			if idx > 0 && !math.IsNaN(idx) && !math.IsInf(idx, 0) {
-				return idx, true
-			}
-			return 0, false
-		}
-	}
-	return 0, false
 }

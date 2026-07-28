@@ -69,6 +69,12 @@ export const queryKeys = {
   followers: ["social", "followers"] as const,
   dmConversations: ["dm", "conversations"] as const,
   dmMessages: (conversationId: string) => ["dm", "messages", conversationId] as const,
+  dmUnreadCount: ["dm", "unreadCount"] as const,
+  blockedUsers: ["safety", "blockedUsers"] as const,
+  notifications: ["safety", "notifications"] as const,
+  notificationsUnreadCount: ["safety", "notificationsUnreadCount"] as const,
+  moderationReports: (status?: string) => ["moderation", "reports", status ?? "all"] as const,
+  moderationReport: (id: string) => ["moderation", "report", id] as const,
 };
 
 /** Queries to invalidate after any successful position mutation. */

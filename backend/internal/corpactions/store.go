@@ -54,6 +54,17 @@ func NewInMemoryStore() *InMemoryStore {
 	}
 }
 
+func (s *InMemoryStore) OnAccountDeleted(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, application := range s.apps {
+		if application.UserID == userID {
+			delete(s.apps, key)
+		}
+	}
+	return nil
+}
+
 func appKey(eventID, portfolioID string) string { return eventID + "|" + portfolioID }
 
 func (s *InMemoryStore) UpsertEvent(_ context.Context, ev CorporateAction) (bool, error) {

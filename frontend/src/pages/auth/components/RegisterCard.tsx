@@ -8,14 +8,12 @@ import { toast } from "sonner";
 import { Link, useNavigate } from "react-router-dom";
 
 import { registerRequest } from "@/api/authApi";
-import { useAuth } from "@/auth/useAuth";
 import { AuthLoadingSpinner } from "@/pages/auth/components/AuthLoadingSpinner";
 import { AuthSecurityNote } from "@/pages/auth/components/AuthSecurityNote";
 import { FloatingLabelInput } from "@/pages/auth/components/FloatingLabelInput";
 import { AuthDivider } from "@/pages/auth/components/AuthDivider";
 import { OAuthButtons } from "@/pages/auth/components/OAuthButtons";
 import { PasswordInput } from "@/pages/auth/components/PasswordInput";
-import type { LoginFormValues } from "@/types/auth";
 
 const registerSchema = z.object({
   display_name: z
@@ -33,7 +31,6 @@ type RegisterFormValues = z.infer<typeof registerSchema>;
 const OAUTH_ENABLED = import.meta.env.VITE_GOOGLE_AUTH_ENABLED === "true";
 
 export function RegisterCard() {
-  const { login } = useAuth();
   const navigate = useNavigate();
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -47,16 +44,13 @@ export function RegisterCard() {
   const onSubmit = async (values: RegisterFormValues) => {
     setAuthError(null);
     try {
-      // Register via backend, then fall through to login to persist session.
       await registerRequest({
         email: values.email,
         password: values.password,
         display_name: values.display_name,
       });
-      // Login reuses AuthProvider's login (stores token + user in localStorage).
-      await login({ email: values.email, password: values.password } as LoginFormValues);
-      toast.success("Account created — welcome!");
-      navigate("/dashboard");
+      toast.success("Account created — check your email");
+      navigate("/verification-pending", { state: { email: values.email } });
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : "Registration failed");
     }

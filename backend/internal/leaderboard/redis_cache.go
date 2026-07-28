@@ -40,6 +40,33 @@ func (c *RedisLeaderboardCache) RemoveGlobalScore(ctx context.Context, userID st
 	return nil
 }
 
+func (c *RedisLeaderboardCache) OnAccountDeleted(ctx context.Context, userID string) error {
+	var cursor uint64
+	for {
+		keys, next, err := c.client.Scan(ctx, cursor, "leaderboard:*", 100).Result()
+		if err != nil {
+			return fmt.Errorf("leaderboard cache: scan deletion keys: %w", err)
+		}
+		if len(keys) > 0 {
+			args := make([]any, 0, len(keys)*2)
+			for _, key := range keys {
+				args = append(args, key, userID)
+			}
+			pipe := c.client.Pipeline()
+			for i := 0; i < len(args); i += 2 {
+				pipe.ZRem(ctx, args[i].(string), args[i+1])
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				return fmt.Errorf("leaderboard cache: remove deleted user: %w", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
 func (c *RedisLeaderboardCache) UpsertCompetitionScore(ctx context.Context, competitionID, userID string, score float64) error {
 	return c.upsert(ctx, competitionKey(competitionID), userID, score)
 }

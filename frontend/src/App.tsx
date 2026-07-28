@@ -23,6 +23,26 @@ const RegisterPage = lazy(() =>
     default: RegisterPage,
   })),
 );
+const VerificationPendingPage = lazy(() =>
+  import("@/pages/auth/VerificationPendingPage").then(({ VerificationPendingPage }) => ({
+    default: VerificationPendingPage,
+  })),
+);
+const VerifyEmailPage = lazy(() =>
+  import("@/pages/auth/VerifyEmailPage").then(({ VerifyEmailPage }) => ({
+    default: VerifyEmailPage,
+  })),
+);
+const ForgotPasswordPage = lazy(() =>
+  import("@/pages/auth/ForgotPasswordPage").then(({ ForgotPasswordPage }) => ({
+    default: ForgotPasswordPage,
+  })),
+);
+const ResetPasswordPage = lazy(() =>
+  import("@/pages/auth/ResetPasswordPage").then(({ ResetPasswordPage }) => ({
+    default: ResetPasswordPage,
+  })),
+);
 const PortfolioPage = lazy(() =>
   import("@/pages/PortfolioPage").then(({ PortfolioPage }) => ({
     default: PortfolioPage,
@@ -77,6 +97,13 @@ const AccountSettingsPage = lazy(() =>
     }),
   ),
 );
+const ReportsQueuePage = lazy(() =>
+  import("@/pages/moderation/ReportsQueuePage").then(
+    ({ ReportsQueuePage }) => ({
+      default: ReportsQueuePage,
+    }),
+  ),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -116,6 +143,10 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route path="/register" element={<RegisterPage />} />
+              <Route path="/verification-pending" element={<VerificationPendingPage />} />
+              <Route path="/verify-email" element={<VerifyEmailPage />} />
+              <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+              <Route path="/reset-password" element={<ResetPasswordPage />} />
 
               <Route
                 path="/dashboard"
@@ -224,6 +255,15 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <AccountSettingsPage />
+                  </ProtectedRoute>
+                }
+              />
+
+              <Route
+                path="/moderation/reports"
+                element={
+                  <ProtectedRoute>
+                    <ReportsQueuePage />
                   </ProtectedRoute>
                 }
               />

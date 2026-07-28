@@ -12,4 +12,9 @@ var (
 	ErrMessageTooLong       = errors.New("message body must be 1000 characters or fewer")
 	ErrConversationNotFound = errors.New("conversation not found")
 	ErrForbidden            = errors.New("forbidden")
+	// ErrInteractionBlocked is returned whenever the canonical interaction
+	// policy refuses an action (blocked pair, suspended, or banned account).
+	// It is deliberately generic so callers cannot distinguish the reason.
+	ErrInteractionBlocked = errors.New("interaction_blocked")
+	ErrMessageNotFound    = errors.New("message not found")
 )

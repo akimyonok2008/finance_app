@@ -2,6 +2,7 @@ import { MessageSquare, UserCheck, UserPlus, UserX } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
+import { BlockButton } from "@/components/social/BlockButton";
 import { useCreateConversation } from "@/hooks/useDM";
 import {
   useFollowMutation,
@@ -73,6 +74,7 @@ export function FollowButton({ handle, isSelf }: Props) {
           <UserPlus /> Follow
         </Button>
       )}
+      <BlockButton handle={handle} />
     </div>
   );
 }

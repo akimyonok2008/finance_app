@@ -626,6 +626,9 @@ function BenchmarkAndCompetitionSection({
                 vs {benchmark.name || benchmark.recipe_id} (
                 {formatPercent(benchmark.benchmark_return_percentage)}) over{" "}
                 {benchmark.aligned_from} → {benchmark.aligned_to}
+                {benchmark.verification_status === "verified"
+                  ? " · verified"
+                  : " · preview"}
                 {benchmark.is_synthetic ? " · simulated prices" : ""}
               </p>
             </>

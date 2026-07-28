@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,12 +28,14 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/jobs"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
+	"github.com/ardakimyonok/finance_app/internal/moderation"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/ardakimyonok/finance_app/internal/profile"
 	"github.com/ardakimyonok/finance_app/internal/providerfactory"
+	"github.com/ardakimyonok/finance_app/internal/safety"
 	"github.com/ardakimyonok/finance_app/internal/server"
 	"github.com/ardakimyonok/finance_app/internal/social"
 	"github.com/ardakimyonok/finance_app/internal/strategy"
@@ -186,6 +189,7 @@ func (a benchmarkHistoryAdapter) GetSeries(ctx context.Context, symbol string, s
 			SourceAsOf:        now,
 			ProviderDataset:   "time_series_daily_close",
 			CurrencyTreatment: "native_quote_currency_unhedged",
+			Currency:          "USD",
 		},
 	}, nil
 }
@@ -205,7 +209,18 @@ type benchmarkComparisonAdapter struct {
 func (a benchmarkComparisonAdapter) ReturnOver(ctx context.Context, recipeID string, start, end time.Time) (performancehistory.BenchmarkReturn, error) {
 	result, err := a.engine.CalculateReturn(ctx, recipeID, start, end, benchmark.RequirementForPreview())
 	if err != nil {
-		return performancehistory.BenchmarkReturn{}, err
+		reason := "Benchmark component data incomplete."
+		switch {
+		case errors.Is(err, benchmark.ErrAdjustedDataUnavailable), errors.Is(err, benchmark.ErrTotalReturnUnavailable):
+			reason = "Total-return benchmark data unavailable."
+		case errors.Is(err, benchmark.ErrHistoricalFXUnavailable):
+			reason = "Historical FX unavailable."
+		case errors.Is(err, benchmark.ErrRecipeVersionUnavailable):
+			reason = "Recipe version unavailable."
+		case errors.Is(err, benchmark.ErrCurrencyTreatmentUnavailable):
+			reason = "Benchmark currency treatment unavailable."
+		}
+		return performancehistory.BenchmarkReturn{}, performancehistory.BenchmarkUnavailableError{Reason: reason}
 	}
 	return performancehistory.BenchmarkReturn{
 		RecipeID:         recipeID,
@@ -455,6 +470,51 @@ type repositories struct {
 	marketdata   marketdata.Repository
 	social       social.Repository
 	instruments  instrument.Repository
+	safety       safety.Repository
+	moderation   moderation.Repository
+}
+
+// authAdminAdapter bridges auth.Service to the moderation.UserAdmin and
+// safety.UserStatusProvider ports, so neither package imports auth directly.
+type authAdminAdapter struct{ s *auth.Service }
+
+func (a authAdminAdapter) UserByID(_ context.Context, id string) (moderation.UserView, error) {
+	u, err := a.s.UserByID(id)
+	if err != nil {
+		return moderation.UserView{}, err
+	}
+	return moderation.UserView{ID: u.ID, Role: u.Role, IsAdmin: u.IsAdmin()}, nil
+}
+
+func (a authAdminAdapter) Suspend(ctx context.Context, userID string, until *time.Time, reason string) error {
+	return a.s.Suspend(ctx, userID, until, reason)
+}
+
+func (a authAdminAdapter) Ban(ctx context.Context, userID string, reason string) error {
+	return a.s.Ban(ctx, userID, reason)
+}
+
+func (a authAdminAdapter) UserStatus(_ context.Context, userID string) (suspended bool, banned bool, err error) {
+	u, err := a.s.UserByID(userID)
+	if err != nil {
+		return false, false, err
+	}
+	return u.IsSuspended(time.Now().UTC()), u.IsBanned(), nil
+}
+
+// moderationMessageAdapter bridges social.Service's report-evidence lookup to
+// moderation.MessageAccessor.
+type moderationMessageAdapter struct{ s *social.Service }
+
+func (a moderationMessageAdapter) MessageForReport(ctx context.Context, requesterID, messageID string) (moderation.MessageEvidence, error) {
+	e, err := a.s.MessageForReport(ctx, requesterID, messageID)
+	if err != nil {
+		return moderation.MessageEvidence{}, err
+	}
+	return moderation.MessageEvidence{
+		MessageID: e.MessageID, ConversationID: e.ConversationID, SenderID: e.SenderID,
+		ParticipantIDs: e.ParticipantIDs, Text: e.Text, CreatedAt: e.CreatedAt,
+	}, nil
 }
 
 func shouldStartOutbox(storageProvider string, optionalWorkers bool) bool {
@@ -524,6 +584,8 @@ func main() {
 			marketdata:   marketdata.NewInMemoryRepository(),
 			social:       social.NewInMemoryRepository(),
 			instruments:  instrument.NewInMemoryRepository(),
+			safety:       safety.NewInMemoryRepository(),
+			moderation:   moderation.NewInMemoryRepository(),
 		}
 	case "postgres":
 		pool, err := db.ConnectPostgres(ctx, cfg.DatabaseURL)
@@ -552,6 +614,8 @@ func main() {
 			marketdata:   marketdata.NewPostgresRepository(pool),
 			social:       social.NewPostgresRepository(pool),
 			instruments:  instrument.NewPostgresRepository(pool),
+			safety:       safety.NewPostgresRepository(pool),
+			moderation:   moderation.NewPostgresRepository(pool),
 		}
 		corpActionStorer = corpactions.NewPostgresStore(pool)
 		incomeStorer = income.NewPostgresStore(pool)
@@ -630,6 +694,24 @@ func main() {
 	// --- services ---
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTExpiry)
 	authSvc := auth.NewService(repos.users, tokens)
+	var emailSender auth.EmailSender = auth.DevelopmentEmailSender{}
+	if strings.EqualFold(cfg.EmailSender, "smtp") {
+		sender, err := auth.NewSMTPEmailSender(auth.SMTPConfig{
+			Host: cfg.SMTPHost, Port: cfg.SMTPPort, Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword, From: cfg.SMTPFrom,
+		})
+		if err != nil {
+			slog.Error("email sender configuration failed", "error", err)
+			os.Exit(1)
+		}
+		emailSender = sender
+	}
+	authSvc.ConfigureLifecycle(auth.LifecycleConfig{
+		EmailSender: emailSender, PublicAppURL: cfg.PublicAppURL,
+		VerificationTTL: cfg.EmailVerificationTTL,
+		ResetTTL:        cfg.PasswordResetTTL,
+		ReauthTTL:       cfg.ReauthenticationTTL,
+	})
 	authSvc.ConfigureProviderAuth(auth.ProviderAuthConfig{
 		GoogleEnabled:  cfg.GoogleAuthEnabled,
 		AppleEnabled:   cfg.AppleAuthEnabled,
@@ -693,6 +775,7 @@ func main() {
 		benchmark.Recipes,
 		benchmark.NewSnapshotRecipeResolver(benchmark.DefaultRecipeSnapshots()),
 	)
+	benchmarkEngine.SetBaseCurrency(cfg.BaseCurrency)
 	// The Performance tab's benchmark comparison reuses the SAME construction
 	// engine the achievements pipeline uses — there is no second benchmark path.
 	historySvc.SetBenchmark(benchmarkComparisonAdapter{
@@ -741,9 +824,40 @@ func main() {
 	// on Explore or via a direct handle lookup (those read the profile
 	// repository directly and never check whether the account still exists).
 	authSvc.RegisterDeletionHook(profileSvc)
+	for _, candidate := range []any{
+		repos.portfolio, repos.history, repos.competitions,
+		repos.achievements, repos.profiles, repos.social,
+		repos.safety, repos.moderation,
+	} {
+		if eraser, ok := candidate.(auth.AccountDeletionHook); ok {
+			authSvc.RegisterDeletionHook(eraser)
+		}
+	}
 
 	strategySvc := strategy.NewService(profileSvc, portfolioSvc)
 	socialSvc := social.NewService(repos.social, repos.profiles)
+
+	// Social-safety layer: blocking + the canonical interaction-policy gate,
+	// and reporting/moderation. safetySvc.CanUsersInteract is the single
+	// source of truth wired into follow/DM (social), and blocked-pair
+	// filtering is wired into social's following/followers/friends/
+	// conversations lists and profile's public-view/Explore.
+	safetySvc := safety.NewService(repos.safety, repos.profiles)
+	safetySvc.SetFollowRemover(socialSvc)
+	safetySvc.SetUserStatusProvider(authAdminAdapter{authSvc})
+
+	moderationSvc := moderation.NewService(repos.moderation, authAdminAdapter{authSvc})
+	moderationSvc.SetMessageAccessor(moderationMessageAdapter{socialSvc})
+	moderationSvc.SetMessageRemover(socialSvc)
+
+	socialSvc.SetInteractionPolicy(safetySvc)
+	socialSvc.SetBlockedFilter(safetySvc)
+	socialSvc.SetNotificationCreator(moderationSvc)
+	profileSvc.SetBlockedFilter(safetySvc)
+
+	if err := authSvc.EnsureBootstrapAdmin(ctx, cfg.AdminBootstrapEmail); err != nil {
+		slog.Warn("admin bootstrap failed", "error", err)
+	}
 
 	// Ranking-epoch backfill: initialize persistent ranked state at index 100 for
 	// every existing portfolio so their new epoch begins at deployment. Legacy
@@ -774,6 +888,7 @@ func main() {
 		rankedCache = leaderboard.NewRedisLeaderboardCache(redisClient)
 		leaderboardSvc.SetCache(rankedCache)
 		competitionsSvc.SetCache(rankedCache)
+		authSvc.RegisterDeletionHook(rankedCache)
 	}
 
 	// --- transactional outbox processor ---
@@ -878,6 +993,9 @@ func main() {
 		if corpStore == nil {
 			corpStore = corpactions.NewInMemoryStore()
 		}
+		if eraser, ok := corpStore.(auth.AccountDeletionHook); ok {
+			authSvc.RegisterDeletionHook(eraser)
+		}
 		corpSvc := corpactions.NewService(corpProvider, corpStore, corpActionGateway{svc: portfolioSvc})
 		corpSvc.SetLookback(cfg.CorporateActionLookback)
 		corpActionView = corpActionViewAdapter{svc: corpSvc}
@@ -908,6 +1026,9 @@ func main() {
 		if incomeStore == nil {
 			incomeStore = income.NewInMemoryStore()
 		}
+		if eraser, ok := incomeStore.(auth.AccountDeletionHook); ok {
+			authSvc.RegisterDeletionHook(eraser)
+		}
 		incomeSvc := income.NewService(incomeProvider, incomeStore, incomeGateway{svc: portfolioSvc})
 		incomeSvc.SetLookback(cfg.IncomeLookback)
 		incomeSvc.SetRetryInterval(cfg.IncomeRetryInterval)
@@ -929,23 +1050,26 @@ func main() {
 	}
 
 	handler := server.New(server.Deps{
-		Auth:                authSvc,
-		Tokens:              tokens,
-		Portfolio:           portfolioSvc,
-		Leaderboard:         leaderboardSvc,
-		Competitions:        competitionsSvc,
-		Achievements:        achievementsSvc,
-		Profile:             profileSvc,
-		Strategy:            strategySvc,
-		MarketData:          marketDataSvc,
-		Social:              socialSvc,
-		PerformanceHistory:  historySvc,
-		CorporateActionView: corpActionView,
-		IncomeEventView:     incomeView,
-		ReadinessChecks:     readinessChecks,
-		AppEnv:              cfg.AppEnv,
-		CORSAllowedOrigins:  cfg.CORSAllowedOrigins,
-		RateLimitRedis:      redisClient,
+		Auth:                        authSvc,
+		Tokens:                      tokens,
+		Portfolio:                   portfolioSvc,
+		Leaderboard:                 leaderboardSvc,
+		Competitions:                competitionsSvc,
+		Achievements:                achievementsSvc,
+		Profile:                     profileSvc,
+		Strategy:                    strategySvc,
+		MarketData:                  marketDataSvc,
+		Social:                      socialSvc,
+		Safety:                      safetySvc,
+		Moderation:                  moderationSvc,
+		PerformanceHistory:          historySvc,
+		CorporateActionView:         corpActionView,
+		IncomeEventView:             incomeView,
+		ReadinessChecks:             readinessChecks,
+		AppEnv:                      cfg.AppEnv,
+		CORSAllowedOrigins:          cfg.CORSAllowedOrigins,
+		RateLimitRedis:              redisClient,
+		DisablePasswordRegistration: !cfg.PasswordRegistrationEnabled,
 		Info: map[string]string{
 			"storage_provider": cfg.StorageProvider,
 			"price_provider":   priceProviderName,

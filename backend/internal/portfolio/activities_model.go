@@ -162,6 +162,60 @@ type IncomeInput struct {
 // NetCash returns the net cash credited by an ordinary/return income event.
 func (in IncomeInput) NetCash() float64 { return in.Amount - in.Withholding - in.Fee }
 
+// IncomeComponentInput is ONE economic slice of a mixed income event (e.g. the
+// ordinary-income, capital-gains-distribution, and return-of-capital slices of
+// a single ETF distribution). It carries the same per-component fields as
+// IncomeInput; Symbol/AssetType/Currency/PaymentDate/IncomeEventID are usually
+// inherited from the enclosing IncomeEventInput but may be overridden per
+// component when a mixed event pays across more than one instrument.
+type IncomeComponentInput struct {
+	Subtype   IncomeSubtype
+	Symbol    string // overrides IncomeEventInput.Symbol when set
+	AssetType string
+	Currency  string // overrides IncomeEventInput.Currency when set
+
+	Amount      float64
+	Withholding float64
+	Fee         float64
+	Estimated   bool
+
+	// Reinvest requests that THIS component's net cash be reinvested into the
+	// paying instrument. Only ordinary-income components may reinvest; return
+	// of capital and stock dividends never do (planIncomeEvent rejects it).
+	Reinvest      bool
+	ReinvestPrice float64
+	PriceMethod   string
+
+	StockRatioNum float64
+	StockRatioDen float64
+
+	TaxClassification string
+	OccurredAt        *time.Time
+	Provenance        Provenance
+}
+
+// NetCash returns the net cash credited by this component.
+func (c IncomeComponentInput) NetCash() float64 { return c.Amount - c.Withholding - c.Fee }
+
+// IncomeEventInput is ONE full economic income event — possibly with several
+// components (ordinary income, capital-gains distribution, return of capital,
+// stock dividend, ...) — applied to a portfolio ATOMICALLY: all components
+// commit together in the same transaction, under the same activity_group_id,
+// with exactly one combined ranked-performance update, or none of them commit.
+type IncomeEventInput struct {
+	IncomeEventID string
+	Symbol        string
+	InstrumentID  string
+	AssetType     string
+	Currency      string
+	PaymentDate   time.Time
+	// Reinvest is the event-level default; a component may override it via its
+	// own Reinvest field (IncomeComponentInput.Reinvest is authoritative when
+	// explicitly set to true — see planIncomeEvent).
+	Reinvest   bool
+	Components []IncomeComponentInput
+}
+
 // FeeInput is a user-reported fee. Amount is a positive amount in Currency and
 // is deducted from that cash balance. LinkedActivityID optionally groups the fee
 // under a buy/sell/dividend/corporate-action it belongs to.
@@ -220,7 +274,7 @@ func activityMeta(base map[string]any, effect PerformanceEffect, prov Provenance
 func mutationEffect(kind MutationKind) PerformanceEffect {
 	switch kind {
 	case MutationIncome, MutationFee, MutationWriteOff, MutationReinvestedDividend,
-		MutationReturnOfCapital:
+		MutationReturnOfCapital, MutationIncomeEvent:
 		// Return of capital credits cash (a genuine value increase whose
 		// counterpart is the security's ex-date price drop), so it is return-
 		// bearing exactly once — but, unlike an ordinary dividend, it also reduces

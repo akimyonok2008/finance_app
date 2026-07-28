@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { AppNav } from "@/components/layout/AppNav";
 import { ProfileForm } from "@/components/profile/ProfileForm";
 import { ProfileSkeleton } from "@/components/profile/ProfileSkeleton";
+import { BlockedUsersCard } from "@/components/settings/BlockedUsersCard";
 import { ChangePasswordCard } from "@/components/settings/ChangePasswordCard";
 import { DeleteAccountCard } from "@/components/settings/DeleteAccountCard";
 import { PortfolioSettingsCard } from "@/components/settings/PortfolioSettingsCard";
@@ -92,6 +93,10 @@ export function AccountSettingsPage() {
                 color="violet"
               />
               <ChangePasswordCard />
+            </div>
+            <div>
+              <SectionLabel icon={ShieldCheck} label="Blocking" color="cyan" />
+              <BlockedUsersCard />
             </div>
           </div>
 

@@ -33,11 +33,15 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 		return ExploreResponse{}, err
 	}
 	ranks, fallback := s.exploreRankings(ctx, filter.Timeframe)
+	blocked := s.blockedSet(ctx, callerID)
 
 	all := make([]scoredCard, 0, len(profiles))
 	allCards := make([]PublicProfile, 0, len(profiles))
 	for _, p := range profiles {
 		if !p.IsPublic || !p.ShowPublicWeights {
+			continue
+		}
+		if blocked[p.UserID] {
 			continue
 		}
 		card := s.publicProjection(ctx, p)

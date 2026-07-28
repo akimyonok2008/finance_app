@@ -69,14 +69,14 @@ func adjustedMeta() BenchmarkDataMetadata {
 	return BenchmarkDataMetadata{
 		Provider: "feed", ProviderMode: "real", PriceType: PriceTypeAdjustedClose,
 		IsAdjusted: true, IsTotalReturn: true, IncludesDividends: true, IncludesSplits: true,
-		CorpActionsKnown: true, Quality: DataQualityVerified,
+		CorpActionsKnown: true, Quality: DataQualityVerified, Currency: "USD",
 	}
 }
 
 func rawMeta() BenchmarkDataMetadata {
 	return BenchmarkDataMetadata{
 		Provider: "feed", ProviderMode: "real", PriceType: PriceTypeRawClose,
-		CorpActionsKnown: false, Quality: DataQualityAcceptable,
+		CorpActionsKnown: false, Quality: DataQualityAcceptable, Currency: "USD",
 	}
 }
 

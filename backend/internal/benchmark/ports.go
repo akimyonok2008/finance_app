@@ -28,3 +28,15 @@ type HistoricalSeriesProvider interface {
 type DynamicRecipeResolver interface {
 	Resolve(ctx context.Context, recipe BenchmarkRecipe, asOf time.Time) (BenchmarkRecipe, error)
 }
+
+type HistoricalFXRate struct {
+	Rate     float64
+	Date     time.Time
+	Provider string
+}
+
+// HistoricalFXProvider supplies valuation-date FX. A current/static quote is
+// never an acceptable substitute for a verified historical evaluation.
+type HistoricalFXProvider interface {
+	Rate(ctx context.Context, fromCurrency, toCurrency string, date time.Time) (HistoricalFXRate, error)
+}

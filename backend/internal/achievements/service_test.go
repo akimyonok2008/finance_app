@@ -133,6 +133,7 @@ func (v verifiedTestPrices) GetSeries(ctx context.Context, symbol string, start,
 			IsAdjusted: true, IsTotalReturn: true, CorpActionsKnown: true,
 			Quality:     benchmark.DataQualityVerified,
 			RetrievedAt: now, SourceAsOf: now,
+			Currency: "USD",
 		},
 	}, nil
 }
@@ -309,9 +310,9 @@ func TestRankedSnapshotEvidenceIsVersioned(t *testing.T) {
 		}
 	}
 	require.NotNil(t, evidence)
-	assert.Equal(t, "ranked_snapshot_v1", evidence.EvaluationModel)
+	assert.Equal(t, "ranked_snapshot_benchmark_aligned_v2", evidence.EvaluationModel)
 	// Evidence v2 carries benchmark data-integrity provenance.
-	assert.Equal(t, 2, evidence.EvidenceVersion)
+	assert.Equal(t, 3, evidence.EvidenceVersion)
 	assert.Equal(t, 100.0, evidence.StartRankedIndex)
 	assert.Equal(t, 125.0, evidence.EndRankedIndex)
 	assert.Equal(t, "4h0m0s", evidence.SnapshotFrequency)

@@ -81,3 +81,13 @@ func (r *InMemoryRepository) Update(_ context.Context, p Profile) error {
 	r.byHandle[p.Handle] = p.UserID
 	return nil
 }
+
+func (r *InMemoryRepository) OnAccountDeleted(_ context.Context, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.byUserID[userID]; ok {
+		delete(r.byHandle, p.Handle)
+		delete(r.byUserID, userID)
+	}
+	return nil
+}

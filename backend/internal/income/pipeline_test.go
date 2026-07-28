@@ -47,28 +47,37 @@ func (g testGateway) EligibleQuantity(ctx context.Context, userID, instrumentID,
 	return g.svc.EligibleQuantity(ctx, userID, instrumentID, symbol, asOf)
 }
 
-func (g testGateway) ApplyIncome(ctx context.Context, userID, requestID string, in AppliedIncome) error {
-	at := in.PaymentDate
-	base := portfolio.IncomeInput{
-		Symbol: in.Symbol, AssetType: in.AssetType, Currency: in.Currency,
-		Amount: in.Gross, Withholding: in.Withholding, Fee: in.Fee, Estimated: in.Estimated,
-		ReinvestPrice: in.ReinvestPrice, PriceMethod: in.PriceMethod, IncomeEventID: in.IncomeEventID,
-		TaxClassification: in.TaxClassification, OccurredAt: &at, Provenance: portfolio.ProvenanceProviderReported,
-	}
-	switch in.Classification {
-	case ClassStockDividend:
-		base.Subtype = portfolio.IncomeStockDividendSub
-		base.StockRatioNum, base.StockRatioDen = in.StockRatioNum, in.StockRatioDen
-	case ClassReturnOfCapital:
-		base.Subtype = portfolio.IncomeReturnOfCapitalSub
-	default:
-		if in.Reinvest {
-			base.Subtype = portfolio.IncomeReinvestedDiv
-		} else {
-			base.Subtype = mapType(in.Type)
+// ApplyIncomeEvent mirrors the production incomeGateway: it converts every
+// component of the event into one portfolio.IncomeEventInput and applies them
+// all atomically through a single ApplyIncomeEvent call.
+func (g testGateway) ApplyIncomeEvent(ctx context.Context, userID, requestID string, in AppliedIncomeEvent) error {
+	components := make([]portfolio.IncomeComponentInput, 0, len(in.Components))
+	for _, c := range in.Components {
+		comp := portfolio.IncomeComponentInput{
+			Amount: c.Gross, Withholding: c.Withholding, Fee: c.Fee, Estimated: c.Estimated,
+			Reinvest: c.Reinvest, ReinvestPrice: c.ReinvestPrice, PriceMethod: c.PriceMethod,
+			TaxClassification: c.TaxClassification, Provenance: portfolio.ProvenanceProviderReported,
 		}
+		switch c.Classification {
+		case ClassStockDividend:
+			comp.Subtype = portfolio.IncomeStockDividendSub
+			comp.StockRatioNum, comp.StockRatioDen = c.StockRatioNum, c.StockRatioDen
+		case ClassReturnOfCapital:
+			comp.Subtype = portfolio.IncomeReturnOfCapitalSub
+		default:
+			if c.Reinvest {
+				comp.Subtype = portfolio.IncomeReinvestedDiv
+			} else {
+				comp.Subtype = mapType(c.Type)
+			}
+		}
+		components = append(components, comp)
 	}
-	_, err := g.svc.RecordIncome(ctx, userID, requestID, base)
+	at := in.PaymentDate
+	_, err := g.svc.ApplyIncomeEvent(ctx, userID, requestID, portfolio.IncomeEventInput{
+		IncomeEventID: in.IncomeEventID, Symbol: in.Symbol, AssetType: in.AssetType,
+		Currency: in.Currency, PaymentDate: at, Components: components,
+	})
 	return err
 }
 

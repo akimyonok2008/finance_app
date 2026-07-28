@@ -48,6 +48,39 @@ type AppliedIncome struct {
 	TaxClassification string
 }
 
+// AppliedIncomeComponent is one economic slice of a mixed income event (e.g.
+// the ordinary-income, capital-gains-distribution, and return-of-capital
+// slices of a single ETF distribution), in the neutral shape the gateway
+// converts to a portfolio-domain component.
+type AppliedIncomeComponent struct {
+	Type              Type
+	Classification    Classification
+	Reinvest          bool
+	Gross             float64
+	Withholding       float64
+	Fee               float64
+	ReinvestPrice     float64
+	PriceMethod       string
+	StockRatioNum     float64
+	StockRatioDen     float64
+	Estimated         bool
+	TaxClassification string
+}
+
+// AppliedIncomeEvent is the neutral instruction the pipeline hands to the
+// portfolio gateway for a FULL economic income event, possibly mixing several
+// components (ordinary income, capital-gains distribution, return of capital,
+// stock dividend, ...). The gateway applies every component ATOMICALLY: all
+// components commit together in one transaction or none do.
+type AppliedIncomeEvent struct {
+	IncomeEventID string
+	Symbol        string
+	AssetType     string
+	Currency      string
+	PaymentDate   time.Time
+	Components    []AppliedIncomeComponent
+}
+
 // PortfolioGateway is the narrow portfolio surface the pipeline needs. It is
 // implemented by an adapter over the portfolio service, keeping this package
 // free of portfolio-domain types.
@@ -57,9 +90,14 @@ type PortfolioGateway interface {
 	// EligibleQuantity reconstructs the user's holding of symbol as of asOf from
 	// the immutable ledger (historical entitlement, not current quantity).
 	EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (float64, error)
-	// ApplyIncome credits (or reinvests) one income component idempotently by
-	// requestID, through the aggregate coordinator.
-	ApplyIncome(ctx context.Context, userID, requestID string, in AppliedIncome) error
+	// ApplyIncomeEvent credits (and/or reinvests) EVERY component of one
+	// economic income event atomically, through the aggregate coordinator: one
+	// locked transaction, one activity group, one combined ranked-performance
+	// update. requestID must be ONE deterministic key per (income event,
+	// portfolio) pair — a retry with the same key replays the committed result
+	// instead of applying anything twice. If any component cannot be applied
+	// safely, no component is applied and a non-nil error is returned.
+	ApplyIncomeEvent(ctx context.Context, userID, requestID string, in AppliedIncomeEvent) error
 	// ApplyCorrection posts a compensating cash adjustment (positive credits,
 	// negative debits) for an already-applied event, idempotently by requestID.
 	// It preserves the original activity and cannot fabricate arbitrary income.
@@ -314,18 +352,25 @@ func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) b
 		return false
 	}
 
-	components := s.components(ev)
+	rawComponents := s.components(ev)
 	reinvest := s.prefs.reinvest(ev.Instrument.Symbol)
+
+	// Build EVERY component of this economic event BEFORE calling the gateway.
+	// The whole event is applied in ONE call under ONE deterministic request ID
+	// per (income event, portfolio) pair, so a retry replays the committed
+	// result and partial application (some components committed, some not) is
+	// impossible: either every component of this event commits atomically, or
+	// none of them do.
+	appliedEvent := AppliedIncomeEvent{
+		IncomeEventID: ev.ID, Symbol: ev.Instrument.Symbol, AssetType: h.AssetType,
+		Currency: ev.Currency, PaymentDate: ev.PaymentDate,
+		Components: make([]AppliedIncomeComponent, 0, len(rawComponents)),
+	}
 	var totalGross, totalWithholding, totalNet, reinvestQty float64
 	estimatedAny := false
-	for i, comp := range components {
-		in := s.buildApplied(ev, comp, h, eligible, reinvest, i)
-		requestID := fmt.Sprintf("inc:%s:%s:%d", ev.ID, h.PortfolioID, i)
-		if err := s.gateway.ApplyIncome(ctx, h.UserID, requestID, in); err != nil {
-			s.metrics.Inc("income_event_application_failures_total")
-			_ = s.store.FailApplication(ctx, ev.ID, h.PortfolioID, err.Error(), s.now().Add(s.retryIn))
-			return false
-		}
+	for _, comp := range rawComponents {
+		in := s.buildApplied(ev, comp, h, eligible, reinvest)
+		appliedEvent.Components = append(appliedEvent.Components, in)
 		totalGross += in.Gross
 		totalWithholding += in.Withholding
 		totalNet += in.Gross - in.Withholding - in.Fee
@@ -335,6 +380,19 @@ func (s *Service) applyToHolder(ctx context.Context, ev IncomeEvent, h Holder) b
 		if in.Reinvest && in.ReinvestPrice > 0 {
 			reinvestQty += (in.Gross - in.Withholding - in.Fee) / in.ReinvestPrice
 		}
+	}
+
+	// One deterministic request ID per (income event, portfolio) pair — never
+	// per component — so a retry after a committed event creates no
+	// duplicate cash, shares, basis reduction, activities, or ranked return.
+	requestID := fmt.Sprintf("inc:%s:%s", ev.ID, h.PortfolioID)
+	if err := s.gateway.ApplyIncomeEvent(ctx, h.UserID, requestID, appliedEvent); err != nil {
+		// Mark retryable, never partially successful: the whole atomic mutation
+		// either committed or it didn't, so there is nothing partially applied to
+		// reconcile here.
+		s.metrics.Inc("income_event_application_failures_total")
+		_ = s.store.FailApplication(ctx, ev.ID, h.PortfolioID, err.Error(), s.now().Add(s.retryIn))
+		return false
 	}
 
 	now := s.now()
@@ -359,18 +417,17 @@ func (s *Service) components(ev IncomeEvent) []ProviderComponent {
 	return []ProviderComponent{{Type: ev.Type, AmountPerUnit: ev.AmountPerUnit}}
 }
 
-// buildApplied computes gross/withholding/net for one component and packages the
-// neutral instruction for the gateway.
-func (s *Service) buildApplied(ev IncomeEvent, comp ProviderComponent, h Holder, eligible float64, reinvest bool, idx int) AppliedIncome {
+// buildApplied computes gross/withholding/net for one component of an event
+// and packages it as the neutral per-component instruction the gateway
+// bundles, with every other component, into one atomic AppliedIncomeEvent.
+func (s *Service) buildApplied(ev IncomeEvent, comp ProviderComponent, h Holder, eligible float64, reinvest bool) AppliedIncomeComponent {
 	compType := comp.Type
 	if compType == "" {
 		compType = ev.Type
 	}
 	class := Classify(compType)
-	in := AppliedIncome{
-		IncomeEventID: ev.ID, Type: compType, Classification: class,
-		Symbol: ev.Instrument.Symbol, AssetType: h.AssetType, Currency: ev.Currency,
-		PaymentDate: ev.PaymentDate, TaxClassification: ev.TaxClassification,
+	in := AppliedIncomeComponent{
+		Type: compType, Classification: class, TaxClassification: ev.TaxClassification,
 	}
 	if class == ClassStockDividend {
 		// AmountPerUnit carries new-shares-per-held-share.

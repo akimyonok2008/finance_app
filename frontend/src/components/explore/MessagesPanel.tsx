@@ -1,5 +1,5 @@
 import { ArrowLeft, MessageCircle, RefreshCw, ShieldCheck } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ConversationList } from "@/components/dm/ConversationList";
@@ -7,6 +7,7 @@ import { MessageComposer } from "@/components/dm/MessageComposer";
 import { MessageThread } from "@/components/dm/MessageThread";
 import { Button } from "@/components/ui/button";
 import { useConversations, useMessages } from "@/hooks/useDM";
+import { useMarkConversationRead } from "@/hooks/useSafety";
 import { cn } from "@/utils/cn";
 
 export function MessagesPanel() {
@@ -14,6 +15,18 @@ export function MessagesPanel() {
   const selectedId = searchParams.get("conversationId");
   const conversations = useConversations();
   const messages = useMessages(selectedId);
+  const markRead = useMarkConversationRead(selectedId);
+
+  // Record a server-side read boundary whenever the open conversation's
+  // latest message changes — opening the page alone must not silently clear
+  // unread state without this call.
+  const latestMessageId = messages.data?.messages.at(-1)?.id;
+  useEffect(() => {
+    if (selectedId && latestMessageId) {
+      markRead.mutate(latestMessageId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, latestMessageId]);
 
   const selected = useMemo(
     () => conversations.data?.conversations.find((item) => item.id === selectedId),
@@ -150,7 +163,7 @@ export function MessagesPanel() {
               Could not load messages.
             </div>
           ) : (
-            <MessageThread messages={messages.data?.messages ?? []} />
+            <MessageThread messages={messages.data?.messages ?? []} conversationId={selectedId ?? ""} />
           )}
           <MessageComposer conversationId={selectedId} />
         </section>

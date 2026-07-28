@@ -4,6 +4,11 @@ Responsive React interface for the Alarvest portfolio strategy tracker. It uses
 the Go API for authentication, portfolio state, rankings, achievements,
 profiles, discovery, friendships, and messages.
 
+The public experience is designed for percentage-based strategy comparison.
+Stock/ETF symbols, asset types, allocation percentages, percentage returns, and
+ranks are suitable for profiles, Explore, and leaderboard surfaces. Account
+balances and all other absolute monetary information remain private.
+
 ## Portfolio activity UI
 
 The private `/portfolio` page has two top-level tabs — **Transactions** ("What
@@ -93,22 +98,25 @@ Google requires the same web client ID on the backend. Mock auth is a local
 demo fallback: it can generate a frontend-only token after an email-login
 failure, and that token is not accepted by the real API.
 
-The JWT and user snapshot are stored in `localStorage`. The app does not refresh
-or revalidate the token at bootstrap. Any API `401` clears local auth and
-redirects to `/login`.
+The JWT and user snapshot are stored in `localStorage`. The app does not use a
+refresh token. Any API `401` clears local auth and redirects to `/login`.
+Password changes replace the stored JWT with the backend's newly versioned
+token so the current browser continues while older sessions are revoked.
 
 ## Active routes
 
 | Route | Access | Behavior |
 | --- | --- | --- |
 | `/` | Public | Landing page; authenticated users go to Dashboard |
-| `/login`, `/register` | Public | Email/password and optional Google auth |
+| `/login`, `/register` | Public | Verified email/password and optional Google auth |
+| `/verification-pending`, `/verify-email` | Public | Resend guidance and one-time email verification |
+| `/forgot-password`, `/reset-password` | Public | Enumeration-safe recovery and one-time password reset |
 | `/dashboard` | Protected | Compact portfolio summary and product navigation |
 | `/portfolio` | Protected | Transactions, Portfolio (Open/Closed/Cash), and Performance tabs — see below |
 | `/leaderboard` | Protected | Global/timeframe rankings and personal standing |
 | `/achievements` | Protected | Benchmark badge overview and catalogues |
 | `/profile` | Protected | Owner profile preview and settings |
-| `/profiles/:handle` | Protected | Privacy-filtered public profile |
+| `/profiles/:handle` | Protected | Public percentage-based strategy profile |
 | `/explore` | Protected | Strategies, Friends, and Messages workspace |
 
 Compatibility redirects:
@@ -219,8 +227,10 @@ colour is never the only signal.
 `1W`, `1M`, `3M`, `6M`, `1Y`, and `ALL` controls call the matching backend
 timeframe. Window boards can be empty until enough ranked snapshots exist.
 Rows display identity, rank, ranked index/return, and profile navigation.
-Holding symbols and weights were intentionally removed from leaderboard cards;
-users inspect opted-in composition on a profile.
+Current cards keep composition in the linked profile to stay visually compact.
+That is a presentation choice, not a privacy requirement: holding symbols and
+percentage weights are acceptable leaderboard data because they reveal the
+strategy without revealing the amount invested.
 
 The personal standing card displays the backend values, but rank movement is
 usually absent because historical rank delta is not currently recorded.
@@ -252,11 +262,37 @@ with a subtle legacy-evidence marker.
 
 ### Profiles
 
-The owner can edit display name, bio, strategy tag, and the separate public
-profile/public weights controls. Public pages may display headline ranked
-return/index, ranked snapshot history, ranks, unlocked badges, DNA, exposure
-aggregates, concentration, and—when opted in—symbols, weights, and
-closed-symbol percentage returns.
+The owner can edit display name, bio, strategy tag, and the current public
+profile/public weights presentation controls. Public pages may display headline
+ranked return/index, ranked snapshot history, ranks, unlocked badges, DNA,
+exposure aggregates, concentration, symbols, weights, and closed-symbol
+percentage returns. Symbols and percentages are public strategy information;
+the UI must still keep absolute monetary fields private.
+
+### Authentication and account lifecycle
+
+Password registration routes to a verification-pending screen rather than
+logging in. `/verify-email` consumes the link token, stores the returned
+session, and opens the dashboard. Login recognizes
+`email_verification_required` and returns the user to the pending screen.
+
+Forgot-password always shows the same confirmation. `/reset-password` accepts
+the one-time URL token, enforces the eight-character minimum and matching
+confirmation, and explains that older sessions were revoked.
+
+Account Settings uses `has_password` from the safe user projection:
+
+- Password users confirm their current password. A successful change stores the
+  replacement JWT returned by the API.
+- Provider-only users never see a current-password prompt. They reauthenticate
+  with the linked Google identity before creating their first password.
+- Deletion first obtains a short-lived reauthentication token—by password or
+  linked Google subject—then submits that token to the destructive endpoint.
+
+Successful deletion clears local authentication and returns to sign-in. A 401
+from any ordinary authenticated request also clears storage and redirects,
+covering password reset, explicit revocation, deletion, or another browser
+changing the password.
 
 Headline performance and chart history now share persistent ranked semantics.
 The benchmark section is currently a placeholder. Compare and Copy are
@@ -282,18 +318,25 @@ blocking, moderation, or group chat.
 
 ## Privacy and API integration
 
-Owner routes may display quantities, prices, values, cost basis, and absolute
-gain/loss. Public UI must not display those fields. Public strategy surfaces may
-display:
+Alarvest protects monetary amounts, not strategy visibility. Owner routes may
+display quantities, transaction prices, balances, values, cost basis, and
+absolute gain/loss. Public UI must never display those fields.
+
+Public strategy and leaderboard surfaces may display:
 
 - display name, handle, avatar, and strategy tag
 - ranked percentage return/index, rank, achievements, and ranked history
 - DNA, exposure, concentration, and performance-driver aggregates
-- symbols, asset types, and percentage weights only when sharing permits it
-- closed symbols and percentage returns only when sharing permits it
+- stock/ETF symbols, asset types, and percentage weights
+- closed symbols and percentage returns
 
-Leaderboard rows deliberately do not render composition. Explore includes only
-profiles with both public visibility and public weights enabled.
+Showing a symbol or percentage does not disclose the user's account size.
+Quantities, balances, monetary values, buy/sell prices, cost basis, absolute
+gain/loss, email, and brokerage identifiers remain private. Current leaderboard
+rows link to profile composition rather than rendering it inline, and Explore
+currently includes profiles with both public visibility and public weights
+enabled; these are product-presentation controls, not restrictions required to
+protect monetary privacy.
 
 React components only format backend-owned financial metrics. They do not
 multiply ranked return by basis, reconstruct total P&L, or add realized results,
@@ -319,7 +362,8 @@ provider secret.
   tree, but active routes redirect to Leaderboard.
 - **Removed:** Coach API, hooks, types, components, and portfolio analysis modes.
 - **Not implemented:** Apple sign-in UI, live competition UI, broker trading,
-  AI advice, token refresh, and production social features.
+  AI advice, refresh tokens, device-management UI, MFA/passkeys, and production
+  social features.
 
 ## Build checks
 

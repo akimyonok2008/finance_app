@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"strings"
 	"sync"
+	"time"
 )
 
 // UserRepository is the persistence boundary for accounts. The service depends
@@ -26,21 +28,46 @@ type UserRepository interface {
 	// UpdatePassword sets a new password hash for an existing, non-deleted
 	// user. Returns ErrUserNotFound if the user doesn't exist (or is deleted).
 	UpdatePassword(userID, passwordHash string) error
+	UpdatePasswordAndRevoke(userID, passwordHash string) (*User, error)
+	IncrementAuthVersion(userID string) (*User, error)
+	SaveEmailVerificationToken(ctx context.Context, token LifecycleToken) error
+	VerifyEmailToken(ctx context.Context, tokenHash string, now time.Time) (*User, error)
+	SavePasswordResetToken(ctx context.Context, token LifecycleToken) error
+	ResetPasswordToken(ctx context.Context, tokenHash, passwordHash string, now time.Time) (*User, error)
+	SaveReauthenticationToken(ctx context.Context, token LifecycleToken) error
+	ConsumeReauthenticationToken(ctx context.Context, userID, tokenHash string, now time.Time) error
 	// SoftDelete marks the user deleted. From that point on FindByEmail,
 	// FindByID, and ListUsers must all treat the account as gone — which also
 	// means any outstanding JWT stops working, since RequireAuthWithUser
 	// re-checks FindByID on every request. Returns ErrUserNotFound if the user
 	// doesn't exist (or is already deleted).
 	SoftDelete(userID string) error
+	DeleteAccount(ctx context.Context, userID string) error
+
+	// SetRole assigns a moderation role (RoleUser/RoleModerator/RoleAdmin).
+	SetRole(ctx context.Context, userID, role string) (*User, error)
+	// Suspend applies a temporary suspension until the given time. A nil
+	// until clears any existing suspension.
+	Suspend(ctx context.Context, userID string, until *time.Time, reason string) (*User, error)
+	// Ban permanently bans the account, preventing further authentication.
+	Ban(ctx context.Context, userID string, reason string) (*User, error)
 }
 
 // InMemoryUserRepository is a goroutine-safe, process-local store used for the
 // prototype milestone. It is indexed by both id and normalized email.
 type InMemoryUserRepository struct {
-	mu         sync.RWMutex
-	byID       map[string]*User
-	byEmail    map[string]*User
-	identities map[string]*AuthIdentity
+	mu           sync.RWMutex
+	byID         map[string]*User
+	byEmail      map[string]*User
+	identities   map[string]*AuthIdentity
+	emailTokens  []memoryLifecycleToken
+	resetTokens  []memoryLifecycleToken
+	reauthTokens []memoryLifecycleToken
+}
+
+type memoryLifecycleToken struct {
+	LifecycleToken
+	ConsumedAt *time.Time
 }
 
 // NewInMemoryUserRepository returns an empty in-memory repository.
@@ -67,6 +94,15 @@ func (r *InMemoryUserRepository) Create(user *User) error {
 	}
 
 	stored := *user // store a copy so callers can't mutate our state
+	if stored.AuthVersion == 0 {
+		stored.AuthVersion = 1
+	}
+	if stored.PasswordHash != "" {
+		stored.HasPassword = true
+	}
+	if stored.Role == "" {
+		stored.Role = RoleUser
+	}
 	r.byID[stored.ID] = &stored
 	r.byEmail[key] = &stored
 	return nil
@@ -118,7 +154,137 @@ func (r *InMemoryUserRepository) UpdatePassword(userID, passwordHash string) err
 		return ErrUserNotFound
 	}
 	u.PasswordHash = passwordHash
+	u.HasPassword = true
 	return nil
+}
+
+func (r *InMemoryUserRepository) UpdatePasswordAndRevoke(userID, passwordHash string) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.byID[userID]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	u.PasswordHash = passwordHash
+	u.HasPassword = true
+	u.AuthVersion++
+	copied := *u
+	return &copied, nil
+}
+
+func (r *InMemoryUserRepository) IncrementAuthVersion(userID string) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.byID[userID]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	u.AuthVersion++
+	copied := *u
+	return &copied, nil
+}
+
+func (r *InMemoryUserRepository) SaveEmailVerificationToken(_ context.Context, token LifecycleToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+	for i := range r.emailTokens {
+		if r.emailTokens[i].UserID == token.UserID && r.emailTokens[i].ConsumedAt == nil {
+			r.emailTokens[i].ConsumedAt = &now
+		}
+	}
+	r.emailTokens = append(r.emailTokens, memoryLifecycleToken{LifecycleToken: token})
+	return nil
+}
+
+func (r *InMemoryUserRepository) VerifyEmailToken(_ context.Context, tokenHash string, now time.Time) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.emailTokens {
+		t := &r.emailTokens[i]
+		if subtle.ConstantTimeCompare([]byte(t.TokenHash), []byte(tokenHash)) != 1 {
+			continue
+		}
+		if t.ConsumedAt != nil || !now.Before(t.ExpiresAt) {
+			return nil, ErrInvalidLifecycleToken
+		}
+		t.ConsumedAt = &now
+		u, ok := r.byID[t.UserID]
+		if !ok {
+			return nil, ErrInvalidLifecycleToken
+		}
+		verified := now.UTC()
+		u.EmailVerifiedAt = &verified
+		copied := *u
+		return &copied, nil
+	}
+	return nil, ErrInvalidLifecycleToken
+}
+
+func (r *InMemoryUserRepository) SavePasswordResetToken(_ context.Context, token LifecycleToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+	for i := range r.resetTokens {
+		if r.resetTokens[i].UserID == token.UserID && r.resetTokens[i].ConsumedAt == nil {
+			r.resetTokens[i].ConsumedAt = &now
+		}
+	}
+	r.resetTokens = append(r.resetTokens, memoryLifecycleToken{LifecycleToken: token})
+	return nil
+}
+
+func (r *InMemoryUserRepository) ResetPasswordToken(_ context.Context, tokenHash, passwordHash string, now time.Time) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.resetTokens {
+		t := &r.resetTokens[i]
+		if subtle.ConstantTimeCompare([]byte(t.TokenHash), []byte(tokenHash)) != 1 {
+			continue
+		}
+		if t.ConsumedAt != nil || !now.Before(t.ExpiresAt) {
+			return nil, ErrInvalidLifecycleToken
+		}
+		t.ConsumedAt = &now
+		u, ok := r.byID[t.UserID]
+		if !ok || !u.HasPassword {
+			return nil, ErrInvalidLifecycleToken
+		}
+		u.PasswordHash = passwordHash
+		u.AuthVersion++
+		for j := range r.resetTokens {
+			if r.resetTokens[j].UserID == u.ID && r.resetTokens[j].ConsumedAt == nil {
+				r.resetTokens[j].ConsumedAt = &now
+			}
+		}
+		copied := *u
+		return &copied, nil
+	}
+	return nil, ErrInvalidLifecycleToken
+}
+
+func (r *InMemoryUserRepository) SaveReauthenticationToken(_ context.Context, token LifecycleToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reauthTokens = append(r.reauthTokens, memoryLifecycleToken{LifecycleToken: token})
+	return nil
+}
+
+func (r *InMemoryUserRepository) ConsumeReauthenticationToken(_ context.Context, userID, tokenHash string, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.reauthTokens {
+		t := &r.reauthTokens[i]
+		if t.UserID != userID || subtle.ConstantTimeCompare([]byte(t.TokenHash), []byte(tokenHash)) != 1 {
+			continue
+		}
+		if t.ConsumedAt != nil || !now.Before(t.ExpiresAt) {
+			return ErrReauthenticationRequired
+		}
+		t.ConsumedAt = &now
+		return nil
+	}
+	return ErrReauthenticationRequired
 }
 
 // SoftDelete removes the user from both lookup indexes, so FindByEmail,
@@ -131,9 +297,86 @@ func (r *InMemoryUserRepository) SoftDelete(userID string) error {
 	if !ok {
 		return ErrUserNotFound
 	}
+	u.AuthVersion++
 	delete(r.byID, userID)
 	delete(r.byEmail, normalizeEmail(u.Email))
 	return nil
+}
+
+func (r *InMemoryUserRepository) DeleteAccount(_ context.Context, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.byID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	delete(r.byID, userID)
+	delete(r.byEmail, normalizeEmail(u.Email))
+	for key, identity := range r.identities {
+		if identity.UserID == userID {
+			delete(r.identities, key)
+		}
+	}
+	r.emailTokens = filterMemoryTokens(r.emailTokens, userID)
+	r.resetTokens = filterMemoryTokens(r.resetTokens, userID)
+	r.reauthTokens = filterMemoryTokens(r.reauthTokens, userID)
+	return nil
+}
+
+func filterMemoryTokens(tokens []memoryLifecycleToken, userID string) []memoryLifecycleToken {
+	out := tokens[:0]
+	for _, token := range tokens {
+		if token.UserID != userID {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+// SetRole assigns a moderation role in place.
+func (r *InMemoryUserRepository) SetRole(_ context.Context, userID, role string) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.byID[userID]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	u.Role = role
+	copied := *u
+	return &copied, nil
+}
+
+// Suspend sets or clears a temporary suspension window.
+func (r *InMemoryUserRepository) Suspend(_ context.Context, userID string, until *time.Time, reason string) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.byID[userID]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	u.SuspendedUntil = until
+	if until == nil {
+		u.SuspensionReason = ""
+	} else {
+		u.SuspensionReason = reason
+	}
+	copied := *u
+	return &copied, nil
+}
+
+// Ban permanently bans the account.
+func (r *InMemoryUserRepository) Ban(_ context.Context, userID string, reason string) (*User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.byID[userID]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	now := time.Now().UTC()
+	u.BannedAt = &now
+	u.BanReason = reason
+	copied := *u
+	return &copied, nil
 }
 
 func (r *InMemoryUserRepository) FindIdentity(provider AuthProvider, subject string) (*AuthIdentity, error) {

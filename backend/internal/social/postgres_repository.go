@@ -3,6 +3,7 @@ package social
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -209,21 +210,24 @@ func (r *PostgresRepository) AddMessage(ctx context.Context, msg Message) error 
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID string, limit int) ([]Message, error) {
+func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID, viewerID string, limit int) ([]Message, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, conversation_id, sender_user_id, body, created_at
+		SELECT id, conversation_id, sender_user_id, body, created_at, removed_at, removed_by
 		FROM (
-			SELECT id, conversation_id, sender_user_id, body, created_at
-			FROM dm_messages
-			WHERE conversation_id = $1 AND deleted_at IS NULL
-			ORDER BY created_at DESC
+			SELECT m.id, m.conversation_id, m.sender_user_id, m.body, m.created_at, m.removed_at, m.removed_by
+			FROM dm_messages m
+			WHERE m.conversation_id = $1 AND m.deleted_at IS NULL
+			  AND NOT EXISTS (
+			      SELECT 1 FROM message_visibility v WHERE v.message_id = m.id AND v.user_id = $3
+			  )
+			ORDER BY m.created_at DESC
 			LIMIT $2
 		) recent
 		ORDER BY created_at ASC
-	`, conversationID, limit)
+	`, conversationID, limit, viewerID)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +245,7 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 
 func (r *PostgresRepository) LastMessage(ctx context.Context, conversationID string) (Message, bool, error) {
 	msg, err := scanMessage(r.pool.QueryRow(ctx, `
-		SELECT id, conversation_id, sender_user_id, body, created_at
+		SELECT id, conversation_id, sender_user_id, body, created_at, removed_at, removed_by
 		FROM dm_messages
 		WHERE conversation_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -251,6 +255,97 @@ func (r *PostgresRepository) LastMessage(ctx context.Context, conversationID str
 		return Message{}, false, nil
 	}
 	return msg, err == nil, err
+}
+
+func (r *PostgresRepository) MessageByID(ctx context.Context, messageID string) (Message, error) {
+	msg, err := scanMessage(r.pool.QueryRow(ctx, `
+		SELECT id, conversation_id, sender_user_id, body, created_at, removed_at, removed_by
+		FROM dm_messages WHERE id = $1
+	`, messageID))
+	if errors.Is(err, ErrConversationNotFound) {
+		return Message{}, ErrMessageNotFound
+	}
+	return msg, err
+}
+
+func (r *PostgresRepository) HideMessageForUser(ctx context.Context, messageID, userID string) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO message_visibility (message_id, user_id) VALUES ($1, $2)
+		ON CONFLICT (message_id, user_id) DO NOTHING
+	`, messageID, userID)
+	return err
+}
+
+func (r *PostgresRepository) RemoveMessage(ctx context.Context, messageID, moderatorID string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE dm_messages SET removed_at = now(), removed_by = $2 WHERE id = $1
+	`, messageID, moderatorID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) MarkRead(ctx context.Context, conversationID, userID, lastReadMessageID string) error {
+	var readAt time.Time
+	err := r.pool.QueryRow(ctx, `
+		SELECT created_at FROM dm_messages WHERE id = $1 AND conversation_id = $2
+	`, lastReadMessageID, conversationID).Scan(&readAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrMessageNotFound
+	}
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `
+		INSERT INTO conversation_participant_state (conversation_id, user_id, last_read_message_id, last_read_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (conversation_id, user_id) DO UPDATE
+		SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = EXCLUDED.last_read_at
+	`, conversationID, userID, lastReadMessageID, readAt)
+	return err
+}
+
+func (r *PostgresRepository) ConversationUnreadCount(ctx context.Context, conversationID, userID string) (int, error) {
+	var count int
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM dm_messages m
+		WHERE m.conversation_id = $1
+		  AND m.sender_user_id <> $2
+		  AND m.removed_at IS NULL
+		  AND m.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM message_visibility v WHERE v.message_id = m.id AND v.user_id = $2)
+		  AND m.created_at > COALESCE(
+		      (SELECT last_read_at FROM conversation_participant_state WHERE conversation_id = $1 AND user_id = $2),
+		      'epoch'::timestamptz
+		  )
+	`, conversationID, userID).Scan(&count)
+	return count, err
+}
+
+func (r *PostgresRepository) UnreadCount(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM dm_messages m
+		JOIN dm_conversations c ON c.id = m.conversation_id
+		WHERE (c.participant_a_user_id = $1 OR c.participant_b_user_id = $1)
+		  AND m.sender_user_id <> $1
+		  AND m.removed_at IS NULL
+		  AND m.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM message_visibility v WHERE v.message_id = m.id AND v.user_id = $1)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversation_participant_state s
+		      WHERE s.conversation_id = m.conversation_id AND s.user_id = $1 AND s.state <> 'active'
+		  )
+		  AND m.created_at > COALESCE(
+		      (SELECT last_read_at FROM conversation_participant_state WHERE conversation_id = m.conversation_id AND user_id = $1),
+		      'epoch'::timestamptz
+		  )
+	`, userID).Scan(&count)
+	return count, err
 }
 
 func scanFollows(rows pgx.Rows) ([]Follow, error) {
@@ -280,7 +375,7 @@ func scanConversation(row rowScanner) (Conversation, error) {
 
 func scanMessage(row rowScanner) (Message, error) {
 	var msg Message
-	err := row.Scan(&msg.ID, &msg.ConversationID, &msg.SenderUserID, &msg.Body, &msg.CreatedAt)
+	err := row.Scan(&msg.ID, &msg.ConversationID, &msg.SenderUserID, &msg.Body, &msg.CreatedAt, &msg.RemovedAt, &msg.RemovedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Message{}, ErrConversationNotFound
 	}

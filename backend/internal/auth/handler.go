@@ -16,6 +16,7 @@ type authResponse struct {
 // errorResponse is the consistent error envelope: {"error": "message"}.
 type errorResponse struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
 }
 
 // Handler adapts HTTP requests to the auth Service.
@@ -46,7 +47,31 @@ type changePasswordRequest struct {
 }
 
 type deleteAccountRequest struct {
-	Password string `json:"password"`
+	ReauthenticationToken string `json:"reauthentication_token"`
+}
+
+type emailRequest struct {
+	Email string `json:"email"`
+}
+
+type tokenRequest struct {
+	Token string `json:"token"`
+}
+
+type resetPasswordRequest struct {
+	Token       string `json:"token"`
+	NewPassword string `json:"new_password"`
+}
+
+type reauthenticateRequest struct {
+	Password   string       `json:"password,omitempty"`
+	Provider   AuthProvider `json:"provider,omitempty"`
+	Credential string       `json:"credential,omitempty"`
+}
+
+type setPasswordRequest struct {
+	ReauthenticationToken string `json:"reauthentication_token"`
+	NewPassword           string `json:"new_password"`
 }
 
 type googleRequest struct {
@@ -74,7 +99,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, token, err := h.svc.Register(RegisterInput{
+	user, _, err := h.svc.RegisterContext(r.Context(), RegisterInput{
 		Email:       req.Email,
 		Password:    req.Password,
 		DisplayName: req.DisplayName,
@@ -85,7 +110,9 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, authResponse{User: user.Public(), Token: token})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user": user.Public(), "verification_required": true,
+	})
 }
 
 // Login handles POST /auth/login.
@@ -98,11 +125,66 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	user, token, err := h.svc.Login(req.Email, req.Password)
 	if err != nil {
+		if errors.Is(err, ErrEmailVerificationRequired) {
+			writeErrorCode(w, http.StatusForbidden, ErrEmailVerificationRequired.Error(), "email_verification_required")
+			return
+		}
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+}
+
+func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
+	var req tokenRequest
+	if decodeJSON(r, &req) != nil || strings.TrimSpace(req.Token) == "" {
+		writeError(w, http.StatusBadRequest, "token is required")
+		return
+	}
+	user, token, err := h.svc.VerifyEmail(r.Context(), req.Token)
+	if err != nil {
+		writeErrorCode(w, statusForError(err), err.Error(), "invalid_verification_token")
+		return
+	}
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+}
+
+func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
+	var req emailRequest
+	if decodeJSON(r, &req) != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	h.svc.ResendVerification(r.Context(), req.Email)
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"message": "If verification is available for that address, an email has been sent.",
+	})
+}
+
+func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req emailRequest
+	if decodeJSON(r, &req) != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	h.svc.ForgotPassword(r.Context(), req.Email)
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"message": "If an account can be recovered, a reset email has been sent.",
+	})
+}
+
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req resetPasswordRequest
+	if decodeJSON(r, &req) != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.svc.ResetPassword(r.Context(), req.Token, req.NewPassword); err != nil {
+		writeError(w, statusForError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) Google(w http.ResponseWriter, r *http.Request) {
@@ -175,16 +257,78 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := h.svc.ChangePassword(userID, req.CurrentPassword, req.NewPassword); err != nil {
+	token, err := h.svc.ChangePasswordAndRevoke(userID, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		writeError(w, statusForError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+func (h *Handler) SetPassword(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, ErrInvalidToken.Error())
+		return
+	}
+	var req setPasswordRequest
+	if decodeJSON(r, &req) != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	token, err := h.svc.SetFirstPassword(r.Context(), userID, req.ReauthenticationToken, req.NewPassword)
+	if err != nil {
+		writeError(w, statusForError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+func (h *Handler) Reauthenticate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, ErrInvalidToken.Error())
+		return
+	}
+	var req reauthenticateRequest
+	if decodeJSON(r, &req) != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var (
+		token string
+		err   error
+	)
+	switch {
+	case req.Password != "":
+		token, err = h.svc.ReauthenticatePassword(r.Context(), userID, req.Password)
+	case req.Provider != "" && req.Credential != "":
+		token, err = h.svc.ReauthenticateProvider(r.Context(), userID, req.Provider, req.Credential)
+	default:
+		err = ErrReauthenticationRequired
+	}
+	if err != nil {
+		writeError(w, statusForError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"reauthentication_token": token})
+}
+
+func (h *Handler) RevokeSessions(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, ErrInvalidToken.Error())
+		return
+	}
+	if err := h.svc.RevokeSessions(userID); err != nil {
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// DeleteAccount handles POST /auth/delete-account. It re-confirms the
-// password before soft-deleting the account; the caller's own token stops
-// working on its very next request once the account row is gone.
+// DeleteAccount handles POST /auth/delete-account. It requires a recent,
+// single-use reauthentication token and permanently erases the account.
 func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	userID, ok := UserIDFromContext(r.Context())
 	if !ok {
@@ -196,7 +340,7 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := h.svc.DeleteAccount(r.Context(), userID, req.Password); err != nil {
+	if err := h.svc.DeleteAccount(r.Context(), userID, req.ReauthenticationToken); err != nil {
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
@@ -210,6 +354,12 @@ func statusForError(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrInvalidCredentials), errors.Is(err, ErrUserNotFound):
 		return http.StatusUnauthorized
+	case errors.Is(err, ErrEmailVerificationRequired):
+		return http.StatusForbidden
+	case errors.Is(err, ErrInvalidLifecycleToken), errors.Is(err, ErrReauthenticationRequired):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrPasswordAlreadySet):
+		return http.StatusConflict
 	case errors.Is(err, ErrEmailRequired),
 		errors.Is(err, ErrPasswordRequired),
 		errors.Is(err, ErrPasswordTooShort),
@@ -245,4 +395,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, message, code string) {
+	writeJSON(w, status, errorResponse{Error: message, Code: code})
 }

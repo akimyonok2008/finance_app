@@ -180,6 +180,33 @@ func (s *VersionedRecipeStore) Versions(recipeID string) []BenchmarkRecipeVersio
 	return append([]BenchmarkRecipeVersion(nil), s.versions[recipeID]...)
 }
 
+// RelevantVersions returns the version knowable at the requested start plus
+// every later version made public during the window. Callers decide whether the
+// recipe policy activates those transitions; static policies intentionally use
+// only the first version.
+func (s *VersionedRecipeStore) RelevantVersions(recipeID string, start, end time.Time) ([]BenchmarkRecipeVersion, error) {
+	first, err := s.SelectVersion(recipeID, start)
+	if err != nil {
+		return nil, err
+	}
+	out := []BenchmarkRecipeVersion{first}
+	for _, version := range s.versions[recipeID] {
+		if version.VersionID == first.VersionID {
+			continue
+		}
+		if version.PubliclyKnownAt.After(start) && !version.PubliclyKnownAt.After(end) {
+			out = append(out, version)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PubliclyKnownAt.Equal(out[j].PubliclyKnownAt) {
+			return out[i].VersionID < out[j].VersionID
+		}
+		return out[i].PubliclyKnownAt.Before(out[j].PubliclyKnownAt)
+	})
+	return out, nil
+}
+
 // epoch is the "always valid" public date for static, code-defined recipes,
 // well before any evaluated window.
 var epoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -273,7 +300,7 @@ func berkshireVersions() []BenchmarkRecipeVersion {
 			SourceURL:              "https://www.sec.gov/Archives/edgar/data/1067983/000095012325005701/form13fInfoTable.xml",
 			SourceAccession:        "0000950123-25-005701",
 			SourceDescription:      "Berkshire Hathaway Inc. 13F-HR for period 2025-03-31.",
-			RebalancingPolicy:      RebalanceDailyTargetWeight,
+			RebalancingPolicy:      RebalanceFilingSnapshot,
 			TotalReturnModel:       true,
 			InvestorProxy:          true,
 			SourceMarketValueTotal: 258701144516,
@@ -312,7 +339,7 @@ func berkshireVersions() []BenchmarkRecipeVersion {
 			SourceURL:              "https://www.sec.gov/Archives/edgar/data/1067983/000119312526226661/53405.xml",
 			SourceAccession:        "0001193125-26-226661",
 			SourceDescription:      "Berkshire Hathaway Inc. 13F-HR for period 2026-03-31.",
-			RebalancingPolicy:      RebalanceDailyTargetWeight,
+			RebalancingPolicy:      RebalanceFilingSnapshot,
 			TotalReturnModel:       true,
 			InvestorProxy:          true,
 			SourceMarketValueTotal: 263095703570,

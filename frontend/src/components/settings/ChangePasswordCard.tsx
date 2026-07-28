@@ -1,12 +1,16 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { LoaderCircle } from "lucide-react";
+import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
+import { reauthenticateWithProviderRequest } from "@/api/accountApi";
+import { useAuth } from "@/auth/useAuth";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useChangePassword } from "@/hooks/useAccount";
+import { useChangePassword, useSetFirstPassword } from "@/hooks/useAccount";
+import { GoogleSignInButton } from "@/pages/auth/components/OAuthButtons";
 
 const schema = z
   .object({
@@ -26,6 +30,14 @@ function FieldError({ message }: { message?: string }) {
 }
 
 export function ChangePasswordCard() {
+  const { user } = useAuth();
+  if (user && !user.has_password) {
+    return <SetFirstPasswordCard />;
+  }
+  return <ExistingPasswordCard />;
+}
+
+function ExistingPasswordCard() {
   const changePassword = useChangePassword();
   const {
     register,
@@ -103,6 +115,77 @@ export function ChangePasswordCard() {
         {changePassword.isPending ? <LoaderCircle className="animate-spin" /> : null}
         {changePassword.isPending ? "Updating password" : "Update password"}
       </Button>
+    </form>
+  );
+}
+
+function SetFirstPasswordCard() {
+  const setPassword = useSetFirstPassword();
+  const [reauthToken, setReauthToken] = useState("");
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [googleError, setGoogleError] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (newPassword.length < 8 || newPassword !== confirm) return;
+    setPassword.mutate(
+      { reauthenticationToken: reauthToken, newPassword },
+      { onSuccess: () => {
+        setNewPassword("");
+        setConfirm("");
+        setReauthToken("");
+      } },
+    );
+  };
+
+  return (
+    <form onSubmit={submit} className="rounded-2xl border border-violet-300/15 bg-gradient-to-br from-violet-400/[0.055] to-zinc-900/70 p-5 shadow-lg shadow-violet-950/10 sm:p-6">
+      <h2 className="text-base font-semibold text-zinc-50">Create a password</h2>
+      <p className="mt-1 text-xs leading-5 text-zinc-400">
+        This account currently uses Google. Reauthenticate with the linked
+        identity before adding an optional password.
+      </p>
+      {!reauthToken ? (
+        <div className="mt-5">
+          <GoogleSignInButton
+            loading={googleBusy}
+            disabled={googleBusy}
+            onStart={() => setGoogleBusy(true)}
+            onDone={() => setGoogleBusy(false)}
+            onSuccess={() => undefined}
+            onError={setGoogleError}
+            loginWithGoogle={async (credential) => {
+              const result = await reauthenticateWithProviderRequest("google", credential);
+              setReauthToken(result.reauthentication_token);
+              setGoogleError("");
+            }}
+          />
+          {googleError ? <p className="mt-2 text-xs text-rose-300">{googleError}</p> : null}
+        </div>
+      ) : (
+        <>
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label htmlFor="provider_new_password">New password</Label>
+              <Input id="provider_new_password" className="mt-2" type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="provider_confirm_password">Confirm password</Label>
+              <Input id="provider_confirm_password" className="mt-2" type="password" autoComplete="new-password" value={confirm} onChange={(event) => setConfirm(event.target.value)} />
+            </div>
+          </div>
+          {newPassword && (newPassword.length < 8 || newPassword !== confirm) ? (
+            <p className="mt-2 text-xs text-rose-300">
+              {newPassword.length < 8 ? "Password must be at least 8 characters." : "Passwords do not match."}
+            </p>
+          ) : null}
+          <Button className="mt-5 w-full bg-violet-200 text-zinc-950 hover:bg-violet-100" disabled={setPassword.isPending || newPassword.length < 8 || newPassword !== confirm}>
+            {setPassword.isPending ? "Creating password…" : "Create password"}
+          </Button>
+        </>
+      )}
     </form>
   );
 }

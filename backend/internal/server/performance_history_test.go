@@ -37,8 +37,11 @@ func TestPerformanceHistory_ReadsCanonicalRankedSnapshots(t *testing.T) {
 	reg := doReq(t, h, http.MethodPost, "/auth/register",
 		`{"email":"ranked@example.com","password":"StrongPassword123","display_name":"RankedUser_1","avatar_key":"fox"}`, "")
 	require.Equal(t, http.StatusCreated, reg.Code)
-	token := extractToken(t, reg.Body.String())
 	userID := extractUserID(t, reg.Body.String())
+	login := doReq(t, h, http.MethodPost, "/auth/login",
+		`{"email":"ranked@example.com","password":"StrongPassword123"}`, "")
+	require.Equal(t, http.StatusOK, login.Code)
+	token := extractToken(t, login.Body.String())
 
 	require.Equal(t, http.StatusCreated,
 		doIdempotentReq(t, h, "/portfolio/deposits", `{"currency":"USD","amount":5000}`, token, "rh-deposit").Code)

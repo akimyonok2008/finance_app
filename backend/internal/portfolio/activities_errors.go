@@ -21,4 +21,12 @@ var (
 	ErrIncomeEventNotFound     = errors.New("income event not found")
 	ErrIncomeNotApplied        = errors.New("income event has no application to correct")
 	ErrInvalidIncomeCorrection = errors.New("invalid income correction")
+
+	// ErrUnsupportedIncomeComponent guards the atomic multi-component income
+	// event path: when one component of a mixed distribution cannot be
+	// classified into a supported subtype, the WHOLE event is rejected before
+	// any write happens rather than applying the supported components alone.
+	ErrUnsupportedIncomeComponent = errors.New("unsupported income component; event left unresolved")
+	// ErrEmptyIncomeEvent guards against an event with no components.
+	ErrEmptyIncomeEvent = errors.New("income event has no components")
 )

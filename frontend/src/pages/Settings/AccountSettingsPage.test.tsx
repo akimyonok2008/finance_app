@@ -44,6 +44,9 @@ vi.mock("@/components/settings/ChangePasswordCard", () => ({
 vi.mock("@/components/settings/DeleteAccountCard", () => ({
   DeleteAccountCard: () => <div data-testid="delete-settings">delete settings</div>,
 }));
+vi.mock("@/components/settings/BlockedUsersCard", () => ({
+  BlockedUsersCard: () => <div data-testid="blocked-users-settings">blocked users</div>,
+}));
 
 const { AccountSettingsPage } = await import(
   "@/pages/Settings/AccountSettingsPage"

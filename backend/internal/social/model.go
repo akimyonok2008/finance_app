@@ -55,7 +55,14 @@ type Message struct {
 	SenderUserID   string
 	Body           string
 	CreatedAt      time.Time
+	RemovedAt      *time.Time
+	RemovedBy      *string
 }
+
+// IsRemoved reports whether a moderator tombstoned this message.
+func (m Message) IsRemoved() bool { return m.RemovedAt != nil }
+
+const removedTombstoneText = "This message was removed."
 
 type LastMessagePreview struct {
 	BodyPreview string    `json:"body_preview"`
@@ -68,6 +75,7 @@ type ConversationSummary struct {
 	OtherUser   SafeProfile         `json:"other_user"`
 	LastMessage *LastMessagePreview `json:"last_message,omitempty"`
 	UpdatedAt   time.Time           `json:"updated_at"`
+	UnreadCount int                 `json:"unread_count"`
 }
 
 type ConversationResponse struct {
@@ -83,8 +91,17 @@ type MessageDTO struct {
 	ConversationID string      `json:"conversation_id"`
 	Sender         SafeProfile `json:"sender"`
 	Body           string      `json:"body"`
+	Removed        bool        `json:"removed"`
 	SentByMe       bool        `json:"sent_by_me"`
 	CreatedAt      time.Time   `json:"created_at"`
+}
+
+type MarkReadInput struct {
+	LastReadMessageID string `json:"last_read_message_id"`
+}
+
+type UnreadCountResponse struct {
+	Count int `json:"count"`
 }
 
 type MessageResponse struct {

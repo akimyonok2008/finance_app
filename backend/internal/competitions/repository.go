@@ -98,3 +98,15 @@ func (r *InMemoryCompetitionRepository) ListEntries(_ context.Context, competiti
 	}
 	return out, nil
 }
+
+func (r *InMemoryCompetitionRepository) OnAccountDeleted(_ context.Context, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for competitionID, entries := range r.entries {
+		delete(entries, userID)
+		if len(entries) == 0 {
+			delete(r.entries, competitionID)
+		}
+	}
+	return nil
+}

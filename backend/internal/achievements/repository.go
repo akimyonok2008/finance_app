@@ -54,3 +54,10 @@ func (r *InMemoryAchievementRepository) Award(_ context.Context, a AwardedAchiev
 	r.awarded[a.UserID][a.BadgeKey] = a
 	return nil
 }
+
+func (r *InMemoryAchievementRepository) OnAccountDeleted(_ context.Context, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.awarded, userID)
+	return nil
+}

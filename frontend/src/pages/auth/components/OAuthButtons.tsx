@@ -63,7 +63,7 @@ export function OAuthButtons({ disabled, onSuccess, onError }: Props) {
   );
 }
 
-function GoogleSignInButton({
+export function GoogleSignInButton({
   loading,
   disabled,
   onStart,

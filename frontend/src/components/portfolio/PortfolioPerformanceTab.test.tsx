@@ -86,6 +86,7 @@ const unavailableBenchmark: BenchmarkComparison = {
   available: false,
   data_type: "unavailable",
   data_quality_status: "unavailable",
+  verification_status: "unavailable",
   reason: "Benchmark comparison is unavailable: no benchmark price source is configured.",
 };
 
@@ -302,6 +303,7 @@ describe("benchmark & competition", () => {
         data_quality: "verified",
         data_type: "adjusted_close",
         data_quality_status: "sufficient_for_comparison",
+        verification_status: "verified",
       },
     });
     state.standing = {

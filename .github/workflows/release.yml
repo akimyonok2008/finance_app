@@ -1,0 +1,121 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Re-run authoritative CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build SHA images and verify restore
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: finance_app_release
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d finance_app_release"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SOURCE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/finance_app_release?sslmode=disable
+      POSTGRES_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      RESTORE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/finance_app_restore_verify?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Require a commit on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Build API for restore validation
+        working-directory: backend
+        run: go build -o ../.ci-finance-api ./cmd/api
+
+      - name: Initialize source database
+        env:
+          API_BINARY: ${{ github.workspace }}/.ci-finance-api
+          DATABASE_URL: ${{ env.SOURCE_DATABASE_URL }}
+          PORT: "18082"
+        run: scripts/ci/check-api-startup.sh
+
+      - name: Verify backup and restore procedure
+        env:
+          API_BINARY: ${{ github.workspace }}/.ci-finance-api
+        run: scripts/ci/verify-backup-restore.sh
+
+      - name: Build production images tagged by commit SHA
+        run: |
+          docker build --tag "finance-app-backend:${GITHUB_SHA}" backend
+          docker build --target production \
+            --build-arg VITE_API_BASE_URL=/api \
+            --tag "finance-app-frontend:${GITHUB_SHA}" frontend
+
+      - name: Record image and release metadata
+        run: |
+          set -o pipefail
+          mkdir -p release-artifacts
+          backend_id="$(docker image inspect --format '{{.Id}}' "finance-app-backend:${GITHUB_SHA}")"
+          frontend_id="$(docker image inspect --format '{{.Id}}' "finance-app-frontend:${GITHUB_SHA}")"
+          created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg created_at "$created_at" \
+            --arg backend_image "finance-app-backend:${GITHUB_SHA}" \
+            --arg backend_digest "$backend_id" \
+            --arg frontend_image "finance-app-frontend:${GITHUB_SHA}" \
+            --arg frontend_digest "$frontend_id" \
+            '{
+              commit: $commit,
+              ref: $ref,
+              workflow_run_id: $run_id,
+              created_at: $created_at,
+              images: {
+                backend: {tag: $backend_image, digest: $backend_digest},
+                frontend: {tag: $frontend_image, digest: $frontend_digest}
+              },
+              deployment_performed: false
+            }' > release-artifacts/release-metadata.json
+          docker save "finance-app-backend:${GITHUB_SHA}" | gzip > release-artifacts/backend-image.tar.gz
+          docker save "finance-app-frontend:${GITHUB_SHA}" | gzip > release-artifacts/frontend-image.tar.gz
+
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: release-artifacts/
+          retention-days: 30
+          if-no-files-found: error
+
+  approve:
+    name: Approve production promotion
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Record approval boundary
+        run: |
+          echo "Release candidate ${GITHUB_SHA} passed CI, image build, and restore verification."
+          echo "No cloud deployment is performed by this repository workflow."
+          echo "A separate authorized deployment process may consume the SHA-tagged artifact."

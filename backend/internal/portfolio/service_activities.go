@@ -79,6 +79,21 @@ func (s *Service) RecordIncome(ctx context.Context, userID, requestID string, in
 	})
 }
 
+// ApplyIncomeEvent applies EVERY component of one economic income event
+// (ordinary income, ETF/fund distribution, capital-gains distribution, return
+// of capital, stock dividend, ...) atomically: one locked transaction, one
+// activity_group_id shared by every leg, one combined cash/basis effect, and
+// exactly one ranked-performance update for the whole event. RequestID should
+// be a single deterministic key per (income event ID, portfolio ID) pair — a
+// retry with the same RequestID replays the already-committed result instead
+// of applying anything twice. If any component cannot be safely applied
+// atomically, the WHOLE event is rejected and nothing is written.
+func (s *Service) ApplyIncomeEvent(ctx context.Context, userID, requestID string, in IncomeEventInput) (MutationResult, error) {
+	return s.Mutate(ctx, MutationRequest{
+		Kind: MutationIncomeEvent, UserID: userID, RequestID: requestID, IncomeEvent: in,
+	})
+}
+
 // EligibleQuantity reconstructs a user's holding of symbol AS OF asOf from the
 // immutable activity ledger, so dividend entitlement uses HISTORICAL holdings
 // rather than the current quantity. It sums buy-like activities and subtracts

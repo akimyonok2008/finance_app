@@ -4,6 +4,12 @@ Go REST API for authentication, manual portfolio tracking, ranked performance,
 benchmark achievements, public strategy discovery, and authenticated social
 features.
 
+Public competition is percentage based. The privacy boundary protects absolute
+financial information—quantities, balances, transaction prices, monetary
+values, cost basis, and dollar gain/loss—while allowing stock/ETF symbols, asset
+types, allocation percentages, percentage returns, and ranks to power public
+profiles, discovery, and leaderboards.
+
 ## Portfolio financial semantics
 
 `portfolio_cash_balances` stores non-negative multi-currency cash.
@@ -402,13 +408,23 @@ See `.env.example` for every setting. Important groups:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `APP_ENV` | `development` | `production` enables fail-closed startup validation |
 | `PORT` | `8080` | HTTP port |
-| `JWT_SECRET` | development secret | HS256 signing key; change outside local development |
+| `JWT_SECRET` | development secret | HS256 signing key; production requires a unique value of at least 32 characters |
+| `CORS_ALLOWED_ORIGINS` | empty | Explicit comma-separated HTTPS origins; required in production, wildcard forbidden |
 | `JWT_EXPIRY_HOURS` | `24` | App-token lifetime; no refresh token exists |
+| `PASSWORD_REGISTRATION_ENABLED` | `true` | Enables password registration and production email-delivery requirement |
+| `PUBLIC_APP_URL` | `http://localhost:5173` | Base URL used in verification/reset links |
+| `EMAIL_SENDER` | `development` | `development` logs lifecycle URLs; production password registration requires `smtp` |
+| `EMAIL_VERIFICATION_TTL` | `24h` | Verification-token lifetime |
+| `PASSWORD_RESET_TTL` | `1h` | Reset-token lifetime |
+| `REAUTHENTICATION_TTL` | `5m` | Destructive-action confirmation lifetime |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | empty / `587` | Production SMTP delivery |
 | `STORAGE_PROVIDER` | `memory` | `memory` or `postgres` |
 | `DATABASE_URL` | local URL | Required by PostgreSQL mode |
 | `REDIS_URL` | empty | Optional leaderboard cache |
 | `PRICE_PROVIDER` | `mock` | `mock`, `twelvedata`, or prototype `yahoo` |
+| `DEMO_MODE_ENABLED` | `false` | Explicitly allows mock prices in production only with demo awards |
 | `ENABLE_REAL_MARKET_DATA` | `false` | Must also be true for Twelve Data |
 | `BENCHMARK_AWARD_MODE` | `verified_only` | `disabled`, `demo`, or `verified_only` — permanent benchmark award policy |
 | `PRICE_CACHE_TTL_SECONDS` | `300` | Legacy/provider cache setting |
@@ -422,6 +438,16 @@ See `.env.example` for every setting. Important groups:
 `.env.example` enables background workers for the persistent example even
 though the code default is disabled.
 
+Production startup fails closed unless durable PostgreSQL storage, a strong JWT
+secret, explicit HTTPS CORS origins, the required background and quote workers,
+and a database URL are configured. Mock prices require both
+`DEMO_MODE_ENABLED=true` and `BENCHMARK_AWARD_MODE=demo`. Verified benchmark
+mode currently requires `BASE_CURRENCY=USD`; a non-USD verified base is rejected
+until a real historical FX provider is wired. Password registration requires a
+configured SMTP sender. Real production pricing requires Twelve Data with
+`ENABLE_REAL_MARKET_DATA=true` and an API key; the prototype Yahoo adapter is
+rejected.
+
 ## HTTP contract
 
 Public:
@@ -433,13 +459,18 @@ Public:
 | GET | `/ready` | Dependency readiness and provider metadata |
 | POST | `/auth/register` | Email/password registration |
 | POST | `/auth/login` | Email/password login |
+| POST | `/auth/verify-email` | Consume one-time verification token and issue the first JWT |
+| POST | `/auth/resend-verification` | Enumeration-safe verification resend |
+| POST | `/auth/forgot-password` | Enumeration-safe password-reset request |
+| POST | `/auth/reset-password` | Consume one-time reset token and revoke old JWTs |
 | POST | `/auth/google` | Optional Google credential exchange |
 
 All routes below require `Authorization: Bearer <jwt>`.
 
 | Area | Routes |
 | --- | --- |
-| Session | `GET /me` |
+| Session | `GET /me`, `POST /auth/revoke-sessions`, `POST /auth/reauthenticate` |
+| Account | `POST /auth/change-password`, `POST /auth/set-password`, `POST /auth/delete-account` |
 | Market data | `GET /instruments/search?q=...`, `GET /quotes?symbols=...` |
 | Portfolio | `GET /portfolio`, `GET /portfolio/summary`, `GET /portfolio/archives?timeframe=1M`, `GET/POST /portfolio/positions`, `PUT/DELETE /portfolio/positions/{id}`, `GET /portfolio/positions/closed`, `POST /portfolio/positions/{id}/close` |
 | Leaderboard | `GET /leaderboard?timeframe=ALL`, `GET /leaderboard/me?timeframe=ALL` |
@@ -454,15 +485,44 @@ Apple verifier/service code exists but `/auth/apple` is not registered.
 
 ## Authentication
 
-Password registration requires at least eight characters and stores a bcrypt
-hash. Login issues an HS256 JWT. Protected middleware also confirms that the
-token's user still exists; therefore tokens from in-memory mode stop working
-after restart. There is no refresh, revocation, session list, or account
-recovery flow.
+Password registration requires at least eight characters, stores a bcrypt
+hash, creates an unverified user, and sends an expiring one-time verification
+URL. Raw verification/reset/reauthentication tokens are never persisted; only
+their SHA-256 hashes are stored. Verification and reset tokens are single-use,
+and resend/recovery responses do not disclose account existence.
+
+Login issues an HS256 JWT only after password-email verification. JWTs carry
+`auth_version`; protected middleware loads the live user and rejects a version
+mismatch or deleted account. Password changes atomically increment the version
+and return a replacement JWT, while password reset, explicit session
+revocation, and account deletion invalidate every older JWT. There is no
+refresh token or per-device session list.
 
 Google login is optional. It verifies issuer, signature, expiry, and audience
 against Google JWKS, then links verified emails or stores a `(provider, sub)`
-identity. Configure the same client ID in the frontend.
+identity. Provider-only users have a nullable password hash and
+`has_password=false`; no unknowable generated password is created. Setting the
+first password and deleting an account require a short-lived, hashed,
+single-use reauthentication token. Provider reauthentication verifies that the
+signed subject matches an identity linked to the current user—email matching
+alone never authorizes the action. Configure the same client ID in the
+frontend.
+
+Migration `0024_auth_lifecycle.sql` adds `users.email_verified_at`,
+`users.auth_version`, `users.has_password`, nullable password hashes, and the
+three hashed-token tables. Existing password users remain verified. A
+conservative timestamp-based backfill recognizes provider accounts created by
+the previous generated-password implementation while preserving password
+accounts that linked a provider later.
+
+Account deletion consumes reauthentication, increments the authentication
+version, and hard-deletes the user. PostgreSQL's cascading foreign keys remove
+identities, lifecycle tokens, portfolios, positions, cash, activities, audits,
+outbox records, ranked state/history, archives, achievements, profiles,
+follows, conversations/messages, competition memberships, and automatic
+income/corporate-action applications in the same transaction. Redis
+leaderboard members are removed before deletion. Memory repositories implement
+matching explicit erasure hooks. No financial portfolio is retained.
 
 ## Portfolio model
 
@@ -740,12 +800,18 @@ Raw close is never silently relabelled as adjusted close.
 Every recipe has an immutable version. Static recipes are code-defined as
 `<ID>_v1` (e.g. `SPY_v1`, `BALANCED_60_40_v1`, `ALL_WEATHER_v1`). Dynamic
 recipes (`BUFFETT_13F`) have one immutable version per authoritative SEC filing.
-Selection is deterministic and avoids look-ahead: for an evaluation over
-`[start, end]` the engine picks the newest version whose `publicly_known_at <=
-start` and uses it for the whole window. Evaluating before any version was filed
-returns `ErrRecipeVersionUnavailable` — the badge is not awarded. Versions are
-also stored durably in `benchmark_recipe_versions` (migration `0013`) with
-uniqueness, valid-range, and source-metadata/coverage constraints.
+Selection is deterministic and avoids look-ahead. Static policies use the
+newest version knowable at the evaluation start. `filing_snapshot_hold` builds
+an ordered timeline and activates each later version on the first common
+trading date strictly after `publicly_known_at`; `report_period_end` never
+activates a composition. Evaluating before any applicable version returns
+`ErrRecipeVersionUnavailable`. Nested references resolve as-of the parent
+activation, merge duplicate symbols, validate weights, and reject cycles.
+Versions are also stored durably in `benchmark_recipe_versions` (migration
+`0013`) with uniqueness, valid-range, and source-metadata/coverage constraints.
+Migration `0025_benchmark_virtual_portfolio_v2.sql` corrects the durable
+Berkshire policy metadata to `filing_snapshot_hold`; no historical awards are
+migrated because none exist.
 
 The Berkshire baskets are transcribed from the SEC EDGAR 13F-HR information
 tables (CIK 0001067983), market-value weighted over the reliably-mapped
@@ -784,17 +850,47 @@ At startup, `verified_only` with a mock-only provider is downgraded to
 `disabled` with a prominent warning (and logged as an error in `production`), so
 the UI never implies verified evaluation is active when it is not.
 
-Benchmark recipes are daily-rebalanced (`daily_target_weight`) over dates common
-to every component; weekends/holidays use the nearest common observation, and
-missing components or insufficient common dates fail closed. The rebalancing
-policy is recorded in recipe and evidence metadata; the Berkshire 13F basket is
-a daily-rebalanced proxy of a disclosed buy-and-hold basket, labelled as such.
+The authoritative engine is `benchmark_virtual_portfolio_v2`. It starts at NAV
+100, buys scale-independent virtual units from target weights and converted
+total-return prices, carries those units, and emits a NAV point before any
+closing rebalance. Missing components or insufficient common dates fail closed.
 
-New awards store privacy-safe evidence (`evidence_version` 2, model
-`ranked_snapshot_v1`): ranked epoch, boundary indexes/timestamps, coverage,
+- `buy_and_hold` never changes initial units, so weights drift.
+- `daily_target_weight` values first and rebalances at every common close for
+  the next interval.
+- `periodic_monthly` rebalances at the final common trading close of each
+  calendar month—never after a fixed day count.
+- `filing_snapshot_hold` carries units until the conservative next-trading-date
+  activation of a newly public filing version, then replaces composition at
+  unchanged NAV.
+
+Unknown policies return `ErrUnsupportedRebalancingPolicy`; there is no daily
+fallback. Berkshire filing versions execute `filing_snapshot_hold`.
+
+Evaluation requests declare base currency and
+`historical_spot_unhedged` treatment. Same-currency legs use an exact rate of 1.
+Mixed-currency verified evaluation requires a historical FX provider for every
+valuation date and otherwise returns `ErrHistoricalFXUnavailable`; the static
+current FX table is never used. FX inputs and providers participate in evidence
+and fingerprinting.
+
+Performance and Achievement both use
+`latest_trusted_snapshot_not_after_utc_close_v1`: for each effective benchmark
+date, select the latest complete, active ranked snapshot not later than the end
+of that UTC date. Both boundaries must share one tracking epoch and the interval
+may not contain paused or untrusted points. Failure is explicit and no award is
+issued.
+
+New awards store privacy-safe evidence (`evidence_version` 3, model
+`ranked_snapshot_benchmark_aligned_v2`): ranked epoch, aligned boundary
+indexes/timestamps, coverage,
 snapshot frequency, plus benchmark provenance — recipe version, verification
-status, price methodology, data quality, providers/symbols, filing
-accession/period, mapping coverage, and the benchmark input fingerprint. It
+status, executed policy, virtual-portfolio methodology, actual rebalance dates,
+base currency, currency treatment, price methodology, data quality,
+providers/symbols, filing accession/period, mapping coverage, and the benchmark
+input fingerprint. The fingerprint includes every activated version and
+activation date, weights, normalized prices, historical FX, policy, rebalance
+dates, providers, effective dates, methodology, and weakest-leg quality. It
 contains no monetary values, holdings, quantities, cost basis, or identifiers.
 Once written, evidence is immutable — a DB trigger blocks in-place rewrite, so
 later provider/recipe/config changes cannot silently alter history; corrections
@@ -813,16 +909,22 @@ Legacy `achievements` tables remain in migrations, but current awards use
 
 ## Profiles, privacy, Explore, and strategy tools
 
-Profiles start private with weight sharing disabled. Public profile access
-requires `is_public`. Explore additionally requires `show_portfolio_weights`
-and a nonempty allocation.
+Alarvest's privacy contract protects monetary amounts rather than hiding
+strategy composition. Public DTOs must omit quantities, balances, transaction
+prices, monetary values, cost basis, absolute gain/loss, email, brokerage
+identifiers, and internal IDs. They may include active stock/ETF symbols, asset
+types, percentage weights, percentage returns, ranks, exposure, concentration,
+DNA/style, and aggregate performance-driver signals. These percentage-based
+fields are appropriate for the leaderboard and other public comparison
+features because they do not reveal the size of the account.
 
-Public DTOs omit quantities, prices, values, cost basis, absolute gain/loss,
-email, and internal IDs. With weights enabled they may include active symbols,
-asset types, percentage weights, and closed symbols with return percentages.
-Exposure, concentration, DNA/style, and aggregate performance-driver signals
-are currently returned even when exact weights are hidden; this is a privacy
-boundary callers must understand.
+Profiles currently start private with weight sharing disabled. Public profile
+access requires `is_public`, and Explore additionally requires
+`show_portfolio_weights` and a nonempty allocation. Those controls govern
+profile discovery and presentation; they do not redefine symbols or
+percentages as monetary secrets. Current public projections return exposure,
+concentration, DNA/style, and aggregate performance-driver signals even when
+exact weights are hidden.
 
 Profile headline performance and public history both use persistent ranked
 performance. The profile benchmark panel is currently a placeholder. Private
@@ -910,7 +1012,8 @@ future work.
   prototype Yahoo, and competition/Arena code with no active frontend route.
 - **Removed:** Coach routes, services, and UI.
 - **Not implemented:** brokerage execution, AI advice, Apple HTTP login, live
-  FX, finalized sprint results, token refresh, and production hardening.
+  FX, finalized sprint results, refresh tokens, per-device session management,
+  multi-factor authentication, passkeys, and broader production hardening.
 
 ## Verification
 

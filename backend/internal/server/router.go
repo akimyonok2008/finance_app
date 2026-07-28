@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -13,9 +14,11 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/competitions"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
+	"github.com/ardakimyonok/finance_app/internal/moderation"
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 	"github.com/ardakimyonok/finance_app/internal/profile"
+	"github.com/ardakimyonok/finance_app/internal/safety"
 	"github.com/ardakimyonok/finance_app/internal/social"
 	"github.com/ardakimyonok/finance_app/internal/strategy"
 )
@@ -33,6 +36,8 @@ type Deps struct {
 	Strategy     *strategy.Service
 	MarketData   *marketdata.Service
 	Social       *social.Service
+	Safety       *safety.Service
+	Moderation   *moderation.Service
 	// PerformanceHistory is the CANONICAL ranked-performance snapshot service —
 	// the same source the leaderboard and benchmark achievements read. It backs
 	// GET /performance/history.
@@ -57,7 +62,29 @@ type Deps struct {
 	// RateLimitRedis is optional. When set, the auth/account rate limiters
 	// (see ratelimit.go) share their budget across every replica via Redis
 	// instead of each replica enforcing its own separate in-memory limit.
-	RateLimitRedis *redis.Client
+	RateLimitRedis              *redis.Client
+	DisablePasswordRegistration bool
+}
+
+// moderationUserAdmin bridges auth.Service to moderation.UserAdmin so the
+// router can gate moderation endpoints on backend account state (role,
+// suspension, ban) without moderation importing auth directly.
+type moderationUserAdmin struct{ auth *auth.Service }
+
+func (m moderationUserAdmin) UserByID(_ context.Context, id string) (moderation.UserView, error) {
+	u, err := m.auth.UserByID(id)
+	if err != nil {
+		return moderation.UserView{}, err
+	}
+	return moderation.UserView{ID: u.ID, Role: u.Role, IsAdmin: u.IsAdmin()}, nil
+}
+
+func (m moderationUserAdmin) Suspend(ctx context.Context, userID string, until *time.Time, reason string) error {
+	return m.auth.Suspend(ctx, userID, until, reason)
+}
+
+func (m moderationUserAdmin) Ban(ctx context.Context, userID string, reason string) error {
+	return m.auth.Ban(ctx, userID, reason)
 }
 
 // New builds the application's HTTP router, wiring public auth routes and
@@ -93,6 +120,14 @@ func New(d Deps) http.Handler {
 	if d.Social != nil {
 		socialHandler = social.NewHandler(d.Social)
 	}
+	var safetyHandler *safety.Handler
+	if d.Safety != nil {
+		safetyHandler = safety.NewHandler(d.Safety)
+	}
+	var moderationHandler *moderation.Handler
+	if d.Moderation != nil {
+		moderationHandler = moderation.NewHandler(d.Moderation, moderationUserAdmin{d.Auth})
+	}
 	var performanceHistoryHandler *performancehistory.Handler
 	if d.PerformanceHistory != nil {
 		performanceHistoryHandler = performancehistory.NewHandler(d.PerformanceHistory)
@@ -119,13 +154,28 @@ func New(d Deps) http.Handler {
 	// load balancer shares one budget instead of each getting its own.
 	authLimiter := newRateLimiter(d.RateLimitRedis, "auth", 20, 5*time.Minute)
 	accountLimiter := newRateLimiter(d.RateLimitRedis, "account", 10, 5*time.Minute)
+	recoveryLimiter := newRateLimiter(d.RateLimitRedis, "auth-recovery", 5, 15*time.Minute)
+	// Social-safety abuse limits: reporting is rate-limited to deter report
+	// spam/harassment-via-reporting; block/unblock is looser since it's a
+	// purely defensive, self-directed action; message sending is limited
+	// per-sender to bound unsolicited-message volume even within the
+	// friends-only messaging policy.
+	reportLimiter := newRateLimiter(d.RateLimitRedis, "reports", 5, 15*time.Minute)
+	blockLimiter := newRateLimiter(d.RateLimitRedis, "blocks", 30, 5*time.Minute)
+	messageLimiter := newRateLimiter(d.RateLimitRedis, "messages", 30, time.Minute)
 
 	// Public auth routes.
 	r.Route("/auth", func(r chi.Router) {
 		r.Use(rateLimitMiddleware(authLimiter))
-		r.Post("/register", authHandler.Register)
+		if !d.DisablePasswordRegistration {
+			r.Post("/register", authHandler.Register)
+		}
 		r.Post("/login", authHandler.Login)
 		r.Post("/google", authHandler.Google)
+		r.Post("/verify-email", authHandler.VerifyEmail)
+		r.With(rateLimitMiddleware(recoveryLimiter)).Post("/resend-verification", authHandler.ResendVerification)
+		r.With(rateLimitMiddleware(recoveryLimiter)).Post("/forgot-password", authHandler.ForgotPassword)
+		r.With(rateLimitMiddleware(recoveryLimiter)).Post("/reset-password", authHandler.ResetPassword)
 	})
 
 	// JWT-protected routes. RequireAuthWithUser also rejects valid tokens whose
@@ -135,6 +185,9 @@ func New(d Deps) http.Handler {
 
 		r.Get("/me", authHandler.Me)
 		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/change-password", authHandler.ChangePassword)
+		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/set-password", authHandler.SetPassword)
+		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/reauthenticate", authHandler.Reauthenticate)
+		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/revoke-sessions", authHandler.RevokeSessions)
 		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/delete-account", authHandler.DeleteAccount)
 
 		if marketDataHandler != nil {
@@ -152,7 +205,33 @@ func New(d Deps) http.Handler {
 			r.Get("/dm/conversations", socialHandler.Conversations)
 			r.Post("/dm/conversations", socialHandler.CreateConversation)
 			r.Get("/dm/conversations/{conversationId}/messages", socialHandler.Messages)
-			r.Post("/dm/conversations/{conversationId}/messages", socialHandler.SendMessage)
+			r.With(rateLimitMiddleware(messageLimiter)).Post("/dm/conversations/{conversationId}/messages", socialHandler.SendMessage)
+			r.Post("/dm/conversations/{conversationId}/read", socialHandler.MarkRead)
+			r.Get("/dm/unread-count", socialHandler.UnreadCount)
+			r.Delete("/dm/messages/{messageId}", socialHandler.HideMessage)
+		}
+
+		if safetyHandler != nil {
+			r.With(rateLimitMiddleware(blockLimiter)).Post("/social/users/{handle}/block", safetyHandler.Block)
+			r.With(rateLimitMiddleware(blockLimiter)).Delete("/social/users/{handle}/block", safetyHandler.Unblock)
+			r.Get("/me/blocked-users", safetyHandler.BlockedUsers)
+		}
+
+		if moderationHandler != nil {
+			r.With(rateLimitMiddleware(reportLimiter)).Post("/reports/users/{userId}", moderationHandler.ReportUser)
+			r.With(rateLimitMiddleware(reportLimiter)).Post("/reports/messages/{messageId}", moderationHandler.ReportMessage)
+
+			r.Get("/notifications", moderationHandler.Notifications)
+			r.Get("/notifications/unread-count", moderationHandler.UnreadNotificationCount)
+			r.Post("/notifications/{notificationId}/read", moderationHandler.MarkNotificationRead)
+			r.Post("/notifications/read-all", moderationHandler.MarkAllNotificationsRead)
+
+			r.Group(func(r chi.Router) {
+				r.Use(moderation.RequireModerator(moderationUserAdmin{d.Auth}))
+				r.Get("/moderation/reports", moderationHandler.ListReports)
+				r.Get("/moderation/reports/{reportId}", moderationHandler.GetReport)
+				r.Post("/moderation/reports/{reportId}/resolve", moderationHandler.ResolveReport)
+			})
 		}
 
 		r.Get("/portfolio", portfolioHandler.GetPortfolio)

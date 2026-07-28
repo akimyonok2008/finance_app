@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +29,11 @@ func (s *stubBenchmark) ReturnOver(_ context.Context, _ string, start, end time.
 }
 
 func snapshotAt(at time.Time, index float64) Snapshot {
-	return Snapshot{CapturedAt: at, RankedIndex: index}
+	return Snapshot{
+		CapturedAt: at, ValuationAsOf: at, RankedIndex: index,
+		TrackingStartedAt: day(2025, time.January, 1),
+		RankingStatus:     performance.StatusActive, DataQualityStatus: QualityComplete,
+	}
 }
 
 // Without a benchmark source the block must say so, not report a 0-point

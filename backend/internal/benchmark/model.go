@@ -1,7 +1,5 @@
-// Package benchmark implements a deterministic engine for "beat-the-benchmark"
-// achievement badges. Given a set of investor-inspired benchmark recipes and
-// unlock rules, it constructs a daily-rebalanced benchmark index return over a
-// period and compares it to a portfolio's return.
+// Package benchmark implements deterministic virtual-portfolio benchmark
+// indexes and the rules for benchmark achievement badges.
 //
 // The engine is a faithful Go port of the reference TypeScript design. It is
 // modular: models, catalogue, market-data ports, benchmark construction, and a
@@ -110,6 +108,11 @@ type AchievementEvidence struct {
 	RebalancingPolicy      RebalancingPolicy      `json:"rebalancing_policy,omitempty"`
 	BenchmarkInputHash     string                 `json:"benchmark_input_hash,omitempty"`
 	DataSourceSummary      *BenchmarkDataEvidence `json:"benchmark_data,omitempty"`
+	BenchmarkMethodology   string                 `json:"benchmark_methodology,omitempty"`
+	AlignmentMethod        string                 `json:"alignment_method,omitempty"`
+	BaseCurrency           string                 `json:"base_currency,omitempty"`
+	CurrencyTreatment      string                 `json:"currency_treatment,omitempty"`
+	RebalanceDates         []string               `json:"rebalance_dates,omitempty"`
 }
 
 // BenchmarkDataEvidence is the privacy-safe provenance of the benchmark leg of
@@ -133,6 +136,10 @@ type BenchmarkDataEvidence struct {
 	RecipeReportPeriodEnd *time.Time `json:"recipe_report_period_end,omitempty"`
 	RecipePubliclyKnownAt *time.Time `json:"recipe_publicly_known_at,omitempty"`
 	MappingCoveragePct    *float64   `json:"mapping_coverage_percentage,omitempty"`
+	MethodologyVersion    string     `json:"methodology_version,omitempty"`
+	BaseCurrency          string     `json:"base_currency,omitempty"`
+	CurrencyTreatment     string     `json:"currency_treatment,omitempty"`
+	FXProvider            string     `json:"fx_provider,omitempty"`
 }
 
 // EvidenceFromResult projects a benchmark evaluation's provenance into the
@@ -163,6 +170,10 @@ func EvidenceFromResult(result BenchmarkReturnResult) BenchmarkDataEvidence {
 		RecipeSourceType:   result.RecipeVersion.SourceType,
 		RecipeSourceURL:    result.RecipeVersion.SourceURL,
 		MappingCoveragePct: result.RecipeVersion.MappingCoverage,
+		MethodologyVersion: result.DataMetadata.MethodologyVersion,
+		BaseCurrency:       result.DataMetadata.BaseCurrency,
+		CurrencyTreatment:  result.DataMetadata.CurrencyTreatment,
+		FXProvider:         result.DataMetadata.FXProvider,
 	}
 	if result.RecipeVersion.SourceAccession != "" {
 		ev.RecipeSourceAccession = result.RecipeVersion.SourceAccession
@@ -185,6 +196,35 @@ type PricePoint struct {
 type IndexPoint struct {
 	Date  string  `json:"date"`
 	Index float64 `json:"index"`
+}
+
+const MethodologyVirtualPortfolioV2 = "benchmark_virtual_portfolio_v2"
+
+type CurrencyTreatment string
+
+const CurrencyTreatmentHistoricalSpot CurrencyTreatment = "historical_spot_unhedged"
+
+type BenchmarkEvaluationRequest struct {
+	RecipeID          string
+	Start             time.Time
+	End               time.Time
+	BaseCurrency      string
+	CurrencyTreatment CurrencyTreatment
+	SeriesRequirement SeriesRequirement
+}
+
+// BenchmarkPortfolioState is the scale-independent virtual account carried
+// through each common close. Units only change when the executed policy says
+// to rebalance.
+type BenchmarkPortfolioState struct {
+	NAV               float64
+	Cash              float64
+	Holdings          map[string]float64
+	RecipeID          string
+	RecipeVersionID   string
+	RebalancingPolicy RebalancingPolicy
+	LastValuationDate time.Time
+	LastRebalanceDate *time.Time
 }
 
 // EvaluationContext is the input a rule evaluator scores.

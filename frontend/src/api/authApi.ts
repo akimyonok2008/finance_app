@@ -16,12 +16,30 @@ export type RegisterInput = {
   display_name: string;
 };
 
+export type RegistrationResult = {
+  user: AuthSession["user"];
+  verification_required: boolean;
+};
+
+export class AuthApiError extends Error {
+  code?: string;
+  status: number;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "AuthApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 function normalizeUser(data: Record<string, unknown>): AuthSession["user"] {
   return {
     id: String(data.id ?? ""),
     email: String(data.email ?? ""),
     display_name: String(data.display_name ?? data.displayName ?? ""),
     avatar_key: data.avatar_key ? String(data.avatar_key) : undefined,
+    email_verified: Boolean(data.email_verified),
+    has_password: Boolean(data.has_password),
   };
 }
 
@@ -37,9 +55,11 @@ export async function loginWithEmailRequest(
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(
+    throw new AuthApiError(
       (data as { error?: string }).error ||
         `Sign in failed (${res.status})`,
+      res.status,
+      (data as { code?: string }).code,
     );
   }
 
@@ -53,7 +73,7 @@ export async function loginWithEmailRequest(
 
 export async function registerRequest(
   input: RegisterInput,
-): Promise<AuthSession> {
+): Promise<RegistrationResult> {
   const res = await fetch(`${API_BASE_URL}${AUTH_REGISTER_PATH}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -63,18 +83,58 @@ export async function registerRequest(
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(
+    throw new AuthApiError(
       (data as { error?: string }).error ||
         `Registration failed (${res.status})`,
+      res.status,
+      (data as { code?: string }).code,
     );
   }
 
   const payload = data as Record<string, unknown>;
-  const token = String(payload.token ?? "");
   const userRaw =
     (payload.user as Record<string, unknown>) ?? payload;
 
-  return { token, user: normalizeUser(userRaw) };
+  return {
+    user: normalizeUser(userRaw),
+    verification_required: Boolean(payload.verification_required),
+  };
+}
+
+async function publicJSON<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new AuthApiError(
+      (data as { error?: string }).error || `Request failed (${res.status})`,
+      res.status,
+      (data as { code?: string }).code,
+    );
+  }
+  return data as T;
+}
+
+export function verifyEmailRequest(token: string): Promise<AuthSession> {
+  return publicJSON<AuthSession>("/auth/verify-email", { token });
+}
+
+export function resendVerificationRequest(email: string): Promise<{ message: string }> {
+  return publicJSON("/auth/resend-verification", { email });
+}
+
+export function forgotPasswordRequest(email: string): Promise<{ message: string }> {
+  return publicJSON("/auth/forgot-password", { email });
+}
+
+export async function resetPasswordRequest(token: string, newPassword: string): Promise<void> {
+  await publicJSON<unknown>("/auth/reset-password", {
+    token,
+    new_password: newPassword,
+  });
 }
 
 export async function loginWithGoogleRequest(
@@ -95,7 +155,11 @@ async function providerRequest(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error || fallback);
+    throw new AuthApiError(
+      (data as { error?: string }).error || fallback,
+      res.status,
+      (data as { code?: string }).code,
+    );
   }
   const payload = data as Record<string, unknown>;
   const token = String(payload.token ?? "");
@@ -114,6 +178,8 @@ export async function mockLogin(values: LoginFormValues): Promise<AuthSession> {
       email: values.email,
       display_name: "AlphaWolf_91",
       avatar_key: "fox",
+      email_verified: true,
+      has_password: true,
     },
   };
 }

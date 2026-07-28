@@ -7,12 +7,20 @@ import (
 	"time"
 )
 
+type participantState struct {
+	lastReadMessageID string
+	lastReadAt        time.Time
+}
+
 type InMemoryRepository struct {
 	mu                 sync.RWMutex
 	follows            map[string]Follow
 	conversations      map[string]Conversation
 	conversationByPair map[string]string
 	messages           map[string][]Message
+	messageByID        map[string]string                      // messageID -> conversationID
+	hiddenFor          map[string]map[string]bool             // userID -> messageID -> hidden
+	readState          map[string]map[string]participantState // conversationID -> userID -> state
 }
 
 func NewInMemoryRepository() *InMemoryRepository {
@@ -21,6 +29,9 @@ func NewInMemoryRepository() *InMemoryRepository {
 		conversations:      map[string]Conversation{},
 		conversationByPair: map[string]string{},
 		messages:           map[string][]Message{},
+		messageByID:        map[string]string{},
+		hiddenFor:          map[string]map[string]bool{},
+		readState:          map[string]map[string]participantState{},
 	}
 }
 
@@ -178,6 +189,7 @@ func (r *InMemoryRepository) AddMessage(_ context.Context, msg Message) error {
 		return ErrConversationNotFound
 	}
 	r.messages[msg.ConversationID] = append(r.messages[msg.ConversationID], msg)
+	r.messageByID[msg.ID] = msg.ConversationID
 	c.UpdatedAt = msg.CreatedAt
 	t := msg.CreatedAt
 	c.LastMessageAt = &t
@@ -185,20 +197,27 @@ func (r *InMemoryRepository) AddMessage(_ context.Context, msg Message) error {
 	return nil
 }
 
-func (r *InMemoryRepository) ListMessages(_ context.Context, conversationID string, limit int) ([]Message, error) {
+func (r *InMemoryRepository) ListMessages(_ context.Context, conversationID, viewerID string, limit int) ([]Message, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if _, ok := r.conversations[conversationID]; !ok {
 		return nil, ErrConversationNotFound
 	}
-	items := append([]Message(nil), r.messages[conversationID]...)
+	hidden := r.hiddenFor[viewerID]
+	filtered := make([]Message, 0, len(r.messages[conversationID]))
+	for _, m := range r.messages[conversationID] {
+		if hidden != nil && hidden[m.ID] {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
 	if limit <= 0 || limit > 50 {
 		limit = 50
 	}
-	if len(items) > limit {
-		items = items[len(items)-limit:]
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
 	}
-	return items, nil
+	return filtered, nil
 }
 
 func (r *InMemoryRepository) LastMessage(_ context.Context, conversationID string) (Message, bool, error) {
@@ -211,6 +230,124 @@ func (r *InMemoryRepository) LastMessage(_ context.Context, conversationID strin
 	return items[len(items)-1], true, nil
 }
 
+func (r *InMemoryRepository) MessageByID(_ context.Context, messageID string) (Message, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	convID, ok := r.messageByID[messageID]
+	if !ok {
+		return Message{}, ErrMessageNotFound
+	}
+	for _, m := range r.messages[convID] {
+		if m.ID == messageID {
+			return m, nil
+		}
+	}
+	return Message{}, ErrMessageNotFound
+}
+
+func (r *InMemoryRepository) HideMessageForUser(_ context.Context, messageID, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.messageByID[messageID]; !ok {
+		return ErrMessageNotFound
+	}
+	if r.hiddenFor[userID] == nil {
+		r.hiddenFor[userID] = map[string]bool{}
+	}
+	r.hiddenFor[userID][messageID] = true
+	return nil
+}
+
+func (r *InMemoryRepository) RemoveMessage(_ context.Context, messageID, moderatorID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	convID, ok := r.messageByID[messageID]
+	if !ok {
+		return ErrMessageNotFound
+	}
+	items := r.messages[convID]
+	for i, m := range items {
+		if m.ID == messageID {
+			now := time.Now().UTC()
+			m.RemovedAt = &now
+			mod := moderatorID
+			m.RemovedBy = &mod
+			items[i] = m
+			return nil
+		}
+	}
+	return ErrMessageNotFound
+}
+
+func (r *InMemoryRepository) MarkRead(_ context.Context, conversationID, userID, lastReadMessageID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.conversations[conversationID]; !ok {
+		return ErrConversationNotFound
+	}
+	var readAt time.Time
+	found := false
+	for _, m := range r.messages[conversationID] {
+		if m.ID == lastReadMessageID {
+			readAt = m.CreatedAt
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ErrMessageNotFound
+	}
+	if r.readState[conversationID] == nil {
+		r.readState[conversationID] = map[string]participantState{}
+	}
+	r.readState[conversationID][userID] = participantState{lastReadMessageID: lastReadMessageID, lastReadAt: readAt}
+	return nil
+}
+
+func (r *InMemoryRepository) ConversationUnreadCount(_ context.Context, conversationID, userID string) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	state, hasState := r.readState[conversationID][userID]
+	hidden := r.hiddenFor[userID]
+	count := 0
+	for _, m := range r.messages[conversationID] {
+		if m.SenderUserID == userID {
+			continue
+		}
+		if m.IsRemoved() {
+			continue
+		}
+		if hidden != nil && hidden[m.ID] {
+			continue
+		}
+		if hasState && !m.CreatedAt.After(state.lastReadAt) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+func (r *InMemoryRepository) UnreadCount(ctx context.Context, userID string) (int, error) {
+	r.mu.RLock()
+	convIDs := make([]string, 0)
+	for id, c := range r.conversations {
+		if c.ParticipantA == userID || c.ParticipantB == userID {
+			convIDs = append(convIDs, id)
+		}
+	}
+	r.mu.RUnlock()
+	total := 0
+	for _, id := range convIDs {
+		n, err := r.ConversationUnreadCount(ctx, id, userID)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 func followKey(a, b string) string {
 	return a + "->" + b
 }
@@ -220,4 +357,22 @@ func pairKey(a, b string) string {
 		return a + ":" + b
 	}
 	return b + ":" + a
+}
+
+func (r *InMemoryRepository) OnAccountDeleted(_ context.Context, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, follow := range r.follows {
+		if follow.FollowerUserID == userID || follow.FollowingUserID == userID {
+			delete(r.follows, key)
+		}
+	}
+	for id, conversation := range r.conversations {
+		if conversation.ParticipantA == userID || conversation.ParticipantB == userID {
+			delete(r.conversationByPair, pairKey(conversation.ParticipantA, conversation.ParticipantB))
+			delete(r.messages, id)
+			delete(r.conversations, id)
+		}
+	}
+	return nil
 }

@@ -14,8 +14,9 @@ var ErrInvalidToken = errors.New("invalid or expired token")
 // Claims is the JWT payload. It embeds RegisteredClaims to get standard fields
 // such as expiry (exp) and issued-at (iat).
 type Claims struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
+	UserID      string `json:"user_id"`
+	Email       string `json:"email"`
+	AuthVersion int    `json:"auth_version"`
 	jwt.RegisteredClaims
 }
 
@@ -32,11 +33,16 @@ func NewTokenManager(secret string, expiry time.Duration) *TokenManager {
 }
 
 // Generate issues a signed token carrying the user id, email, and expiry.
-func (tm *TokenManager) Generate(userID, email string) (string, error) {
+func (tm *TokenManager) Generate(userID, email string, version ...int) (string, error) {
 	now := time.Now()
+	authVersion := 1
+	if len(version) > 0 {
+		authVersion = version[0]
+	}
 	claims := Claims{
-		UserID: userID,
-		Email:  email,
+		UserID:      userID,
+		Email:       email,
+		AuthVersion: authVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),

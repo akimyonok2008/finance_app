@@ -17,9 +17,26 @@ type ProfileRepository interface {
 	GetByHandle(ctx context.Context, handle string) (profile.Profile, error)
 }
 
+// InteractionPolicy is the canonical cross-cutting gate (blocking +
+// suspension/ban) checked before follow and DM actions. It is the single
+// source of truth shared with profile view/search/Explore — see
+// safety.Service.CanUsersInteract.
+type InteractionPolicy interface {
+	CanUsersInteract(ctx context.Context, userA, userB string) (bool, error)
+}
+
+// NotificationCreator lets Service raise a lightweight in-app "new_message"
+// notification without importing the moderation package directly.
+type NotificationCreator interface {
+	Notify(ctx context.Context, recipientID, notifType, dedupeKey string, payload map[string]string) error
+}
+
 type Service struct {
 	repo     Repository
 	profiles ProfileRepository
+	policy   InteractionPolicy
+	blocked  BlockedPairSource
+	notifier NotificationCreator
 	now      func() time.Time
 }
 
@@ -31,6 +48,38 @@ func NewService(repo Repository, profiles ProfileRepository) *Service {
 	}
 }
 
+// BlockedPairSource exposes the caller's block-set so following/followers/
+// friends lists can be filtered at the service level (never fetched
+// unfiltered and hidden only in a handler or the browser).
+type BlockedPairSource interface {
+	BlockedPairUserIDs(ctx context.Context, userID string) (map[string]bool, error)
+}
+
+// SetInteractionPolicy attaches the canonical block/suspension/ban gate.
+func (s *Service) SetInteractionPolicy(p InteractionPolicy) { s.policy = p }
+
+// SetBlockedFilter attaches the block-set source used to filter
+// following/followers/friends lists.
+func (s *Service) SetBlockedFilter(b BlockedPairSource) { s.blocked = b }
+
+// SetNotificationCreator attaches the notification sink used for new_message
+// events.
+func (s *Service) SetNotificationCreator(n NotificationCreator) { s.notifier = n }
+
+func (s *Service) checkInteraction(ctx context.Context, a, b string) error {
+	if s.policy == nil {
+		return nil
+	}
+	ok, err := s.policy.CanUsersInteract(ctx, a, b)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrInteractionBlocked
+	}
+	return nil
+}
+
 func (s *Service) Follow(ctx context.Context, userID, handle string) (FollowState, error) {
 	target, err := s.publicProfileByHandle(ctx, handle)
 	if err != nil {
@@ -38,6 +87,9 @@ func (s *Service) Follow(ctx context.Context, userID, handle string) (FollowStat
 	}
 	if target.UserID == userID {
 		return FollowState{}, ErrSelfFollow
+	}
+	if err := s.checkInteraction(ctx, userID, target.UserID); err != nil {
+		return FollowState{}, err
 	}
 	if err := s.repo.Follow(ctx, userID, target.UserID); err != nil {
 		return FollowState{}, err
@@ -70,13 +122,28 @@ func (s *Service) FollowState(ctx context.Context, userID, handle string) (Follo
 	return s.followStateForTarget(ctx, userID, target)
 }
 
+func (s *Service) blockedSet(ctx context.Context, userID string) map[string]bool {
+	if s.blocked == nil {
+		return nil
+	}
+	set, err := s.blocked.BlockedPairUserIDs(ctx, userID)
+	if err != nil {
+		return nil
+	}
+	return set
+}
+
 func (s *Service) Following(ctx context.Context, userID string) (UserListResponse, error) {
 	items, err := s.repo.ListFollowing(ctx, userID)
 	if err != nil {
 		return UserListResponse{}, err
 	}
+	blocked := s.blockedSet(ctx, userID)
 	out := make([]FriendItem, 0, len(items))
 	for _, item := range items {
+		if blocked[item.FollowingUserID] {
+			continue
+		}
 		if p, err := s.profiles.GetByUserID(ctx, item.FollowingUserID); err == nil {
 			out = append(out, friendItem(p, item.CreatedAt))
 		}
@@ -89,8 +156,12 @@ func (s *Service) Followers(ctx context.Context, userID string) (UserListRespons
 	if err != nil {
 		return UserListResponse{}, err
 	}
+	blocked := s.blockedSet(ctx, userID)
 	out := make([]FriendItem, 0, len(items))
 	for _, item := range items {
+		if blocked[item.FollowerUserID] {
+			continue
+		}
 		if p, err := s.profiles.GetByUserID(ctx, item.FollowerUserID); err == nil {
 			out = append(out, friendItem(p, item.CreatedAt))
 		}
@@ -103,8 +174,12 @@ func (s *Service) Friends(ctx context.Context, userID string) (FriendsResponse, 
 	if err != nil {
 		return FriendsResponse{}, err
 	}
+	blocked := s.blockedSet(ctx, userID)
 	out := make([]FriendItem, 0, len(items))
 	for _, item := range items {
+		if blocked[item.UserID] {
+			continue
+		}
 		if p, err := s.profiles.GetByUserID(ctx, item.UserID); err == nil {
 			out = append(out, friendItem(p, item.FriendsSince))
 		}
@@ -117,8 +192,16 @@ func (s *Service) Conversations(ctx context.Context, userID string) (Conversatio
 	if err != nil {
 		return ConversationsResponse{}, err
 	}
+	blocked := s.blockedSet(ctx, userID)
 	out := make([]ConversationSummary, 0, len(items))
 	for _, c := range items {
+		other := c.ParticipantA
+		if other == userID {
+			other = c.ParticipantB
+		}
+		if blocked[other] {
+			continue
+		}
 		dto, err := s.conversationSummary(ctx, userID, c)
 		if err != nil {
 			continue
@@ -135,6 +218,9 @@ func (s *Service) CreateConversation(ctx context.Context, userID, handle string)
 	}
 	if target.UserID == userID {
 		return ConversationResponse{}, ErrSelfDM
+	}
+	if err := s.checkInteraction(ctx, userID, target.UserID); err != nil {
+		return ConversationResponse{}, err
 	}
 	if ok, err := s.areFriends(ctx, userID, target.UserID); err != nil {
 		return ConversationResponse{}, err
@@ -166,7 +252,7 @@ func (s *Service) Messages(ctx context.Context, userID, conversationID string, l
 	if !ok {
 		return MessagesResponse{}, ErrForbidden
 	}
-	items, err := s.repo.ListMessages(ctx, conversationID, limit)
+	items, err := s.repo.ListMessages(ctx, conversationID, userID, limit)
 	if err != nil {
 		return MessagesResponse{}, err
 	}
@@ -193,6 +279,9 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID, body 
 	if other == userID {
 		other = c.ParticipantB
 	}
+	if err := s.checkInteraction(ctx, userID, other); err != nil {
+		return MessageResponse{}, err
+	}
 	if ok, err := s.areFriends(ctx, userID, other); err != nil {
 		return MessageResponse{}, err
 	} else if !ok {
@@ -215,11 +304,109 @@ func (s *Service) SendMessage(ctx context.Context, userID, conversationID, body 
 	if err := s.repo.AddMessage(ctx, msg); err != nil {
 		return MessageResponse{}, err
 	}
+	if s.notifier != nil {
+		_ = s.notifier.Notify(ctx, other, "new_message", "message:"+msg.ID, map[string]string{"conversation_id": conversationID})
+	}
 	dto, err := s.messageDTO(ctx, userID, msg)
 	if err != nil {
 		return MessageResponse{}, err
 	}
 	return MessageResponse{Message: dto}, nil
+}
+
+// HideMessage removes a message from userID's own conversation view without
+// affecting the other participant. Idempotent; only a conversation
+// participant may hide a message.
+func (s *Service) HideMessage(ctx context.Context, userID, messageID string) error {
+	msg, err := s.repo.MessageByID(ctx, messageID)
+	if err != nil {
+		return err
+	}
+	ok, err := s.repo.IsParticipant(ctx, msg.ConversationID, userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	return s.repo.HideMessageForUser(ctx, messageID, userID)
+}
+
+// RemoveMessage implements moderation.MessageRemover: it applies a moderator
+// content-removal tombstone. The service layer never checks the moderator's
+// role here — that authorization happens in the moderation handler/service.
+func (s *Service) RemoveMessage(ctx context.Context, moderatorID, messageID string) error {
+	return s.repo.RemoveMessage(ctx, messageID, moderatorID)
+}
+
+// MessageForReport implements moderation.MessageAccessor: it returns the
+// evidence-relevant fields for messageID only if requesterID is a
+// participant in its conversation, preventing reporting an arbitrary message
+// id belonging to someone else's conversation.
+func (s *Service) MessageForReport(ctx context.Context, requesterID, messageID string) (MessageReportEvidence, error) {
+	msg, err := s.repo.MessageByID(ctx, messageID)
+	if err != nil {
+		return MessageReportEvidence{}, err
+	}
+	ok, err := s.repo.IsParticipant(ctx, msg.ConversationID, requesterID)
+	if err != nil {
+		return MessageReportEvidence{}, err
+	}
+	if !ok {
+		return MessageReportEvidence{}, ErrForbidden
+	}
+	c, err := s.repo.GetConversation(ctx, msg.ConversationID)
+	if err != nil {
+		return MessageReportEvidence{}, err
+	}
+	return MessageReportEvidence{
+		MessageID: msg.ID, ConversationID: msg.ConversationID, SenderID: msg.SenderUserID,
+		ParticipantIDs: []string{c.ParticipantA, c.ParticipantB}, Text: msg.Body, CreatedAt: msg.CreatedAt,
+	}, nil
+}
+
+// MarkRead advances userID's read position in conversationID up to (and
+// including) lastReadMessageID.
+func (s *Service) MarkRead(ctx context.Context, userID, conversationID, lastReadMessageID string) error {
+	ok, err := s.repo.IsParticipant(ctx, conversationID, userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	return s.repo.MarkRead(ctx, conversationID, userID, lastReadMessageID)
+}
+
+// UnreadCount returns the total unread DM count across every conversation
+// userID participates in.
+func (s *Service) UnreadCount(ctx context.Context, userID string) (UnreadCountResponse, error) {
+	n, err := s.repo.UnreadCount(ctx, userID)
+	if err != nil {
+		return UnreadCountResponse{}, err
+	}
+	return UnreadCountResponse{Count: n}, nil
+}
+
+// MessageReportEvidence is social's projection of a message for moderation
+// reporting; it satisfies moderation.MessageEvidence's shape via an adapter
+// in cmd/api/main.go (kept here to avoid social importing moderation).
+type MessageReportEvidence struct {
+	MessageID      string
+	ConversationID string
+	SenderID       string
+	ParticipantIDs []string
+	Text           string
+	CreatedAt      time.Time
+}
+
+// RemoveFollowBothDirections implements safety.FollowRemover: blocking must
+// remove or deactivate any existing follow/friendship between the two users.
+func (s *Service) RemoveFollowBothDirections(ctx context.Context, userA, userB string) error {
+	if err := s.repo.Unfollow(ctx, userA, userB); err != nil {
+		return err
+	}
+	return s.repo.Unfollow(ctx, userB, userA)
 }
 
 func (s *Service) followStateForTarget(ctx context.Context, userID string, target profile.Profile) (FollowState, error) {
@@ -260,16 +447,25 @@ func (s *Service) conversationSummary(ctx context.Context, userID string, c Conv
 	if err != nil {
 		return ConversationSummary{}, err
 	}
+	unread, err := s.repo.ConversationUnreadCount(ctx, c.ID, userID)
+	if err != nil {
+		return ConversationSummary{}, err
+	}
 	dto := ConversationSummary{
-		ID:        c.ID,
-		OtherUser: safeProfile(p),
-		UpdatedAt: c.UpdatedAt,
+		ID:          c.ID,
+		OtherUser:   safeProfile(p),
+		UpdatedAt:   c.UpdatedAt,
+		UnreadCount: unread,
 	}
 	if msg, ok, err := s.repo.LastMessage(ctx, c.ID); err != nil {
 		return ConversationSummary{}, err
 	} else if ok {
+		preview := truncatePreview(msg.Body)
+		if msg.IsRemoved() {
+			preview = removedTombstoneText
+		}
 		dto.LastMessage = &LastMessagePreview{
-			BodyPreview: truncatePreview(msg.Body),
+			BodyPreview: preview,
 			SentAt:      msg.CreatedAt,
 			SentByMe:    msg.SenderUserID == userID,
 		}
@@ -282,11 +478,16 @@ func (s *Service) messageDTO(ctx context.Context, userID string, msg Message) (M
 	if err != nil {
 		return MessageDTO{}, err
 	}
+	body := msg.Body
+	if msg.IsRemoved() {
+		body = removedTombstoneText
+	}
 	return MessageDTO{
 		ID:             msg.ID,
 		ConversationID: msg.ConversationID,
 		Sender:         safeProfile(p),
-		Body:           msg.Body,
+		Body:           body,
+		Removed:        msg.IsRemoved(),
 		SentByMe:       msg.SenderUserID == userID,
 		CreatedAt:      msg.CreatedAt,
 	}, nil

@@ -167,12 +167,12 @@ func TestOnAccountDeleted_UnpublishesProfile(t *testing.T) {
 	public, weights := true, true
 	owner, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &weights})
 	require.NoError(t, err)
-	_, err = svc.GetPublic(ctx, owner.Handle)
+	_, err = svc.GetPublic(ctx, "", owner.Handle)
 	require.NoError(t, err, "sanity check: the profile is public before deletion")
 
 	require.NoError(t, svc.OnAccountDeleted(ctx, "u1"))
 
-	_, err = svc.GetPublic(ctx, owner.Handle)
+	_, err = svc.GetPublic(ctx, "", owner.Handle)
 	assert.ErrorIs(t, err, ErrNotFound, "a deleted account's profile must no longer be publicly resolvable")
 }
 
@@ -188,14 +188,14 @@ func TestPublicProfilePrivacyVisibilityAndHiddenWeights(t *testing.T) {
 	svc := testService()
 	owner, err := svc.GetMe(ctx, "u1")
 	require.NoError(t, err)
-	_, err = svc.GetPublic(ctx, owner.Handle)
+	_, err = svc.GetPublic(ctx, "", owner.Handle)
 	assert.ErrorIs(t, err, ErrNotFound)
 
 	public := true
 	hidden := false
 	owner, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &hidden})
 	require.NoError(t, err)
-	out, err := svc.GetPublic(ctx, owner.Handle)
+	out, err := svc.GetPublic(ctx, "", owner.Handle)
 	require.NoError(t, err)
 	assert.Empty(t, out.PublicWeights)
 	assert.Empty(t, out.PublicClosedPositions)
@@ -365,7 +365,7 @@ func TestPublicProfile_DisclosesSelfReportedExecutionPrices(t *testing.T) {
 	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public})
 	require.NoError(t, err)
 
-	out, err := svc.GetPublic(ctx, "alpha_user")
+	out, err := svc.GetPublic(ctx, "", "alpha_user")
 	require.NoError(t, err)
 	assert.True(t, out.Insights.OpenClosedPerformance.IncludesSelfReportedPrices)
 }
@@ -379,7 +379,7 @@ func TestPublicProfile_DoesNotFlagWhenNoSelfReportedPrices(t *testing.T) {
 	_, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public})
 	require.NoError(t, err)
 
-	out, err := svc.GetPublic(ctx, owner.Handle)
+	out, err := svc.GetPublic(ctx, "", owner.Handle)
 	require.NoError(t, err)
 	assert.False(t, out.Insights.OpenClosedPerformance.IncludesSelfReportedPrices)
 }
@@ -394,7 +394,7 @@ func TestPublicProfileClosedPositionsAreSafeWhenWeightsVisible(t *testing.T) {
 	weights := true
 	owner, err = svc.UpdateMe(ctx, "u1", UpdateInput{IsPublic: &public, ShowPublicWeights: &weights})
 	require.NoError(t, err)
-	out, err := svc.GetPublic(ctx, owner.Handle)
+	out, err := svc.GetPublic(ctx, "", owner.Handle)
 	require.NoError(t, err)
 
 	require.Len(t, out.PublicClosedPositions, 1)

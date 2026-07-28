@@ -43,7 +43,14 @@ export function ConversationList({ conversations, selectedId, onSelect }: Props)
                 @{conversation.other_user.handle}
               </div>
             </div>
-            <ChevronRight className={cn("h-4 w-4 transition", selectedId === conversation.id ? "text-sky-200/70" : "text-zinc-600 group-hover:text-indigo-200/60")} />
+            <div className="flex items-center gap-2">
+              {conversation.unread_count > 0 && (
+                <span className="grid h-5 min-w-5 place-items-center rounded-full bg-sky-400/90 px-1.5 font-mono text-[10px] font-semibold text-zinc-950">
+                  {conversation.unread_count > 99 ? "99+" : conversation.unread_count}
+                </span>
+              )}
+              <ChevronRight className={cn("h-4 w-4 transition", selectedId === conversation.id ? "text-sky-200/70" : "text-zinc-600 group-hover:text-indigo-200/60")} />
+            </div>
           </div>
           <div className="mt-2 truncate text-xs text-zinc-500">
             {conversation.last_message

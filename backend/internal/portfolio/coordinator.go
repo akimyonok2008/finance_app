@@ -36,6 +36,11 @@ const (
 	MutationReturnOfCapital    MutationKind = "return_of_capital"
 	MutationFee                MutationKind = "fee"
 	MutationWriteOff           MutationKind = "write_off"
+	// MutationIncomeEvent applies EVERY component of one economic income event
+	// (ordinary income, capital-gains distribution, return of capital, stock
+	// dividend, ...) atomically in a single transaction, under one
+	// activity_group_id, with exactly one combined ranked-performance update.
+	MutationIncomeEvent MutationKind = "income_event"
 
 	// Neutral corporate-action mutations.
 	MutationSplit         MutationKind = "split"
@@ -64,6 +69,9 @@ type MutationRequest struct {
 	Income     IncomeInput
 	Fee        FeeInput
 	CorpAction CorpActionInput
+	// IncomeEvent carries the full multi-component payload for
+	// MutationIncomeEvent. Only used when Kind == MutationIncomeEvent.
+	IncomeEvent IncomeEventInput
 }
 
 // MutationResult is the committed outcome of a mutation.
@@ -1310,6 +1318,9 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 	case MutationStockDividend:
 		return c.planStockDividend(req, pf, oldOpen, oldCash, val)
 
+	case MutationIncomeEvent:
+		return c.planIncomeEvent(req, pf, oldOpen, oldCash, val)
+
 	case MutationFee:
 		return c.planFee(req, pf, oldOpen, oldCash, val)
 
@@ -1636,6 +1647,462 @@ func (c *MutationCoordinator) planStockDividend(req MutationRequest, pf *Portfol
 		write:          func(ctx context.Context, tx AggregateTx) error { return tx.UpdatePosition(ctx, &updated) },
 		resultPosition: &updated, resultPositionID: updated.ID, activity: activity,
 	}, nil
+}
+
+// validateIncomeEvent statically validates EVERY component of a mixed income
+// event before any I/O or write. Per the conservative unsupported-component
+// policy, a single component that cannot be classified into a supported
+// subtype (or carries an invalid amount/ratio) rejects the WHOLE event —
+// nothing is applied partially. It returns the set of symbols that must be
+// priced (only the ones a reinvesting component needs).
+func (c *MutationCoordinator) validateIncomeEvent(req *MutationRequest) ([]string, error) {
+	ev := &req.IncomeEvent
+	if len(ev.Components) == 0 {
+		return nil, ErrEmptyIncomeEvent
+	}
+	ev.Currency = strings.ToUpper(strings.TrimSpace(ev.Currency))
+	if s := strings.ToUpper(strings.TrimSpace(ev.Symbol)); s != "" {
+		sym, err := prices.ValidateAndNormalizeSymbol(s)
+		if err != nil {
+			return nil, ErrUnsupportedSymbol
+		}
+		ev.Symbol = sym
+	}
+	seedSet := map[string]bool{}
+	for i := range ev.Components {
+		comp := &ev.Components[i]
+		symbol := strings.ToUpper(strings.TrimSpace(comp.Symbol))
+		if symbol == "" {
+			symbol = ev.Symbol
+		}
+		currency := strings.ToUpper(strings.TrimSpace(comp.Currency))
+		if currency == "" {
+			currency = ev.Currency
+		}
+		if !supportedCurrency(currency) {
+			return nil, ErrUnsupportedCurrency
+		}
+		comp.Currency = currency
+
+		switch comp.Subtype {
+		case IncomeCashDividend, IncomeSpecialDividend, IncomeETFDistribution,
+			IncomeMutualFundDist, IncomeCapitalGainsDist, IncomeBondCoupon,
+			IncomeFixedIncomeInt, IncomeInterest, IncomeCashInterest,
+			IncomeStakingReward, IncomePaymentInLieu, IncomeOtherProvider,
+			IncomeReinvestedDiv:
+			if err := validateIncomeAmounts(IncomeInput{Amount: comp.Amount, Withholding: comp.Withholding, Fee: comp.Fee}); err != nil {
+				return nil, err
+			}
+			if symbol == "" && !incomeSymbolOptional(comp.Subtype) {
+				return nil, ErrSymbolRequired
+			}
+			if symbol != "" {
+				sym, err := prices.ValidateAndNormalizeSymbol(symbol)
+				if err != nil {
+					return nil, ErrUnsupportedSymbol
+				}
+				symbol = sym
+			}
+			if (comp.Reinvest || ev.Reinvest || comp.Subtype == IncomeReinvestedDiv) && symbol != "" {
+				// Reinvestment creates or extends a POSITION, so — matching the
+				// single-component MutationReinvestedDividend validation — the
+				// asset type must be one of the supported, explicit values; it is
+				// never inferred silently. It falls back to the event-level asset
+				// type when the component does not override it.
+				assetType := strings.ToLower(strings.TrimSpace(comp.AssetType))
+				if assetType == "" {
+					assetType = strings.ToLower(strings.TrimSpace(ev.AssetType))
+				}
+				if !validAssetTypes[assetType] {
+					return nil, ErrInvalidAssetType
+				}
+				comp.AssetType = assetType
+				seedSet[symbol] = true
+			}
+		case IncomeReturnOfCapitalSub:
+			if err := validateIncomeAmounts(IncomeInput{Amount: comp.Amount, Withholding: comp.Withholding, Fee: comp.Fee}); err != nil {
+				return nil, err
+			}
+			if symbol == "" {
+				return nil, ErrSymbolRequired
+			}
+			sym, err := prices.ValidateAndNormalizeSymbol(symbol)
+			if err != nil {
+				return nil, ErrUnsupportedSymbol
+			}
+			symbol = sym
+		case IncomeStockDividendSub:
+			if !finitePositive(comp.StockRatioNum) || !finitePositive(comp.StockRatioDen) {
+				return nil, ErrInvalidSplitRatio
+			}
+			if symbol == "" {
+				return nil, ErrSymbolRequired
+			}
+			sym, err := prices.ValidateAndNormalizeSymbol(symbol)
+			if err != nil {
+				return nil, ErrUnsupportedSymbol
+			}
+			symbol = sym
+		default:
+			// A component this coordinator cannot safely apply atomically leaves
+			// the WHOLE event pending/unresolved rather than partially applying
+			// the components it does understand.
+			return nil, ErrUnsupportedIncomeComponent
+		}
+		comp.Symbol = symbol
+	}
+	seed := make([]string, 0, len(seedSet))
+	for s := range seedSet {
+		seed = append(seed, s)
+	}
+	return seed, nil
+}
+
+// planIncomeEvent applies EVERY component of one economic income event
+// (ordinary income, ETF/fund distribution, capital-gains distribution, return
+// of capital, stock dividend) as ONE atomic plan: one combined cash effect,
+// one combined basis effect, one combined reinvestment, all legs sharing the
+// same activity_group_id, and exactly one ranked-performance checkpoint for
+// the whole event (via mutationEffect(MutationIncomeEvent) / performanceEffect
+// below) — never one per component. Everything here is pure computation; the
+// actual writes happen once, together, in the returned plan.write closure, so
+// a failure anywhere before that point leaves the transaction untouched.
+func (c *MutationCoordinator) planIncomeEvent(req MutationRequest, pf *Portfolio, oldOpen []*Position, oldCash []CashBalance, val *Valuation) (mutationPlan, error) {
+	ev := req.IncomeEvent
+	if len(ev.Components) == 0 {
+		return mutationPlan{}, ErrEmptyIncomeEvent
+	}
+	groupID := uuid.NewString()
+	now := val.ObservedAt
+	fallbackOccurredAt := now
+	if !ev.PaymentDate.IsZero() {
+		fallbackOccurredAt = ev.PaymentDate
+	}
+
+	open := append([]*Position(nil), oldOpen...)
+	cash := append([]CashBalance(nil), oldCash...)
+	// touchedPositions / touchedCash track the FINAL state this event leaves
+	// each position/currency in, keyed so a symbol or currency touched by more
+	// than one component (e.g. a return-of-capital component followed by a
+	// reinvested-ordinary component on the same instrument) is written exactly
+	// once, with its cumulative effect, not once per component.
+	touchedPositions := map[string]*Position{}
+	newPositions := map[string]bool{}
+	touchedCash := map[string]CashBalance{}
+
+	activities := make([]Activity, 0, len(ev.Components)+1)
+	var resultPosition *Position
+	var resultPositionID string
+	// hasReturnLeg tracks whether ANY component of this event is return-bearing
+	// (ordinary income, reinvested income, or return of capital all credit
+	// cash/value). A pure stock-dividend event has no return-bearing component
+	// at all, so the whole event's ranked-performance effect must stay neutral
+	// — never once per component, and never Return by default when nothing in
+	// the event actually returned value.
+	hasReturnLeg := false
+
+	creditCash := func(currency string, delta float64) {
+		current, _ := cashAmount(cash, currency)
+		balance := CashBalance{PortfolioID: pf.ID, Currency: currency, Amount: current + delta, UpdatedAt: now, CreatedAt: now}
+		if existing, ok := cashBalance(cash, currency); ok {
+			balance.CreatedAt = existing.CreatedAt
+		}
+		cash = replaceCash(cash, balance)
+		touchedCash[currency] = balance
+	}
+
+	for i := range ev.Components {
+		comp := ev.Components[i]
+		symbol := comp.Symbol
+		if symbol == "" {
+			symbol = ev.Symbol
+		}
+		currency := comp.Currency
+		if currency == "" {
+			currency = ev.Currency
+		}
+		assetType := comp.AssetType
+		if assetType == "" {
+			assetType = ev.AssetType
+		}
+		occurred := occurredAt(comp.OccurredAt, fallbackOccurredAt)
+		baseMeta := func(extra map[string]any) map[string]any {
+			out := map[string]any{
+				"activity_group_id": groupID,
+				"component_index":   i,
+				"income_event_id":   nonEmpty(ev.IncomeEventID),
+			}
+			if comp.TaxClassification != "" {
+				out["tax_classification"] = comp.TaxClassification
+			}
+			for k, v := range extra {
+				out[k] = v
+			}
+			return out
+		}
+
+		switch comp.Subtype {
+		case IncomeStockDividendSub:
+			existing := findOpenBySymbol(open, symbol)
+			if existing == nil {
+				return mutationPlan{}, ErrInstrumentNotFound
+			}
+			factor := 1 + comp.StockRatioNum/comp.StockRatioDen
+			if !finitePositive(factor) || factor <= 1 {
+				return mutationPlan{}, ErrInvalidSplitRatio
+			}
+			updated := *existing
+			updated.Quantity = existing.Quantity * factor
+			updated.AverageBuyPrice = existing.AverageBuyPrice / factor // total basis preserved
+			updated.UpdatedAt = now
+			open = replaceOrAppendPosition(open, &updated)
+			touchedPositions[updated.ID] = &updated
+
+			act := Activity{
+				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+				Type: ActivityStockDividend, Symbol: symbol, AssetType: existing.AssetType,
+				InstrumentID: existing.InstrumentID, Currency: existing.Currency,
+				Quantity:   floatPointer(updated.Quantity - existing.Quantity),
+				OccurredAt: occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: existing.ID,
+				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, comp.Provenance, baseMeta(map[string]any{
+					"income_subtype":    string(IncomeStockDividendSub),
+					"ratio_numerator":   comp.StockRatioNum,
+					"ratio_denominator": comp.StockRatioDen,
+				})),
+			}
+			activities = append(activities, act)
+			resultPosition, resultPositionID = &updated, updated.ID
+
+		case IncomeReturnOfCapitalSub:
+			existing := findOpenBySymbol(open, symbol)
+			if existing == nil {
+				return mutationPlan{}, ErrInstrumentNotFound
+			}
+			net := round2(comp.NetCash())
+			remainingBasis := existing.Quantity * existing.AverageBuyPrice
+			basisReduction := net
+			excessOverBasis := 0.0
+			if basisReduction > remainingBasis {
+				// Documented existing treatment (see planReturnOfCapital): excess ROC
+				// over the remaining basis is recorded separately and never drives
+				// basis negative.
+				excessOverBasis = round2(basisReduction - remainingBasis)
+				basisReduction = remainingBasis
+			}
+			updated := *existing
+			if existing.Quantity > 0 {
+				updated.AverageBuyPrice = round4((remainingBasis - basisReduction) / existing.Quantity)
+			}
+			updated.UpdatedAt = now
+			open = replaceOrAppendPosition(open, &updated)
+			touchedPositions[updated.ID] = &updated
+			creditCash(currency, net)
+
+			act := Activity{
+				ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+				Type: ActivityReturnOfCapital, Symbol: symbol, AssetType: existing.AssetType,
+				InstrumentID: existing.InstrumentID, Currency: currency, GrossAmount: net,
+				CostBasisAllocated: floatPointer(round2(basisReduction)),
+				OccurredAt:         occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: existing.ID,
+				Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, comp.Provenance, baseMeta(map[string]any{
+					"income_subtype":     string(IncomeReturnOfCapitalSub),
+					"gross_amount":       round2(comp.Amount),
+					"net_amount":         net,
+					"basis_reduction":    round2(basisReduction),
+					"excess_over_basis":  excessOverBasis,
+					"accounting_policy":  "return_of_capital_basis_reduction",
+					"withholding_amount": nonEmptyFloat(comp.Withholding),
+					"income_fee_amount":  nonEmptyFloat(comp.Fee),
+				})),
+			}
+			activities = append(activities, act)
+			resultPosition, resultPositionID = &updated, updated.ID
+			hasReturnLeg = true
+
+		default: // every ordinary-income subtype (dividend, distribution, coupon,
+			// interest, capital-gains distribution, staking, other-provider income),
+			// optionally reinvested.
+			net := round2(comp.NetCash())
+			reinvest := comp.Reinvest || ev.Reinvest || comp.Subtype == IncomeReinvestedDiv
+			hasReturnLeg = true
+			if reinvest {
+				quote, ok := val.Quote(symbol)
+				if !ok {
+					return mutationPlan{}, ErrPriceProvider
+				}
+				qcurrency := quote.Currency
+				price := quote.Price
+				method := "market_close_on_payment_date"
+				if finitePositive(comp.ReinvestPrice) {
+					price = comp.ReinvestPrice
+					method = "broker_reported"
+				}
+				if comp.PriceMethod != "" {
+					method = comp.PriceMethod
+				}
+				if !finitePositive(price) {
+					return mutationPlan{}, ErrInvalidReinvestment
+				}
+				qty := net / price
+				if !finitePositive(qty) {
+					return mutationPlan{}, ErrInvalidReinvestment
+				}
+				estimated := comp.Estimated || method != "broker_reported"
+
+				var result *Position
+				create := false
+				for _, p := range open {
+					if p.Symbol == symbol && p.AssetType == assetType && p.Currency == qcurrency {
+						merged := *p
+						totalQty := p.Quantity + qty
+						merged.AverageBuyPrice = (p.Quantity*p.AverageBuyPrice + net) / totalQty
+						merged.Quantity = totalQty
+						merged.UpdatedAt = now
+						result = &merged
+						break
+					}
+				}
+				if result == nil {
+					create = true
+					result = &Position{
+						ID: uuid.NewString(), UserID: req.UserID, PortfolioID: pf.ID,
+						Symbol: symbol, AssetType: assetType, Quantity: qty, AverageBuyPrice: price,
+						Currency: qcurrency, Status: PositionStatusOpen, CreatedAt: now, UpdatedAt: now,
+					}
+				}
+				open = replaceOrAppendPosition(open, result)
+				touchedPositions[result.ID] = result
+				if create {
+					newPositions[result.ID] = true
+				}
+
+				incomeAct := Activity{
+					ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+					Type: ActivityReinvestedDividend, Symbol: symbol, AssetType: assetType,
+					InstrumentID: result.InstrumentID, Currency: qcurrency, GrossAmount: net,
+					OccurredAt: occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
+					Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, comp.Provenance, baseMeta(map[string]any{
+						"income_subtype":            string(IncomeReinvestedDiv),
+						"gross_amount":              round2(comp.Amount),
+						"net_amount":                net,
+						"component":                 "income",
+						"reinvestment_price_method": method,
+						"reinvestment_quantity":     round4(qty),
+						"reinvestment_estimated":    estimated,
+						"withholding_amount":        nonEmptyFloat(comp.Withholding),
+						"income_fee_amount":         nonEmptyFloat(comp.Fee),
+					})),
+				}
+				buyLeg := Activity{
+					ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+					Type: ActivityBuy, Symbol: symbol, AssetType: assetType,
+					InstrumentID: result.InstrumentID, Currency: qcurrency,
+					Quantity: floatPointer(qty), UnitPrice: floatPointer(price), GrossAmount: net,
+					OccurredAt: now, CreatedAt: now, GroupID: groupID, PositionEpisodeID: result.ID,
+					Metadata: activityMeta(trackingMetadata(val), PerformanceEffectNeutral, ProvenanceSystemGenerated, baseMeta(map[string]any{
+						"component":                 "reinvestment_buy",
+						"reinvestment_price_method": method,
+						"reinvestment_estimated":    estimated,
+					})),
+				}
+				activities = append(activities, incomeAct, buyLeg)
+				resultPosition, resultPositionID = result, result.ID
+			} else {
+				creditCash(currency, net)
+				episodeID, instrumentID, legAssetType := "", "", assetType
+				if symbol != "" {
+					if pos := findOpenBySymbol(open, symbol); pos != nil {
+						episodeID, instrumentID, legAssetType = pos.ID, pos.InstrumentID, pos.AssetType
+					}
+				}
+				act := Activity{
+					ID: uuid.NewString(), PortfolioID: pf.ID, UserID: req.UserID,
+					Type: incomeActivityType(comp.Subtype), Symbol: symbol, InstrumentID: instrumentID,
+					AssetType: legAssetType, Currency: currency, GrossAmount: net,
+					OccurredAt: occurred, CreatedAt: now, GroupID: groupID, PositionEpisodeID: episodeID,
+					Metadata: activityMeta(trackingMetadata(val), PerformanceEffectReturn, comp.Provenance, baseMeta(map[string]any{
+						"income_subtype":     string(comp.Subtype),
+						"gross_amount":       round2(comp.Amount),
+						"net_amount":         net,
+						"withholding_amount": nonEmptyFloat(comp.Withholding),
+						"income_fee_amount":  nonEmptyFloat(comp.Fee),
+						"estimated":          nonEmptyBool(comp.Estimated),
+					})),
+				}
+				activities = append(activities, act)
+			}
+		}
+	}
+
+	if len(activities) == 0 {
+		return mutationPlan{}, ErrEmptyIncomeEvent
+	}
+	// The event-level idempotency key binds to the FIRST leg; FindActivityByRequestID
+	// / FindAuditByRequestID resolve a retry of the same (income event, portfolio)
+	// pair to the whole already-committed group, so a retry after a committed
+	// event creates no duplicate cash, shares, basis reduction, activities, or
+	// ranked return.
+	activities[0].RequestID = req.RequestID
+	primary := activities[0]
+	extra := append([]Activity(nil), activities[1:]...)
+
+	writePositions := make([]*Position, 0, len(touchedPositions))
+	for _, p := range touchedPositions {
+		writePositions = append(writePositions, p)
+	}
+	writeCash := make([]CashBalance, 0, len(touchedCash))
+	for _, b := range touchedCash {
+		writeCash = append(writeCash, b)
+	}
+
+	// The event's combined ranked-performance effect is Return only if at least
+	// one component actually returned value (ordinary income, reinvested
+	// income, or return of capital). A pure stock-dividend event — a quantity
+	// transformation that preserves total basis and value — stays Neutral, just
+	// like the single-component planStockDividend path.
+	effect := PerformanceEffectNeutral
+	if hasReturnLeg {
+		effect = PerformanceEffectReturn
+	}
+	return mutationPlan{
+		newOpen: open, newCash: cash,
+		write: func(ctx context.Context, tx AggregateTx) error {
+			for _, p := range writePositions {
+				if newPositions[p.ID] {
+					if err := tx.CreatePosition(ctx, p); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := tx.UpdatePosition(ctx, p); err != nil {
+					return err
+				}
+			}
+			for _, bal := range writeCash {
+				if err := tx.PutCashBalance(ctx, bal); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		resultPosition: resultPosition, resultPositionID: resultPositionID,
+		activity: &primary, extraActivities: extra,
+		performanceEffect: effect,
+	}, nil
+}
+
+func nonEmptyFloat(v float64) any {
+	if v == 0 {
+		return nil
+	}
+	return round2(v)
+}
+
+func nonEmptyBool(v bool) any {
+	if !v {
+		return nil
+	}
+	return v
 }
 
 // planFee deducts a standalone management/custody/other fee from the specified
@@ -2057,6 +2524,9 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		}
 		req.Income.Symbol = sym
 		return nil, nil // quantity transformation on a held position; nothing new to price
+
+	case MutationIncomeEvent:
+		return c.validateIncomeEvent(req)
 
 	case MutationFee:
 		req.Fee.Currency = strings.ToUpper(strings.TrimSpace(req.Fee.Currency))

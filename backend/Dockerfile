@@ -20,4 +20,6 @@ COPY --from=build /out/finance-api /app/finance-api
 USER app
 
 EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/ready || exit 1
 ENTRYPOINT ["/app/finance-api"]

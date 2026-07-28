@@ -19,14 +19,19 @@ func newTestHandler() (*Handler, *Service, http.Handler) {
 	repo := NewInMemoryUserRepository()
 	tm := NewTokenManager("test-secret", time.Hour)
 	svc := NewService(repo, tm)
+	svc.ConfigureLifecycle(LifecycleConfig{EmailSender: autoVerifySender{repo: repo}})
 	h := NewHandler(svc)
 
 	r := chi.NewRouter()
 	r.Post("/auth/register", h.Register)
 	r.Post("/auth/login", h.Login)
 	r.Post("/auth/google", h.Google)
+	r.Post("/auth/verify-email", h.VerifyEmail)
+	r.Post("/auth/forgot-password", h.ForgotPassword)
+	r.Post("/auth/reset-password", h.ResetPassword)
 	r.With(RequireAuth(tm)).Get("/me", h.Me)
 	r.With(RequireAuth(tm)).Post("/auth/change-password", h.ChangePassword)
+	r.With(RequireAuth(tm)).Post("/auth/reauthenticate", h.Reauthenticate)
 	r.With(RequireAuth(tm)).Post("/auth/delete-account", h.DeleteAccount)
 	return h, svc, r
 }
@@ -58,9 +63,12 @@ func TestHandlerRegister_Returns201ForValidRequest(t *testing.T) {
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
-	var resp authResponse
+	var resp struct {
+		User                 PublicUser `json:"user"`
+		VerificationRequired bool       `json:"verification_required"`
+	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp.Token)
+	assert.True(t, resp.VerificationRequired)
 	assert.Equal(t, "user@example.com", resp.User.Email)
 	assert.Equal(t, "AlphaWolf_91", resp.User.DisplayName)
 	assert.NotEmpty(t, resp.User.ID)
@@ -128,6 +136,20 @@ func TestHandlerLogin_Returns401ForUnknownEmail(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestHandlerForgotPasswordDoesNotRevealAccountExistence(t *testing.T) {
+	_, _, router := newTestHandler()
+	doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
+
+	existing := doJSON(t, router, http.MethodPost, "/auth/forgot-password",
+		`{"email":"user@example.com"}`, "")
+	unknown := doJSON(t, router, http.MethodPost, "/auth/forgot-password",
+		`{"email":"unknown@example.com"}`, "")
+
+	assert.Equal(t, http.StatusAccepted, existing.Code)
+	assert.Equal(t, existing.Code, unknown.Code)
+	assert.JSONEq(t, existing.Body.String(), unknown.Body.String())
+}
+
 func TestHandlerGoogle_Returns503WhenDisabled(t *testing.T) {
 	_, _, router := newTestHandler()
 
@@ -189,9 +211,7 @@ func TestHandlerGoogle_ReturnsJWTForVerifiedCredential(t *testing.T) {
 
 func TestHandlerMe_Returns200WithValidToken(t *testing.T) {
 	_, _, router := newTestHandler()
-	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
-	var reg authResponse
-	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+	reg := registerAndLogin(t, router)
 
 	rec := doJSON(t, router, http.MethodGet, "/me", "", reg.Token)
 
@@ -252,24 +272,23 @@ func TestSecurity_LoginResponseNeverExposesPassword(t *testing.T) {
 
 func TestSecurity_MeResponseNeverExposesPassword(t *testing.T) {
 	_, _, router := newTestHandler()
-	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
-	var reg authResponse
-	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+	reg := registerAndLogin(t, router)
 
 	rec := doJSON(t, router, http.MethodGet, "/me", "", reg.Token)
 
 	assertNoPasswordLeak(t, rec.Body.String())
 }
 
-func TestHandlerChangePassword_Returns204AndRotatesCredential(t *testing.T) {
+func TestHandlerChangePassword_ReturnsReplacementTokenAndRotatesCredential(t *testing.T) {
 	_, _, router := newTestHandler()
-	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
-	var reg authResponse
-	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+	reg := registerAndLogin(t, router)
 
 	rec := doJSON(t, router, http.MethodPost, "/auth/change-password",
 		`{"current_password":"StrongPassword123","new_password":"EvenStrongerPassword456"}`, reg.Token)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var replacement map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &replacement))
+	assert.NotEmpty(t, replacement["token"])
 
 	oldLogin := doJSON(t, router, http.MethodPost, "/auth/login",
 		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
@@ -282,9 +301,7 @@ func TestHandlerChangePassword_Returns204AndRotatesCredential(t *testing.T) {
 
 func TestHandlerChangePassword_Returns401ForWrongCurrentPassword(t *testing.T) {
 	_, _, router := newTestHandler()
-	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
-	var reg authResponse
-	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+	reg := registerAndLogin(t, router)
 
 	rec := doJSON(t, router, http.MethodPost, "/auth/change-password",
 		`{"current_password":"WrongPassword","new_password":"EvenStrongerPassword456"}`, reg.Token)
@@ -304,12 +321,14 @@ func TestHandlerChangePassword_Returns401WithoutToken(t *testing.T) {
 
 func TestHandlerDeleteAccount_Returns204ThenTokenStopsWorking(t *testing.T) {
 	_, _, router := newTestHandler()
-	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
-	var reg authResponse
-	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+	reg := registerAndLogin(t, router)
 
-	rec := doJSON(t, router, http.MethodPost, "/auth/delete-account",
+	reauth := doJSON(t, router, http.MethodPost, "/auth/reauthenticate",
 		`{"password":"StrongPassword123"}`, reg.Token)
+	var reauthBody map[string]string
+	require.NoError(t, json.Unmarshal(reauth.Body.Bytes(), &reauthBody))
+	rec := doJSON(t, router, http.MethodPost, "/auth/delete-account",
+		`{"reauthentication_token":"`+reauthBody["reauthentication_token"]+`"}`, reg.Token)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	loginRec := doJSON(t, router, http.MethodPost, "/auth/login",
@@ -317,19 +336,28 @@ func TestHandlerDeleteAccount_Returns204ThenTokenStopsWorking(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, loginRec.Code, "login must fail after deletion")
 }
 
-func TestHandlerDeleteAccount_Returns401ForWrongPassword(t *testing.T) {
+func TestHandlerDeleteAccount_Returns401ForWrongReauthentication(t *testing.T) {
 	_, _, router := newTestHandler()
-	regRec := doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
-	var reg authResponse
-	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &reg))
+	reg := registerAndLogin(t, router)
 
 	rec := doJSON(t, router, http.MethodPost, "/auth/delete-account",
-		`{"password":"WrongPassword"}`, reg.Token)
+		`{"reauthentication_token":"not-valid"}`, reg.Token)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	loginRec := doJSON(t, router, http.MethodPost, "/auth/login",
 		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
 	assert.Equal(t, http.StatusOK, loginRec.Code, "a rejected deletion must leave the account usable")
+}
+
+func registerAndLogin(t *testing.T, router http.Handler) authResponse {
+	t.Helper()
+	doJSON(t, router, http.MethodPost, "/auth/register", registerBody, "")
+	login := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
+	require.Equal(t, http.StatusOK, login.Code)
+	var session authResponse
+	require.NoError(t, json.Unmarshal(login.Body.Bytes(), &session))
+	return session
 }
 
 func assertHasError(t *testing.T, body []byte) {

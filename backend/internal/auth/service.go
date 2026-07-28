@@ -3,10 +3,12 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
-	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -18,34 +20,69 @@ const minPasswordLength = 8
 // uniqueness checks, and token issuance. It depends only on the repository
 // interface and the token manager.
 type Service struct {
-	repo           UserRepository
-	tokens         *TokenManager
-	googleEnabled  bool
-	appleEnabled   bool
-	googleVerifier ProviderVerifier
-	appleVerifier  ProviderVerifier
-	deletionHooks  []AccountDeletionHook
+	repo            UserRepository
+	tokens          *TokenManager
+	googleEnabled   bool
+	appleEnabled    bool
+	googleVerifier  ProviderVerifier
+	appleVerifier   ProviderVerifier
+	deletionHooks   []AccountDeletionHook
+	emailSender     EmailSender
+	publicAppURL    string
+	verificationTTL time.Duration
+	resetTTL        time.Duration
+	reauthTTL       time.Duration
 }
 
-// AccountDeletionHook lets other domains react to account deletion, e.g.
-// unpublishing a public profile so it stops appearing on Explore or a direct
-// handle lookup once the account is gone. Hooks run best-effort: a hook
-// failure is logged by the caller but never blocks the deletion itself, since
-// the account row is already gone by the time hooks run.
+// AccountDeletionHook lets non-database stores erase user-owned data before
+// the authoritative auth row is deleted. A failure stops the operation so the
+// API never reports successful deletion while a required erasure is incomplete.
 type AccountDeletionHook interface {
 	OnAccountDeleted(ctx context.Context, userID string) error
 }
 
-// RegisterDeletionHook attaches an additional best-effort side effect to run
-// after DeleteAccount soft-deletes the auth row. May be called multiple times
-// to wire more than one domain (profile takedown, etc.).
+// RegisterDeletionHook attaches a required erasure step. May be called
+// multiple times to cover every non-database user-data store.
 func (s *Service) RegisterDeletionHook(h AccountDeletionHook) {
 	s.deletionHooks = append(s.deletionHooks, h)
 }
 
 // NewService wires a Service with its repository and token manager.
 func NewService(repo UserRepository, tokens *TokenManager) *Service {
-	return &Service{repo: repo, tokens: tokens}
+	return &Service{
+		repo: repo, tokens: tokens,
+		emailSender:     DevelopmentEmailSender{},
+		publicAppURL:    "http://localhost:5173",
+		verificationTTL: 24 * time.Hour,
+		resetTTL:        time.Hour,
+		reauthTTL:       5 * time.Minute,
+	}
+}
+
+type LifecycleConfig struct {
+	EmailSender     EmailSender
+	PublicAppURL    string
+	VerificationTTL time.Duration
+	ResetTTL        time.Duration
+	ReauthTTL       time.Duration
+}
+
+func (s *Service) ConfigureLifecycle(cfg LifecycleConfig) {
+	if cfg.EmailSender != nil {
+		s.emailSender = cfg.EmailSender
+	}
+	if strings.TrimSpace(cfg.PublicAppURL) != "" {
+		s.publicAppURL = strings.TrimRight(cfg.PublicAppURL, "/")
+	}
+	if cfg.VerificationTTL > 0 {
+		s.verificationTTL = cfg.VerificationTTL
+	}
+	if cfg.ResetTTL > 0 {
+		s.resetTTL = cfg.ResetTTL
+	}
+	if cfg.ReauthTTL > 0 {
+		s.reauthTTL = cfg.ReauthTTL
+	}
 }
 
 type ProviderAuthConfig struct {
@@ -62,9 +99,13 @@ func (s *Service) ConfigureProviderAuth(cfg ProviderAuthConfig) {
 	s.appleVerifier = cfg.AppleVerifier
 }
 
-// Register validates the input, hashes the password, persists the user, and
-// returns the created user together with a freshly minted JWT.
+// Register validates the input, persists an unverified password account, and
+// sends a single-use verification link. It intentionally returns no JWT.
 func (s *Service) Register(in RegisterInput) (*User, string, error) {
+	return s.RegisterContext(context.Background(), in)
+}
+
+func (s *Service) RegisterContext(ctx context.Context, in RegisterInput) (*User, string, error) {
 	email := normalizeEmail(in.Email)
 	if email == "" {
 		return nil, "", ErrEmailRequired
@@ -95,16 +136,24 @@ func (s *Service) Register(in RegisterInput) (*User, string, error) {
 		DisplayName:  in.DisplayName,
 		AvatarKey:    avatarKey,
 		PasswordHash: string(hash),
+		HasPassword:  true,
+		AuthVersion:  1,
 	}
 	if err := s.repo.Create(user); err != nil {
 		return nil, "", err // ErrEmailExists bubbles up unchanged
 	}
 
-	token, err := s.tokens.Generate(user.ID, user.Email)
+	rawToken, record, err := newLifecycleToken(user.ID, s.verificationTTL)
 	if err != nil {
 		return nil, "", err
 	}
-	return user, token, nil
+	if err := s.repo.SaveEmailVerificationToken(ctx, record); err != nil {
+		return nil, "", err
+	}
+	if err := s.emailSender.SendVerification(ctx, user.Email, s.publicAppURL+"/verify-email?token="+rawToken); err != nil {
+		return nil, "", err
+	}
+	return user, "", nil
 }
 
 // Login verifies credentials and returns the user plus a new JWT. Both an
@@ -122,62 +171,65 @@ func (s *Service) Login(email, password string) (*User, string, error) {
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		return nil, "", ErrInvalidCredentials
 	}
+	if !user.HasPassword {
+		return nil, "", ErrInvalidCredentials
+	}
+	if user.EmailVerifiedAt == nil {
+		return nil, "", ErrEmailVerificationRequired
+	}
 
-	token, err := s.tokens.Generate(user.ID, user.Email)
+	token, err := s.tokens.Generate(user.ID, user.Email, user.AuthVersion)
 	if err != nil {
 		return nil, "", err
 	}
 	return user, token, nil
 }
 
-// ChangePassword verifies currentPassword against the stored hash and, if it
-// matches, replaces it with a hash of newPassword. Existing JWTs are
-// unaffected (they carry no password state), so a compromised session is not
-// automatically invalidated by a password change alone.
+// ChangePassword verifies currentPassword, replaces the password hash, and
+// increments auth_version so all existing JWTs are invalidated.
 func (s *Service) ChangePassword(userID, currentPassword, newPassword string) error {
+	_, err := s.ChangePasswordAndRevoke(userID, currentPassword, newPassword)
+	return err
+}
+
+func (s *Service) ChangePasswordAndRevoke(userID, currentPassword, newPassword string) (string, error) {
 	user, err := s.repo.FindByID(userID)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if !user.HasPassword {
+		return "", ErrReauthenticationRequired
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
-		return ErrInvalidCredentials
+		return "", ErrInvalidCredentials
 	}
 	if len(newPassword) < minPasswordLength {
-		return ErrPasswordTooShort
+		return "", ErrPasswordTooShort
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return s.repo.UpdatePassword(userID, string(hash))
+	updated, err := s.repo.UpdatePasswordAndRevoke(userID, string(hash))
+	if err != nil {
+		return "", err
+	}
+	return s.tokens.Generate(updated.ID, updated.Email, updated.AuthVersion)
 }
 
-// DeleteAccount verifies password (a destructive action requires
-// re-confirming the credential, not just holding a live token) and then
-// soft-deletes the account. From that instant, FindByEmail/FindByID/ListUsers
-// all exclude the user, so RequireAuthWithUser rejects the caller's own token
-// on its very next request — there is no separate revocation step. Registered
-// deletion hooks then run best-effort so other domains (a public profile) stop
-// surfacing the account too; a hook failure does not undo the deletion, since
-// the safety property that matters (login and API access are gone) already
-// holds by the time hooks run.
-func (s *Service) DeleteAccount(ctx context.Context, userID, password string) error {
-	user, err := s.repo.FindByID(userID)
-	if err != nil {
-		return err
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return ErrInvalidCredentials
-	}
-	if err := s.repo.SoftDelete(userID); err != nil {
+// DeleteAccount consumes a short-lived, single-use reauthentication token,
+// completes all required external-store erasures, and then hard-deletes the
+// auth row and database-owned user data transactionally.
+func (s *Service) DeleteAccount(ctx context.Context, userID, reauthToken string) error {
+	if err := s.consumeReauthentication(ctx, userID, reauthToken); err != nil {
 		return err
 	}
 	for _, hook := range s.deletionHooks {
 		if err := hook.OnAccountDeleted(ctx, userID); err != nil {
-			slog.Warn("account_deletion_hook_failed", "user_id", userID, "error", err)
+			return err
 		}
 	}
-	return nil
+	return s.repo.DeleteAccount(ctx, userID)
 }
 
 func (s *Service) LoginWithGoogle(ctx context.Context, credential string) (*User, string, error) {
@@ -267,17 +319,11 @@ func (s *Service) createProviderUser(email, displayName, avatarKey string) (*Use
 	if avatarKey = strings.TrimSpace(avatarKey); avatarKey == "" {
 		avatarKey = "default"
 	}
-	randomPassword := make([]byte, 32)
-	if _, err := rand.Read(randomPassword); err != nil {
-		return nil, err
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(base64.RawURLEncoding.EncodeToString(randomPassword)), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, err
-	}
+	now := time.Now().UTC()
 	user := &User{
 		ID: uuid.NewString(), Email: email, DisplayName: displayName,
-		AvatarKey: avatarKey, PasswordHash: string(hash),
+		AvatarKey: avatarKey, HasPassword: false, EmailVerifiedAt: &now,
+		AuthVersion: 1,
 	}
 	if err := s.repo.Create(user); err != nil {
 		return nil, err
@@ -286,16 +332,226 @@ func (s *Service) createProviderUser(email, displayName, avatarKey string) (*Use
 }
 
 func (s *Service) issue(user *User) (*User, string, error) {
-	token, err := s.tokens.Generate(user.ID, user.Email)
+	token, err := s.tokens.Generate(user.ID, user.Email, user.AuthVersion)
 	if err != nil {
 		return nil, "", err
 	}
 	return user, token, nil
 }
 
+func newLifecycleToken(userID string, ttl time.Duration) (string, LifecycleToken, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", LifecycleToken{}, err
+	}
+	value := base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(value))
+	now := time.Now().UTC()
+	return value, LifecycleToken{
+		ID: uuid.NewString(), UserID: userID, TokenHash: hex.EncodeToString(sum[:]),
+		CreatedAt: now, ExpiresAt: now.Add(ttl),
+	}, nil
+}
+
+func hashLifecycleToken(raw string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Service) VerifyEmail(ctx context.Context, rawToken string) (*User, string, error) {
+	user, err := s.repo.VerifyEmailToken(ctx, hashLifecycleToken(rawToken), time.Now().UTC())
+	if err != nil {
+		return nil, "", err
+	}
+	return s.issue(user)
+}
+
+// ResendVerification intentionally returns no account-specific result. Unknown,
+// verified, and provider-only addresses all follow the same external response.
+func (s *Service) ResendVerification(ctx context.Context, email string) {
+	user, err := s.repo.FindByEmail(email)
+	if err != nil || !user.HasPassword || user.EmailVerifiedAt != nil {
+		return
+	}
+	raw, record, err := newLifecycleToken(user.ID, s.verificationTTL)
+	if err != nil {
+		return
+	}
+	if s.repo.SaveEmailVerificationToken(ctx, record) != nil {
+		return
+	}
+	_ = s.emailSender.SendVerification(ctx, user.Email, s.publicAppURL+"/verify-email?token="+raw)
+}
+
+// ForgotPassword is deliberately enumeration-safe: it performs work only for
+// eligible accounts but exposes no existence or delivery result to the caller.
+func (s *Service) ForgotPassword(ctx context.Context, email string) {
+	user, err := s.repo.FindByEmail(email)
+	if err != nil || !user.HasPassword {
+		return
+	}
+	raw, record, err := newLifecycleToken(user.ID, s.resetTTL)
+	if err != nil {
+		return
+	}
+	if s.repo.SavePasswordResetToken(ctx, record) != nil {
+		return
+	}
+	_ = s.emailSender.SendPasswordReset(ctx, user.Email, s.publicAppURL+"/reset-password?token="+raw)
+}
+
+func (s *Service) ResetPassword(ctx context.Context, rawToken, newPassword string) error {
+	if len(newPassword) < minPasswordLength {
+		return ErrPasswordTooShort
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = s.repo.ResetPasswordToken(ctx, hashLifecycleToken(rawToken), string(hash), time.Now().UTC())
+	return err
+}
+
+func (s *Service) RevokeSessions(userID string) error {
+	_, err := s.repo.IncrementAuthVersion(userID)
+	return err
+}
+
+func (s *Service) ReauthenticatePassword(ctx context.Context, userID, password string) (string, error) {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return "", err
+	}
+	if !user.HasPassword || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return "", ErrInvalidCredentials
+	}
+	return s.createReauthentication(ctx, userID)
+}
+
+func (s *Service) ReauthenticateProvider(
+	ctx context.Context,
+	userID string,
+	provider AuthProvider,
+	credential string,
+) (string, error) {
+	var verifier ProviderVerifier
+	switch provider {
+	case ProviderGoogle:
+		if !s.googleEnabled {
+			return "", ErrProviderDisabled
+		}
+		verifier = s.googleVerifier
+	case ProviderApple:
+		if !s.appleEnabled {
+			return "", ErrProviderDisabled
+		}
+		verifier = s.appleVerifier
+	default:
+		return "", ErrInvalidProviderToken
+	}
+	if verifier == nil {
+		return "", ErrProviderNotConfigured
+	}
+	claims, err := verifier.Verify(ctx, credential)
+	if err != nil || strings.TrimSpace(claims.Subject) == "" {
+		return "", ErrInvalidProviderToken
+	}
+	identity, err := s.repo.FindIdentity(provider, claims.Subject)
+	if err != nil || identity.UserID != userID {
+		return "", ErrInvalidProviderToken
+	}
+	return s.createReauthentication(ctx, userID)
+}
+
+func (s *Service) createReauthentication(ctx context.Context, userID string) (string, error) {
+	raw, record, err := newLifecycleToken(userID, s.reauthTTL)
+	if err != nil {
+		return "", err
+	}
+	if err := s.repo.SaveReauthenticationToken(ctx, record); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+func (s *Service) consumeReauthentication(ctx context.Context, userID, rawToken string) error {
+	if strings.TrimSpace(rawToken) == "" {
+		return ErrReauthenticationRequired
+	}
+	return s.repo.ConsumeReauthenticationToken(ctx, userID, hashLifecycleToken(rawToken), time.Now().UTC())
+}
+
+func (s *Service) SetFirstPassword(ctx context.Context, userID, rawToken, newPassword string) (string, error) {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return "", err
+	}
+	if user.HasPassword {
+		return "", ErrPasswordAlreadySet
+	}
+	if len(newPassword) < minPasswordLength {
+		return "", ErrPasswordTooShort
+	}
+	if err := s.consumeReauthentication(ctx, userID, rawToken); err != nil {
+		return "", err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	updated, err := s.repo.UpdatePasswordAndRevoke(userID, string(hash))
+	if err != nil {
+		return "", err
+	}
+	return s.tokens.Generate(updated.ID, updated.Email, updated.AuthVersion)
+}
+
+// EnsureBootstrapAdmin promotes the account with the given email to
+// RoleAdmin if it exists and isn't already an admin. It is a no-op when
+// email is empty or the account doesn't exist yet (e.g. it will register
+// later) — a safe, idempotent bootstrap mechanism that never runs through a
+// public API.
+func (s *Service) EnsureBootstrapAdmin(ctx context.Context, email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil
+	}
+	user, err := s.repo.FindByEmail(email)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil
+		}
+		return err
+	}
+	if user.Role == RoleAdmin {
+		return nil
+	}
+	_, err = s.repo.SetRole(ctx, user.ID, RoleAdmin)
+	return err
+}
+
 // UserByID fetches a user by id, used by the /me handler after auth.
 func (s *Service) UserByID(id string) (*User, error) {
 	return s.repo.FindByID(id)
+}
+
+// SetRole assigns a moderation role. Called only from the moderation admin
+// bootstrap path and RequireModerator-gated endpoints — never a public API.
+func (s *Service) SetRole(ctx context.Context, userID, role string) error {
+	_, err := s.repo.SetRole(ctx, userID, role)
+	return err
+}
+
+// Suspend applies (or, with a nil until, clears) a temporary suspension.
+func (s *Service) Suspend(ctx context.Context, userID string, until *time.Time, reason string) error {
+	_, err := s.repo.Suspend(ctx, userID, until, reason)
+	return err
+}
+
+// Ban permanently bans the account.
+func (s *Service) Ban(ctx context.Context, userID string, reason string) error {
+	_, err := s.repo.Ban(ctx, userID, reason)
+	return err
 }
 
 // ListUsers returns all users. It is consumed by the leaderboard module via the

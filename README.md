@@ -1,18 +1,31 @@
 # Alarvest
 
-Alarvest is a full-stack portfolio strategy tracker. Users manually enter
-holdings, follow percentage performance, compare privacy-filtered public
-strategies, earn benchmark badges, and connect with other users. It is a
-tracking and education product: it does not connect to a broker or place
-trades.
+Alarvest is a full-stack portfolio strategy tracker built around public,
+percentage-based comparison. Users manually enter holdings, follow percentage
+performance, compare strategies on leaderboards, earn benchmark badges, and
+connect with other users. Monetary privacy is preserved: public surfaces may
+show stock/ETF symbols, asset types, allocation percentages, and percentage
+returns, but never disclose account balances or other absolute monetary
+amounts. It is a tracking and education product: it does not connect to a
+broker or place trades.
 
 ## CI status
 
 [![CI](https://github.com/akimyonok2008/finance_app/actions/workflows/ci.yml/badge.svg)](https://github.com/akimyonok2008/finance_app/actions/workflows/ci.yml)
 
-Pushes and pull requests run formatting, backend tests (including PostgreSQL
-integration and race checks), vet, frontend lint, production build, and frontend
-tests. CI uses mock providers and never contacts live financial-data services.
+Pull requests to `main` and pushes to `main` run four required gates: backend
+format/test/race/vet, frontend locked install/lint/test/build, PostgreSQL
+migration and startup integration, and production-image Docker smoke tests. CI
+uses mock providers in explicit demo mode and never contacts live
+financial-data services.
+
+Repository administrators must apply the required branch rules and production
+environment approval described in
+[`.github/BRANCH_PROTECTION.md`](.github/BRANCH_PROTECTION.md). The manual
+release workflow re-runs all gates, verifies backup/restore, builds
+commit-SHA-tagged image artifacts, records their image IDs and performs no cloud
+deployment. The operational restore procedure is documented in
+[`docs/operations/backup-restore.md`](docs/operations/backup-restore.md).
 
 ## Cash-funded portfolio tracking
 
@@ -131,7 +144,8 @@ own dedicated, more constrained correction paths.
 
 ## Current product
 
-- Email/password authentication and optional Google Identity Services login
+- Verified email/password authentication, password recovery, revocable
+  sessions, and optional Google Identity Services login
 - One owner-only portfolio per user, with active positions, quantity edits,
   close history, archive snapshots, and base-currency summaries
 - Persistent ranked-performance state designed to neutralize the effect of
@@ -140,8 +154,8 @@ own dedicated, more constrained correction paths.
   and `1Y` leaderboards
 - Twenty permanent benchmark achievements and a seven-dimension Portfolio DNA
   profile
-- Opt-in public profiles, public allocation weights, Explore discovery,
-  following, mutual-follower friendships, and one-to-one messages
+- Public strategy profiles and percentage-based allocation views, Explore
+  discovery, following, mutual-follower friendships, and one-to-one messages
 - Compare and copy-weight templates that never execute trades
 - In-memory or PostgreSQL storage, optional Redis leaderboard caching, mock
   prices by default, and optional Twelve Data quotes
@@ -219,18 +233,59 @@ PRICE_PROVIDER=twelvedata
 TWELVE_DATA_API_KEY=replace-me
 ```
 
+Authentication email is logged as a one-time URL only in development. A
+production deployment with password registration enabled must configure
+`EMAIL_SENDER=smtp`, `PUBLIC_APP_URL`, and the `SMTP_*` settings; startup fails
+instead of silently accepting registrations that cannot be verified.
+
+## Authentication lifecycle
+
+Password registration creates an unverified account and does not return a JWT.
+The emailed `/verify-email` link consumes a hashed, expiring, single-use token
+and starts the first authenticated session. Login returns
+`email_verification_required` until verification succeeds; resend responses do
+not disclose whether an address exists.
+
+Forgot-password responses are also enumeration-safe. Reset tokens are random,
+stored only as SHA-256 hashes, expiring, single-use, and invalidated after a
+successful reset. Password reset increments the account's authentication
+version, immediately invalidating every older JWT.
+
+Every JWT carries the current authentication version, which protected requests
+compare with the live user row. Password changes increment the version and
+return a replacement JWT for the current browser; password resets, explicit
+session revocation, and deletion invalidate old sessions.
+
+Provider-only accounts have no generated password. They reauthenticate with
+the exact linked provider subject before setting their first password or
+deleting the account; an email match alone is never sufficient. Reauthentication
+tokens are short-lived, hashed, and single-use.
+
+Account deletion is coordinated across authentication, portfolios, cash,
+activities, ranked state/history, archives, achievements, profiles, social
+relationships, messages, competitions, provider-event applications, and
+leaderboard caches. PostgreSQL removes the user and cascading owned data in one
+transaction. Memory mode explicitly erases the corresponding in-process state.
+
 ## Privacy boundary
 
-Dashboard and Portfolio are owner-only and may contain quantities, prices,
-values, cost basis, and absolute gain/loss. Public surfaces use percentage
-performance and opt-in profile data. Public allocation views may expose symbols,
-asset types, percentage weights, exposure aggregates, concentration, DNA, and
-closed-position percentage returns; they do not expose quantities, monetary
-values, buy prices, cost basis, email, or brokerage identifiers.
+Alarvest protects **money amounts, not strategy visibility**. Dashboard and
+Portfolio are owner-only and may contain quantities, transaction prices,
+balances, market values, cost basis, and absolute gain/loss. Those fields must
+never appear on public surfaces.
 
-Leaderboard cards intentionally omit holdings. Composition is available only
-through an opted-in public profile or Explore. A user must make both their
-profile and weights public to appear in Explore.
+The public product is intentionally percentage based. Leaderboards, profiles,
+and Explore may show stock/ETF symbols, asset types, allocation percentages,
+ranked percentage returns, ranks, exposure aggregates, concentration, DNA, and
+closed-position percentage returns. This information makes strategies
+comparable without revealing how much money a user has invested.
+
+Current leaderboard cards focus on rank and percentage performance and link to
+profiles for visible composition. Symbols and percentage weights are not
+considered sensitive monetary data and may also be presented directly in
+leaderboard experiences. Public DTOs must continue to omit quantities,
+balances, monetary values, transaction prices, cost basis, absolute gain/loss,
+email, and brokerage identifiers.
 
 ## Performance semantics
 
@@ -326,12 +381,25 @@ portfolio mutation, and the live database calculation remains the fallback.
   previews but fails closed for verified awards until an adjusted/total-return
   feed (or raw prices plus dividend/split events) is wired in. Mixed-market
   calendars depend on common available dates.
-- Benchmark recipes are immutably versioned; dynamic 13F recipes select the
-  version publicly filed at or before the evaluation start (no look-ahead). The
+- Benchmarks use the deterministic `benchmark_virtual_portfolio_v2` methodology:
+  normalized NAV 100, carried virtual units, valuation before closing rebalance,
+  and explicit `buy_and_hold`, `daily_target_weight`, `periodic_monthly`, or
+  `filing_snapshot_hold` dispatch. Rebalancing preserves NAV and can never create
+  a return. The authoritative result is a full normalized index series.
+- Benchmark recipes are immutably versioned; dynamic 13F recipes activate a
+  newly public version on the next common trading date after
+  `publicly_known_at` (never the report-period end). The
   Berkshire baskets are the authoritative SEC 13F-HR filings for 2025 Q1 and
   2026 Q1 (CIK 0001067983), ~93–97% mapped coverage; older versions are
   preserved for reproducibility. They are proxy portfolios, not replicas of
   Berkshire's return.
+- Performance and Achievement share one ranked-snapshot alignment rule. Each
+  benchmark trading-date close selects the latest complete, active snapshot not
+  later than that UTC boundary; epoch changes, paused intervals, or missing
+  trusted points make comparison unavailable.
+- Verified mixed-currency benchmarks require historical valuation-date FX.
+  Same-currency evaluation uses an exact identity rate; no current/static FX
+  quote is substituted for missing history.
 - `BENCHMARK_AWARD_MODE` (`disabled`/`demo`/`verified_only`, default
   `verified_only`) governs awards independently of any API key. Mock/synthetic
   data is preview- or demo-only and can never create a verified permanent award;
@@ -346,7 +414,9 @@ portfolio mutation, and the live database calculation remains the fallback.
 - The FX provider is a static development provider for USD, TRY, EUR, and GBP.
 - Google login is optional. Apple authentication code is not routed, and no
   Apple frontend flow exists.
-- No token refresh/revocation, WebSockets, unread counts, notifications,
+- There is no refresh-token or device-management UI. Auth-version revocation
+  invalidates JWTs globally rather than maintaining a per-device session list.
+- No WebSockets, unread counts, notifications,
   moderation, message editing/deletion, or public unauthenticated social pages.
 - This repository is a personal-use prototype, not production or regulatory
   readiness.

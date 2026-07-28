@@ -58,6 +58,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  const replaceToken = useCallback((nextToken: string, userUpdates: Partial<AuthUser> = {}) => {
+    if (!user) return;
+    persist(nextToken, { ...user, ...userUpdates });
+  }, [persist, user]);
+
+  const acceptSession = useCallback((session: { token: string; user: AuthUser }) => {
+    persist(session.token, session.user);
+  }, [persist]);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
@@ -67,8 +76,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       login,
       loginWithGoogle,
       logout,
+      replaceToken,
+      acceptSession,
     }),
-    [user, token, login, loginWithGoogle, logout],
+    [user, token, login, loginWithGoogle, logout, replaceToken, acceptSession],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

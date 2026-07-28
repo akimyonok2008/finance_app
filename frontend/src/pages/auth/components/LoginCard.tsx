@@ -7,6 +7,7 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { Link, useNavigate } from "react-router-dom";
 
+import { AuthApiError } from "@/api/authApi";
 import { useAuth } from "@/auth/useAuth";
 import { AuthDivider } from "@/pages/auth/components/AuthDivider";
 import { AuthLoadingSpinner } from "@/pages/auth/components/AuthLoadingSpinner";
@@ -46,6 +47,10 @@ export function LoginCard() {
       toast.success("Welcome back");
       navigate("/dashboard");
     } catch (err) {
+      if (err instanceof AuthApiError && err.code === "email_verification_required") {
+        navigate("/verification-pending", { state: { email: values.email } });
+        return;
+      }
       setAuthError(err instanceof Error ? err.message : "Sign in failed");
     }
   };
@@ -115,6 +120,14 @@ export function LoginCard() {
               error={form.formState.errors.password?.message}
               disabled={isBusy}
             />
+            <div className="text-right">
+              <Link
+                to="/forgot-password"
+                className="text-xs font-medium text-violet-300 hover:text-violet-200"
+              >
+                Forgot password?
+              </Link>
+            </div>
           </div>
 
           {/* Auth-level error */}

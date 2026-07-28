@@ -61,7 +61,8 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetPublic(w http.ResponseWriter, r *http.Request) {
-	out, err := h.svc.GetPublic(r.Context(), chi.URLParam(r, "handle"))
+	callerID, _ := auth.UserIDFromContext(r.Context())
+	out, err := h.svc.GetPublic(r.Context(), callerID, chi.URLParam(r, "handle"))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httpx.WriteError(w, http.StatusNotFound, "profile not found")

@@ -170,15 +170,62 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
+func (h *Handler) HideMessage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok || userID == "" {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := h.svc.HideMessage(r.Context(), userID, chi.URLParam(r, "messageId")); err != nil {
+		writeSocialError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok || userID == "" {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var input MarkReadInput
+	if err := httpx.DecodeJSON(r, &input); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.svc.MarkRead(r.Context(), userID, chi.URLParam(r, "conversationId"), input.LastReadMessageID); err != nil {
+		writeSocialError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok || userID == "" {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	out, err := h.svc.UnreadCount(r.Context(), userID)
+	if err != nil {
+		writeSocialError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
 func writeSocialError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrInvalidHandle), errors.Is(err, ErrInvalidMessage), errors.Is(err, ErrMessageTooLong), errors.Is(err, ErrSelfFollow), errors.Is(err, ErrSelfDM):
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFriends):
 		httpx.WriteError(w, http.StatusForbidden, "You can only message mutual friends.")
+	case errors.Is(err, ErrInteractionBlocked):
+		httpx.WriteError(w, http.StatusForbidden, "This action isn't available for this account.")
 	case errors.Is(err, ErrForbidden):
 		httpx.WriteError(w, http.StatusForbidden, "forbidden")
-	case errors.Is(err, ErrNotFound), errors.Is(err, ErrConversationNotFound):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrConversationNotFound), errors.Is(err, ErrMessageNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "not found")
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, "social request failed")

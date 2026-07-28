@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,6 +92,52 @@ func NewInMemoryRepository() *InMemoryRepository {
 }
 
 func newPortfolioID() string { return uuid.NewString() }
+
+func (r *InMemoryRepository) OnAccountDeleted(_ context.Context, userID string) error {
+	r.mu.Lock()
+	portfolioID := r.userPortfolio[userID]
+	delete(r.userPortfolio, userID)
+	delete(r.aggregates, portfolioID)
+	delete(r.locks, portfolioID)
+	archives := r.archives[:0]
+	for _, snapshot := range r.archives {
+		if snapshot.UserID != userID {
+			archives = append(archives, snapshot)
+		}
+	}
+	r.archives = archives
+	for key := range r.archiveDays {
+		if strings.HasPrefix(key, portfolioID+"|") {
+			delete(r.archiveDays, key)
+		}
+	}
+	outbox := r.outbox[:0]
+	for _, event := range r.outbox {
+		if event.UserID != userID {
+			outbox = append(outbox, event)
+		} else {
+			delete(r.claimed, event.ID)
+		}
+	}
+	r.outbox = outbox
+	r.mu.Unlock()
+
+	r.auditMu.Lock()
+	for key, audit := range r.audits {
+		if audit.UserID == userID {
+			delete(r.audits, key)
+		}
+	}
+	auditLog := r.auditLog[:0]
+	for _, audit := range r.auditLog {
+		if audit.UserID != userID {
+			auditLog = append(auditLog, audit)
+		}
+	}
+	r.auditLog = auditLog
+	r.auditMu.Unlock()
+	return nil
+}
 
 // EnsureDefaultPortfolio creates the user's default portfolio on first access.
 // The user index is consulted and written under one lock, so concurrent first

@@ -83,11 +83,19 @@ func TestMiddleware_ValidTokenPassesAndSetsUserID(t *testing.T) {
 	assert.Equal(t, "user-42", rec.Body.String())
 }
 
-type fakeUserStore struct{ existing map[string]bool }
+type fakeUserStore struct {
+	existing map[string]bool
+	banned   map[string]bool
+}
 
 func (f fakeUserStore) UserByID(id string) (*User, error) {
 	if f.existing[id] {
-		return &User{ID: id}, nil
+		u := &User{ID: id, AuthVersion: 1}
+		if f.banned[id] {
+			now := time.Now().UTC()
+			u.BannedAt = &now
+		}
+		return u, nil
 	}
 	return nil, ErrUserNotFound
 }
@@ -121,6 +129,24 @@ func TestRequireAuthWithUser_ExistingUserPasses(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "user-1", rec.Body.String())
+}
+
+func TestRequireAuthWithUser_BannedUserReturns403(t *testing.T) {
+	tm := NewTokenManager("secret", time.Hour)
+	token, err := tm.Generate("user-banned", "banned@example.com")
+	require.NoError(t, err)
+
+	store := fakeUserStore{
+		existing: map[string]bool{"user-banned": true},
+		banned:   map[string]bool{"user-banned": true},
+	}
+	handler := RequireAuthWithUser(tm, store)(http.HandlerFunc(echoUserHandler))
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestTokenManager_GenerateAndParseRoundTrip(t *testing.T) {

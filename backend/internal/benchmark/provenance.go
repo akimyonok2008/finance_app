@@ -82,9 +82,8 @@ const (
 	AwardVerificationUnverified AwardVerification = "unverified"
 )
 
-// RebalancingPolicy documents how a recipe's legs are combined over time. The
-// engine implements daily_target_weight; other policies are recorded in
-// evidence as an explicit, honest label of the methodology used.
+// RebalancingPolicy selects the virtual-portfolio trading rule. Every declared
+// value is implemented explicitly; unknown values fail closed.
 type RebalancingPolicy string
 
 const (
@@ -117,6 +116,7 @@ type BenchmarkDataMetadata struct {
 	ProviderRequestID string    `json:"provider_request_id,omitempty"`
 	ProviderDataset   string    `json:"provider_dataset,omitempty"`
 	CurrencyTreatment string    `json:"currency_treatment,omitempty"`
+	Currency          string    `json:"currency,omitempty"`
 }
 
 // BenchmarkPriceSeries couples a symbol's points with their provenance. The
@@ -169,19 +169,42 @@ type RecipeVersionMetadata struct {
 // BenchmarkEvaluationMetadata summarizes the provenance of a complete,
 // multi-leg benchmark evaluation. Quality is the weakest leg.
 type BenchmarkEvaluationMetadata struct {
-	Providers            []string    `json:"providers"`
-	Symbols              []string    `json:"symbols"`
-	PriceTypes           []PriceType `json:"price_types"`
-	Quality              DataQuality `json:"quality"`
-	IsSynthetic          bool        `json:"is_synthetic"`
-	UsedStaleData        bool        `json:"used_stale_data"`
-	IncludesDividends    bool        `json:"includes_dividends"`
-	IncludesSplits       bool        `json:"includes_splits"`
-	AllSeriesAdjusted    bool        `json:"all_series_adjusted"`
-	AllSeriesTotalReturn bool        `json:"all_series_total_return"`
-	CorpActionsKnown     bool        `json:"corp_actions_known"`
-	CurrencyTreatment    string      `json:"currency_treatment,omitempty"`
-	EvaluatedAt          time.Time   `json:"evaluated_at"`
+	Providers            []string                 `json:"providers"`
+	Symbols              []string                 `json:"symbols"`
+	PriceTypes           []PriceType              `json:"price_types"`
+	Quality              DataQuality              `json:"quality"`
+	IsSynthetic          bool                     `json:"is_synthetic"`
+	UsedStaleData        bool                     `json:"used_stale_data"`
+	IncludesDividends    bool                     `json:"includes_dividends"`
+	IncludesSplits       bool                     `json:"includes_splits"`
+	AllSeriesAdjusted    bool                     `json:"all_series_adjusted"`
+	AllSeriesTotalReturn bool                     `json:"all_series_total_return"`
+	CorpActionsKnown     bool                     `json:"corp_actions_known"`
+	CurrencyTreatment    string                   `json:"currency_treatment,omitempty"`
+	BaseCurrency         string                   `json:"base_currency,omitempty"`
+	MethodologyVersion   string                   `json:"methodology_version,omitempty"`
+	ActivatedVersions    []ActivatedRecipeVersion `json:"activated_recipe_versions,omitempty"`
+	RebalanceDates       []string                 `json:"rebalance_dates,omitempty"`
+	FXProvider           string                   `json:"fx_provider,omitempty"`
+	FXPoints             []FXEvidencePoint        `json:"fx_points,omitempty"`
+	EvaluatedAt          time.Time                `json:"evaluated_at"`
+}
+
+type ActivatedRecipeVersion struct {
+	RecipeID        string            `json:"recipe_id"`
+	VersionID       string            `json:"version_id"`
+	ActivationDate  string            `json:"activation_date"`
+	Policy          RebalancingPolicy `json:"policy"`
+	Components      []AssetAllocation `json:"components"`
+	PubliclyKnownAt string            `json:"publicly_known_at,omitempty"`
+}
+
+type FXEvidencePoint struct {
+	From     string  `json:"from"`
+	To       string  `json:"to"`
+	Date     string  `json:"date"`
+	Rate     float64 `json:"rate"`
+	Provider string  `json:"provider"`
 }
 
 // BenchmarkReturnResult is the full outcome of a benchmark evaluation: the
@@ -193,19 +216,26 @@ type BenchmarkReturnResult struct {
 	RecipeVersion    RecipeVersionMetadata       `json:"recipe_version"`
 	DataMetadata     BenchmarkEvaluationMetadata `json:"data_metadata"`
 	Fingerprint      string                      `json:"fingerprint"`
+	StartNAV         float64                     `json:"start_nav"`
+	EndNAV           float64                     `json:"end_nav"`
+	Points           []IndexPoint                `json:"points"`
 }
 
 // Typed benchmark-data-quality errors. The achievement layer distinguishes
 // these so progress can explain the exact integrity failure instead of a
 // generic "unavailable".
 var (
-	ErrAdjustedDataUnavailable  = errors.New("benchmark: adjusted/total-return data unavailable")
-	ErrTotalReturnUnavailable   = errors.New("benchmark: total-return data unavailable")
-	ErrSyntheticDataNotAllowed  = errors.New("benchmark: synthetic data not allowed for this evaluation")
-	ErrStaleBenchmarkData       = errors.New("benchmark: benchmark data is stale")
-	ErrIncompleteSeries         = errors.New("benchmark: incomplete price series")
-	ErrInvalidBenchmarkSeries   = errors.New("benchmark: invalid price series")
-	ErrRecipeVersionUnavailable = errors.New("benchmark: no recipe version valid for the evaluated period")
-	ErrRecipeMappingCoverage    = errors.New("benchmark: recipe mapping coverage below threshold")
-	ErrCircularRecipe           = errors.New("benchmark: circular recipe reference")
+	ErrAdjustedDataUnavailable      = errors.New("benchmark: adjusted/total-return data unavailable")
+	ErrTotalReturnUnavailable       = errors.New("benchmark: total-return data unavailable")
+	ErrSyntheticDataNotAllowed      = errors.New("benchmark: synthetic data not allowed for this evaluation")
+	ErrStaleBenchmarkData           = errors.New("benchmark: benchmark data is stale")
+	ErrIncompleteSeries             = errors.New("benchmark: incomplete price series")
+	ErrInvalidBenchmarkSeries       = errors.New("benchmark: invalid price series")
+	ErrRecipeVersionUnavailable     = errors.New("benchmark: no recipe version valid for the evaluated period")
+	ErrRecipeMappingCoverage        = errors.New("benchmark: recipe mapping coverage below threshold")
+	ErrCircularRecipe               = errors.New("benchmark: circular recipe reference")
+	ErrUnsupportedRebalancingPolicy = errors.New("benchmark: unsupported rebalancing policy")
+	ErrHistoricalFXUnavailable      = errors.New("benchmark: historical FX unavailable")
+	ErrCurrencyTreatmentUnavailable = errors.New("benchmark: currency treatment unavailable")
+	ErrBenchmarkDateAlignment       = errors.New("benchmark: benchmark and portfolio dates could not be aligned")
 )

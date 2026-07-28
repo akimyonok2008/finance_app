@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,8 +15,20 @@ import (
 func newTestService() *Service {
 	repo := NewInMemoryUserRepository()
 	tm := NewTokenManager("test-secret", time.Hour)
-	return NewService(repo, tm)
+	svc := NewService(repo, tm)
+	svc.ConfigureLifecycle(LifecycleConfig{EmailSender: autoVerifySender{repo: repo}})
+	return svc
 }
+
+type autoVerifySender struct{ repo UserRepository }
+
+func (s autoVerifySender) SendVerification(ctx context.Context, _ string, verificationURL string) error {
+	token := verificationURL[strings.LastIndex(verificationURL, "=")+1:]
+	_, err := s.repo.VerifyEmailToken(ctx, hashLifecycleToken(token), time.Now().UTC())
+	return err
+}
+
+func (autoVerifySender) SendPasswordReset(context.Context, string, string) error { return nil }
 
 func validInput() RegisterInput {
 	return RegisterInput{
@@ -25,7 +38,7 @@ func validInput() RegisterInput {
 	}
 }
 
-func TestRegister_ValidUserCreatesUserAndReturnsToken(t *testing.T) {
+func TestRegister_ValidUserCreatesUnverifiedUserWithoutToken(t *testing.T) {
 	svc := newTestService()
 
 	user, token, err := svc.Register(validInput())
@@ -34,7 +47,7 @@ func TestRegister_ValidUserCreatesUserAndReturnsToken(t *testing.T) {
 	require.NotNil(t, user)
 	assert.NotEmpty(t, user.ID)
 	assert.Equal(t, "AlphaWolf_91", user.DisplayName)
-	assert.NotEmpty(t, token, "a JWT token must be returned")
+	assert.Empty(t, token, "registration must not create an authenticated session")
 }
 
 func TestRegister_DuplicateEmailFails(t *testing.T) {
@@ -341,7 +354,7 @@ func TestDeleteAccount_WrongPasswordFails(t *testing.T) {
 	user, _, err := svc.Register(validInput())
 	require.NoError(t, err)
 
-	err = svc.DeleteAccount(context.Background(), user.ID, "NotTheRealPassword")
+	_, err = svc.ReauthenticatePassword(context.Background(), user.ID, "NotTheRealPassword")
 
 	assert.ErrorIs(t, err, ErrInvalidCredentials)
 	_, err = svc.UserByID(user.ID)
@@ -358,7 +371,9 @@ func TestDeleteAccount_RemovesAccountFromEveryLookup(t *testing.T) {
 	user, _, err := svc.Register(validInput())
 	require.NoError(t, err)
 
-	err = svc.DeleteAccount(context.Background(), user.ID, "StrongPassword123")
+	reauth, err := svc.ReauthenticatePassword(context.Background(), user.ID, "StrongPassword123")
+	require.NoError(t, err)
+	err = svc.DeleteAccount(context.Background(), user.ID, reauth)
 	require.NoError(t, err)
 
 	_, _, loginErr := svc.Login("user@example.com", "StrongPassword123")
@@ -391,21 +406,25 @@ func TestDeleteAccount_RunsRegisteredHooks(t *testing.T) {
 	hook := &recordingDeletionHook{}
 	svc.RegisterDeletionHook(hook)
 
-	err = svc.DeleteAccount(context.Background(), user.ID, "StrongPassword123")
+	reauth, err := svc.ReauthenticatePassword(context.Background(), user.ID, "StrongPassword123")
+	require.NoError(t, err)
+	err = svc.DeleteAccount(context.Background(), user.ID, reauth)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{user.ID}, hook.called)
 }
 
-func TestDeleteAccount_HookFailureDoesNotUndoDeletion(t *testing.T) {
+func TestDeleteAccount_HookFailureBlocksDeletion(t *testing.T) {
 	svc := newTestService()
 	user, _, err := svc.Register(validInput())
 	require.NoError(t, err)
 	svc.RegisterDeletionHook(&recordingDeletionHook{err: errors.New("downstream unavailable")})
 
-	err = svc.DeleteAccount(context.Background(), user.ID, "StrongPassword123")
+	reauth, err := svc.ReauthenticatePassword(context.Background(), user.ID, "StrongPassword123")
+	require.NoError(t, err)
+	err = svc.DeleteAccount(context.Background(), user.ID, reauth)
 
-	require.NoError(t, err, "the account deletion itself must succeed even if a best-effort hook fails")
+	require.Error(t, err)
 	_, err = svc.UserByID(user.ID)
-	assert.ErrorIs(t, err, ErrUserNotFound)
+	assert.NoError(t, err)
 }

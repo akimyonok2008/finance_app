@@ -19,10 +19,20 @@ var (
 	// vague so callers cannot distinguish "unknown email" from "wrong password".
 	ErrInvalidCredentials = errors.New("invalid email or password")
 	// ErrUserNotFound is returned by the repository when a lookup misses.
-	ErrUserNotFound            = errors.New("user not found")
-	ErrIdentityNotFound        = errors.New("auth identity not found")
-	ErrProviderDisabled        = errors.New("this sign-in method is not enabled")
-	ErrProviderNotConfigured   = errors.New("this sign-in method is not configured")
-	ErrInvalidProviderToken    = errors.New("provider sign-in failed")
-	ErrProviderEmailUnverified = errors.New("provider email is not verified")
+	ErrUserNotFound              = errors.New("user not found")
+	ErrIdentityNotFound          = errors.New("auth identity not found")
+	ErrProviderDisabled          = errors.New("this sign-in method is not enabled")
+	ErrProviderNotConfigured     = errors.New("this sign-in method is not configured")
+	ErrInvalidProviderToken      = errors.New("provider sign-in failed")
+	ErrProviderEmailUnverified   = errors.New("provider email is not verified")
+	ErrEmailVerificationRequired = errors.New("email verification required")
+	ErrInvalidLifecycleToken     = errors.New("invalid or expired token")
+	ErrReauthenticationRequired  = errors.New("reauthentication required")
+	ErrPasswordAlreadySet        = errors.New("account already has a password")
+	// ErrAccountBanned is returned when a permanently banned account attempts
+	// to use any authenticated API.
+	ErrAccountBanned = errors.New("this account has been banned")
+	// ErrAccountSuspended is returned when a suspended account attempts a
+	// restricted action (messaging, following, creating public content).
+	ErrAccountSuspended = errors.New("this account is temporarily suspended")
 )

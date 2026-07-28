@@ -96,6 +96,7 @@ export type BenchmarkComparison = {
   data_quality_status: string;
   currency_treatment?: string;
   is_synthetic?: boolean;
+  verification_status: "verified" | "preview" | "unavailable";
 };
 
 /**

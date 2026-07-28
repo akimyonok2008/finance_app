@@ -3,6 +3,11 @@ export type AuthUser = {
   email: string;
   display_name: string;
   avatar_key?: string;
+  email_verified: boolean;
+  has_password: boolean;
+  role?: "user" | "moderator" | "admin";
+  suspended_until?: string;
+  suspension_reason?: string;
 };
 
 export type AuthSession = {
@@ -23,4 +28,6 @@ export type AuthContextValue = {
   login: (values: LoginFormValues) => Promise<void>;
   loginWithGoogle: (credential: string) => Promise<void>;
   logout: () => void;
+  replaceToken: (token: string, userUpdates?: Partial<AuthUser>) => void;
+  acceptSession: (session: AuthSession) => void;
 };

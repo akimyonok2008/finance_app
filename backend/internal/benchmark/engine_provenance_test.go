@@ -22,7 +22,7 @@ func newFakeProvider(returns map[string]float64) *fakeSeriesProvider {
 		base: BenchmarkDataMetadata{
 			Provider: "feed", ProviderMode: "real", PriceType: PriceTypeAdjustedClose,
 			IsAdjusted: true, IsTotalReturn: true, IncludesDividends: true, IncludesSplits: true,
-			CorpActionsKnown: true, Quality: DataQualityVerified,
+			CorpActionsKnown: true, Quality: DataQualityVerified, Currency: "USD",
 		},
 	}
 }
@@ -166,7 +166,7 @@ func TestDuplicateSymbolsMerged(t *testing.T) {
 	store, err := NewVersionedRecipeStore([]BenchmarkRecipeVersion{
 		{RecipeID: "DUP", VersionID: "DUP_v1", PubliclyKnownAt: epoch, EffectiveFrom: epoch,
 			Components: []AssetAllocation{{Symbol: "SPY", Weight: 0.5}, {Symbol: "SPY", Weight: 0.5}},
-			SourceType: "static_model"},
+			SourceType: "static_model", RebalancingPolicy: RebalanceBuyAndHold},
 	})
 	if err != nil {
 		t.Fatalf("store: %v", err)

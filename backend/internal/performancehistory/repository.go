@@ -159,6 +159,18 @@ func (r *InMemoryRepository) Protect(_ context.Context, ids ...string) error {
 	return nil
 }
 
+func (r *InMemoryRepository) OnAccountDeleted(_ context.Context, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, record := range r.records {
+		if record.UserID == userID {
+			delete(r.keys, snapshotKey(record.Snapshot))
+			delete(r.records, id)
+		}
+	}
+	return nil
+}
+
 func (r *InMemoryRepository) Compact(_ context.Context, before time.Time) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

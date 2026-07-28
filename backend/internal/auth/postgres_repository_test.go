@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -163,4 +164,60 @@ func TestPostgresUserRepository_SoftDeleteIsNotReapplicable(t *testing.T) {
 	// longer matches), so it must report the same not-found error rather than
 	// silently succeeding a second time.
 	assert.ErrorIs(t, repo.SoftDelete(u.ID), ErrUserNotFound)
+}
+
+func TestPostgresLifecycleTokensAreSingleUse(t *testing.T) {
+	repo := NewPostgresUserRepository(testPool(t))
+	user := newPGUser("Lifecycle")
+	require.NoError(t, repo.Create(user))
+	now := time.Now().UTC()
+	raw := "postgres-verification-token"
+	require.NoError(t, repo.SaveEmailVerificationToken(context.Background(), LifecycleToken{
+		ID: uuid.NewString(), UserID: user.ID, TokenHash: hashLifecycleToken(raw),
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+
+	verified, err := repo.VerifyEmailToken(context.Background(), hashLifecycleToken(raw), now)
+	require.NoError(t, err)
+	assert.NotNil(t, verified.EmailVerifiedAt)
+	_, err = repo.VerifyEmailToken(context.Background(), hashLifecycleToken(raw), now)
+	assert.ErrorIs(t, err, ErrInvalidLifecycleToken)
+}
+
+func TestPostgresDeleteAccountCascadesOwnedData(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresUserRepository(pool)
+	user := newPGUser("Delete Cascade")
+	require.NoError(t, repo.Create(user))
+	portfolioID := uuid.NewString()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO portfolios (id, user_id, name, currency)
+		VALUES ($1, $2, 'Default', 'USD')
+	`, portfolioID, user.ID)
+	require.NoError(t, err)
+	require.NoError(t, repo.CreateIdentity(&AuthIdentity{
+		ID: uuid.NewString(), UserID: user.ID, Provider: ProviderGoogle,
+		ProviderSubject: uuid.NewString(), Email: user.Email, EmailVerified: true,
+	}))
+	require.NoError(t, repo.SavePasswordResetToken(context.Background(), LifecycleToken{
+		ID: uuid.NewString(), UserID: user.ID,
+		TokenHash: hashLifecycleToken("delete-reset"), CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	require.NoError(t, repo.DeleteAccount(context.Background(), user.ID))
+
+	for table := range map[string]bool{
+		"users": true, "portfolios": true, "auth_identities": true,
+		"password_reset_tokens": true,
+	} {
+		var count int
+		column := "user_id"
+		if table == "users" {
+			column = "id"
+		}
+		require.NoError(t, pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM `+table+` WHERE `+column+` = $1`, user.ID).Scan(&count))
+		assert.Zero(t, count, table)
+	}
 }

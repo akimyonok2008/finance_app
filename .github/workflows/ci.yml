@@ -1,16 +1,100 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   backend:
-    name: Backend
+    name: Backend / format, test, race, vet
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_ENV: test
+      STORAGE_PROVIDER: memory
+      PRICE_PROVIDER: mock
+      ENABLE_REAL_MARKET_DATA: "false"
+      ENABLE_BACKGROUND_WORKERS: "false"
+      ENABLE_QUOTE_REFRESH_WORKER: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Check Go formatting
+        working-directory: backend
+        run: test -z "$(gofmt -l .)"
+
+      - name: Test backend
+        working-directory: backend
+        run: |
+          set -o pipefail
+          go test -count=1 ./... 2>&1 | tee go-test.log
+
+      - name: Run race detector
+        working-directory: backend
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./... 2>&1 | tee go-race.log
+
+      - name: Vet backend
+        working-directory: backend
+        run: |
+          set -o pipefail
+          go vet ./... 2>&1 | tee go-vet.log
+
+      - name: Upload backend failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-failure-logs
+          path: backend/*.log
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend / lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  postgres-integration:
+    name: PostgreSQL / migrations and startup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16
@@ -27,8 +111,10 @@ jobs:
           --health-retries 12
     env:
       DATABASE_URL_TEST: postgres://postgres:postgres@localhost:5432/finance_app_test?sslmode=disable
+      POSTGRES_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      UPGRADE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/finance_app_upgrade_verify?sslmode=disable
       APP_ENV: test
-      STORAGE_PROVIDER: memory
+      STORAGE_PROVIDER: postgres
       PRICE_PROVIDER: mock
       ENABLE_REAL_MARKET_DATA: "false"
       ENABLE_BACKGROUND_WORKERS: "false"
@@ -49,58 +135,61 @@ jobs:
           done
           exit 1
 
-      - name: Check Go formatting
+      - name: Validate migration history
+        run: scripts/ci/validate-migrations.sh
+
+      - name: Build API
+        working-directory: backend
+        run: go build -o ../.ci-finance-api ./cmd/api
+
+      - name: Migrate empty database and verify startup
+        env:
+          API_BINARY: ${{ github.workspace }}/.ci-finance-api
+          DATABASE_URL: ${{ env.DATABASE_URL_TEST }}
+          PORT: "18082"
+        run: scripts/ci/check-api-startup.sh
+
+      - name: Test PostgreSQL integrations and migration atomicity
         working-directory: backend
         run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "$unformatted"
+          set -o pipefail
+          go test -count=1 ./... 2>&1 | tee postgres-test.log
+
+      - name: Upgrade oldest supported schema fixture twice
+        env:
+          API_BINARY: ${{ github.workspace }}/.ci-finance-api
+        run: scripts/ci/verify-upgrade.sh
+
+      - name: Refuse startup when PostgreSQL is unavailable
+        env:
+          APP_ENV: test
+          STORAGE_PROVIDER: postgres
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:1/unavailable?sslmode=disable&connect_timeout=1
+          PRICE_PROVIDER: mock
+          PORT: "18084"
+        run: |
+          if timeout 15 ./.ci-finance-api >startup-failure.log 2>&1; then
+            echo "API unexpectedly started without PostgreSQL"
             exit 1
           fi
+          grep -q "postgres connection failed" startup-failure.log
 
-      - name: Test backend and PostgreSQL integrations
-        working-directory: backend
-        run: go test ./... 2>&1 | tee go-test.log
-
-      - name: Run race detector
-        working-directory: backend
-        run: go test -race ./... 2>&1 | tee go-race.log
-
-      - name: Vet backend
-        working-directory: backend
-        run: go vet ./... 2>&1 | tee go-vet.log
-
-      - name: Upload backend failure logs
+      - name: Upload PostgreSQL failure logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-failure-logs
-          path: backend/*.log
+          name: postgres-integration-failure-logs
+          path: |
+            backend/postgres-test.log
+            *-start.log
+            startup-failure.log
           if-no-files-found: ignore
 
-  frontend:
-    name: Frontend
+  docker-smoke:
+    name: Docker / production smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Lint frontend
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Test frontend
-        working-directory: frontend
-        run: npm test
+      - name: Build and smoke-test production images
+        run: scripts/ci/docker-smoke.sh

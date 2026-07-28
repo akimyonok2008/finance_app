@@ -29,6 +29,7 @@ func RequireAuth(tm *TokenManager) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
+			ctx = context.WithValue(ctx, authVersionKey, claims.AuthVersion)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -49,14 +50,30 @@ func RequireAuthWithUser(tm *TokenManager, users UserExistenceChecker) func(http
 		// Wrap next with the existence check, then apply the base token middleware.
 		checked := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id, _ := UserIDFromContext(r.Context())
-			if _, err := users.UserByID(id); err != nil {
+			user, err := users.UserByID(id)
+			if err != nil || user.AuthVersion != claimsFromContext(r.Context()) {
 				writeError(w, http.StatusUnauthorized, ErrInvalidToken.Error())
+				return
+			}
+			// Banned users cannot use any authenticated API at all. Moderation
+			// state is re-read from the database on every request (via
+			// UserByID above), so a ban takes effect immediately for
+			// already-issued tokens without a second revocation mechanism.
+			if user.IsBanned() {
+				writeError(w, http.StatusForbidden, ErrAccountBanned.Error())
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 		return base(checked)
 	}
+}
+
+const authVersionKey contextKey = "auth.authVersion"
+
+func claimsFromContext(ctx context.Context) int {
+	version, _ := ctx.Value(authVersionKey).(int)
+	return version
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"
