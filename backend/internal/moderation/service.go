@@ -72,19 +72,15 @@ func (s *Service) ReportUser(ctx context.Context, reporterID, reportedUserID, ca
 	if !ValidCategories[category] {
 		return ReportResponse{}, ErrInvalidCategory
 	}
-	dup, err := s.repo.HasOpenDuplicate(ctx, reporterID, reportedUserID, nil)
-	if err != nil {
-		return ReportResponse{}, err
-	}
-	if dup {
-		return ReportResponse{}, ErrDuplicateReport
-	}
 	rep := Report{
 		ID: uuid.NewString(), ReporterUserID: reporterID, ReportedUserID: reportedUserID,
 		Category: category, Explanation: strings.TrimSpace(explanation),
 		Status: StatusOpen, CreatedAt: s.now(),
 	}
-	rep, err = s.repo.CreateReport(ctx, rep)
+	// CreateUserReport re-checks the open-duplicate constraint inside its own
+	// atomic write, closing the check-then-insert race a separate
+	// HasOpenDuplicate call followed by CreateReport would leave open.
+	rep, err := s.repo.CreateUserReport(ctx, rep)
 	if err != nil {
 		return ReportResponse{}, err
 	}
@@ -108,31 +104,25 @@ func (s *Service) ReportMessage(ctx context.Context, reporterID, messageID, cate
 		return ReportResponse{}, ErrSelfReport
 	}
 	msgID := messageID
-	dup, err := s.repo.HasOpenDuplicate(ctx, reporterID, evidence.SenderID, &msgID)
-	if err != nil {
-		return ReportResponse{}, err
-	}
-	if dup {
-		return ReportResponse{}, ErrDuplicateReport
-	}
 	rep := Report{
 		ID: uuid.NewString(), ReporterUserID: reporterID, ReportedUserID: evidence.SenderID,
 		MessageID: &msgID, Category: category, Explanation: strings.TrimSpace(explanation),
 		Status: StatusOpen, CreatedAt: s.now(),
 	}
-	rep, err = s.repo.CreateReport(ctx, rep)
-	if err != nil {
-		return ReportResponse{}, err
-	}
 	convID := evidence.ConversationID
 	senderID := evidence.SenderID
 	text := evidence.Text
 	createdAt := evidence.CreatedAt
-	if err := s.repo.SaveEvidence(ctx, Evidence{
+	ev := Evidence{
 		ID: uuid.NewString(), ReportID: rep.ID, MessageID: &msgID, ConversationID: &convID,
 		SenderID: &senderID, ParticipantIDs: evidence.ParticipantIDs, MessageText: &text,
 		MessageCreatedAt: &createdAt, ReportCreatedAt: rep.CreatedAt,
-	}); err != nil {
+	}
+	// CreateMessageReport writes the report and its evidence snapshot in one
+	// atomic operation: if the evidence write fails, the report insert is
+	// rolled back too, so no evidence-less report is ever left behind.
+	rep, err = s.repo.CreateMessageReport(ctx, rep, ev)
+	if err != nil {
 		return ReportResponse{}, err
 	}
 	return ReportResponse{ReportID: rep.ID, Status: rep.Status}, nil
@@ -190,6 +180,11 @@ func (s *Service) GetReportDetail(ctx context.Context, id string) (ReportDetail,
 // is idempotent: it returns the existing resolution unchanged rather than
 // erroring or double-applying the action.
 func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRole UserView, reportID string, in ResolveInput) (ReportDetail, error) {
+	// An initial (unlocked) read so we can fail fast on a missing report and
+	// on invalid input before ever taking the row lock in repo.ResolveReport.
+	// The authoritative status/permission checks are re-evaluated against
+	// the locked row inside the builder below, so a race between this read
+	// and the lock cannot cause a double-apply.
 	rep, err := s.repo.GetReport(ctx, reportID)
 	if err != nil {
 		return ReportDetail{}, ErrNotFound
@@ -222,58 +217,74 @@ func (s *Service) ResolveReport(ctx context.Context, moderatorID string, actorRo
 		return ReportDetail{}, ErrInvalidAction
 	}
 
-	if err := s.applyAction(ctx, moderatorID, rep, in); err != nil {
-		return ReportDetail{}, err
+	build := func(ctx context.Context, current Report) (ResolveWrite, error) {
+		now := s.now()
+		updated := current
+		updated.Status = status
+		updated.Decision = decision
+		updated.ModeratorNotes = strings.TrimSpace(in.ModeratorNotes)
+		updated.ReviewedAt = &now
+		reviewer := moderatorID
+		updated.ReviewerID = &reviewer
+
+		var expiresAt, suspendUntil *time.Time
+		var notification *Notification
+		switch in.ActionType {
+		case ActionWarning:
+			notification = &Notification{
+				ID: uuid.NewString(), RecipientID: current.ReportedUserID, Type: NotifModerationWarning,
+				Payload: map[string]string{"reason": in.Reason}, DedupeKey: "moderation:" + current.ID, CreatedAt: now,
+			}
+		case ActionTemporarySuspension:
+			days := in.SuspensionDays
+			if days <= 0 {
+				days = 3
+			}
+			until := now.AddDate(0, 0, days)
+			expiresAt = &until
+			suspendUntil = &until
+			notification = &Notification{
+				ID: uuid.NewString(), RecipientID: current.ReportedUserID, Type: NotifAccountSuspended,
+				Payload:   map[string]string{"reason": in.Reason, "until": until.Format(time.RFC3339)},
+				DedupeKey: "moderation:" + current.ID, CreatedAt: now,
+			}
+		case ActionPermanentBan, ActionContentRemoval, ActionNoAction:
+			// No notification for these today; content removal is applied
+			// via ExternalApply below.
+		}
+
+		action := ModerationAction{
+			ID: uuid.NewString(), ModeratorID: moderatorID, TargetUserID: current.ReportedUserID,
+			ReportID: &current.ID, ActionType: in.ActionType, Reason: strings.TrimSpace(in.Reason),
+			CreatedAt: now, ExpiresAt: expiresAt,
+		}
+
+		actionType := in.ActionType
+		messageID := current.MessageID
+		externalApply := func(ctx context.Context) error {
+			switch actionType {
+			case ActionTemporarySuspension:
+				return s.users.Suspend(ctx, current.ReportedUserID, suspendUntil, in.Reason)
+			case ActionPermanentBan:
+				return s.users.Ban(ctx, current.ReportedUserID, in.Reason)
+			case ActionContentRemoval:
+				if messageID != nil && s.remover != nil {
+					return s.remover.RemoveMessage(ctx, moderatorID, *messageID)
+				}
+			}
+			return nil
+		}
+
+		return ResolveWrite{
+			Report: updated, Action: action, ActionType: actionType, SuspendUntil: suspendUntil,
+			Notification: notification, ExternalApply: externalApply,
+		}, nil
 	}
 
-	now := s.now()
-	rep.Status = status
-	rep.Decision = decision
-	rep.ModeratorNotes = strings.TrimSpace(in.ModeratorNotes)
-	rep.ReviewedAt = &now
-	reviewer := moderatorID
-	rep.ReviewerID = &reviewer
-	if _, err := s.repo.UpdateReport(ctx, rep); err != nil {
+	if _, _, err := s.repo.ResolveReport(ctx, reportID, build); err != nil {
 		return ReportDetail{}, err
 	}
 	return s.GetReportDetail(ctx, reportID)
-}
-
-func (s *Service) applyAction(ctx context.Context, moderatorID string, rep Report, in ResolveInput) error {
-	var expiresAt *time.Time
-	switch in.ActionType {
-	case ActionWarning:
-		s.notify(ctx, rep.ReportedUserID, NotifModerationWarning, "moderation:"+rep.ID, map[string]string{"reason": in.Reason})
-	case ActionTemporarySuspension:
-		days := in.SuspensionDays
-		if days <= 0 {
-			days = 3
-		}
-		until := s.now().AddDate(0, 0, days)
-		expiresAt = &until
-		if err := s.users.Suspend(ctx, rep.ReportedUserID, &until, in.Reason); err != nil {
-			return err
-		}
-		s.notify(ctx, rep.ReportedUserID, NotifAccountSuspended, "moderation:"+rep.ID, map[string]string{"reason": in.Reason, "until": until.Format(time.RFC3339)})
-	case ActionPermanentBan:
-		if err := s.users.Ban(ctx, rep.ReportedUserID, in.Reason); err != nil {
-			return err
-		}
-	case ActionContentRemoval:
-		if rep.MessageID != nil && s.remover != nil {
-			if err := s.remover.RemoveMessage(ctx, moderatorID, *rep.MessageID); err != nil {
-				return err
-			}
-		}
-	case ActionNoAction:
-		// nothing to apply
-	}
-	action := ModerationAction{
-		ID: uuid.NewString(), ModeratorID: moderatorID, TargetUserID: rep.ReportedUserID,
-		ReportID: &rep.ID, ActionType: in.ActionType, Reason: strings.TrimSpace(in.Reason),
-		CreatedAt: s.now(), ExpiresAt: expiresAt,
-	}
-	return s.repo.RecordAction(ctx, action)
 }
 
 func (s *Service) notify(ctx context.Context, recipientID, notifType, dedupeKey string, payload map[string]string) {
@@ -323,9 +334,24 @@ func (s *Service) MarkAllNotificationsRead(ctx context.Context, recipientID stri
 	return s.repo.MarkAllNotificationsRead(ctx, recipientID)
 }
 
+// deletedAccountLabel is rendered in moderator-facing API responses in place
+// of a user id whose live account FK has been nulled out (see
+// migration 0028_moderation_retention.sql). The report/action row itself,
+// and its evidence, are retained regardless.
+const deletedAccountLabel = "Deleted account"
+
+func displayUserID(id string, deleted bool) string {
+	if deleted {
+		return deletedAccountLabel
+	}
+	return id
+}
+
 func summaryFromReport(rep Report) ReportSummary {
 	return ReportSummary{
-		ID: rep.ID, ReporterUserID: rep.ReporterUserID, ReportedUserID: rep.ReportedUserID,
-		MessageID: rep.MessageID, Category: rep.Category, Status: rep.Status, CreatedAt: rep.CreatedAt,
+		ID:             rep.ID,
+		ReporterUserID: displayUserID(rep.ReporterUserID, rep.ReporterDeleted),
+		ReportedUserID: displayUserID(rep.ReportedUserID, rep.ReportedDeleted),
+		MessageID:      rep.MessageID, Category: rep.Category, Status: rep.Status, CreatedAt: rep.CreatedAt,
 	}
 }

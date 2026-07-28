@@ -17,4 +17,9 @@ var (
 	// It is deliberately generic so callers cannot distinguish the reason.
 	ErrInteractionBlocked = errors.New("interaction_blocked")
 	ErrMessageNotFound    = errors.New("message not found")
+	// ErrSafetyUnavailable is returned when the safety/block store could not
+	// be queried. Callers must fail closed (server error) rather than
+	// returning unfiltered or empty results, since either could leak a
+	// blocked relationship.
+	ErrSafetyUnavailable = errors.New("safety_unavailable")
 )

@@ -12,6 +12,10 @@ var (
 	ErrNotFound     = errors.New("profile not found")
 	ErrHandleExists = errors.New("handle already exists")
 	ErrInvalid      = errors.New("invalid profile")
+	// ErrSafetyUnavailable is returned when the safety/block store could not
+	// be queried while filtering a profile/Explore result. Callers must fail
+	// closed (server error) rather than fall back to an unfiltered view.
+	ErrSafetyUnavailable = errors.New("safety_unavailable")
 
 	handlePattern = regexp.MustCompile(`^[a-z0-9_-]{3,30}$`)
 	invalidHandle = regexp.MustCompile(`[^a-z0-9_-]+`)

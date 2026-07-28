@@ -481,6 +481,10 @@ type repositories struct {
 	instruments  instrument.Repository
 	safety       safety.Repository
 	moderation   moderation.Repository
+	// blockCoordinator is non-nil only for the postgres provider, where it
+	// performs block-creation + follow-removal as a single transaction. The
+	// memory provider falls back to safety.Service's non-coordinator path.
+	blockCoordinator safety.BlockCoordinator
 }
 
 // authAdminAdapter bridges auth.Service to the moderation.UserAdmin and
@@ -613,18 +617,19 @@ func main() {
 			os.Exit(1)
 		}
 		repos = repositories{
-			users:        auth.NewPostgresUserRepository(pool),
-			portfolio:    portfolio.NewPostgresRepository(pool),
-			performance:  performance.NewPostgresStateReader(pool),
-			history:      performancehistory.NewPostgresRepository(pool),
-			competitions: competitions.NewPostgresCompetitionRepository(pool),
-			achievements: achRepo,
-			profiles:     profile.NewPostgresRepository(pool),
-			marketdata:   marketdata.NewPostgresRepository(pool),
-			social:       social.NewPostgresRepository(pool),
-			instruments:  instrument.NewPostgresRepository(pool),
-			safety:       safety.NewPostgresRepository(pool),
-			moderation:   moderation.NewPostgresRepository(pool),
+			users:            auth.NewPostgresUserRepository(pool),
+			portfolio:        portfolio.NewPostgresRepository(pool),
+			performance:      performance.NewPostgresStateReader(pool),
+			history:          performancehistory.NewPostgresRepository(pool),
+			competitions:     competitions.NewPostgresCompetitionRepository(pool),
+			achievements:     achRepo,
+			profiles:         profile.NewPostgresRepository(pool),
+			marketdata:       marketdata.NewPostgresRepository(pool),
+			social:           social.NewPostgresRepository(pool),
+			instruments:      instrument.NewPostgresRepository(pool),
+			safety:           safety.NewPostgresRepository(pool),
+			moderation:       moderation.NewPostgresRepository(pool),
+			blockCoordinator: safety.NewPostgresBlockCoordinator(pool),
 		}
 		corpActionStorer = corpactions.NewPostgresStore(pool)
 		incomeStorer = income.NewPostgresStore(pool)
@@ -854,6 +859,9 @@ func main() {
 	safetySvc := safety.NewService(repos.safety, repos.profiles)
 	safetySvc.SetFollowRemover(socialSvc)
 	safetySvc.SetUserStatusProvider(authAdminAdapter{authSvc})
+	if repos.blockCoordinator != nil {
+		safetySvc.SetBlockCoordinator(repos.blockCoordinator)
+	}
 
 	moderationSvc := moderation.NewService(repos.moderation, authAdminAdapter{authSvc})
 	moderationSvc.SetMessageAccessor(moderationMessageAdapter{socialSvc})

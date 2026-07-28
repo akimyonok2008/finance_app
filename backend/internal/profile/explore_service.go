@@ -33,7 +33,10 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 		return ExploreResponse{}, err
 	}
 	ranks, fallback := s.exploreRankings(ctx, filter.Timeframe)
-	blocked := s.blockedSet(ctx, callerID)
+	blocked, err := s.blockedSet(ctx, callerID)
+	if err != nil {
+		return ExploreResponse{}, err
+	}
 
 	all := make([]scoredCard, 0, len(profiles))
 	allCards := make([]PublicProfile, 0, len(profiles))

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ardakimyonok/finance_app/internal/pairlock"
 	"github.com/ardakimyonok/finance_app/internal/profile"
 )
 
@@ -88,6 +89,11 @@ func (s *Service) Follow(ctx context.Context, userID, handle string) (FollowStat
 	if target.UserID == userID {
 		return FollowState{}, ErrSelfFollow
 	}
+	// Serialize against a concurrent Block for the same pair (see
+	// pairlock and safety.Service.Block) so a follow can never be created
+	// after a block has been checked-and-passed but before it commits.
+	unlock := pairlock.Lock(userID, target.UserID)
+	defer unlock()
 	if err := s.checkInteraction(ctx, userID, target.UserID); err != nil {
 		return FollowState{}, err
 	}
@@ -122,15 +128,19 @@ func (s *Service) FollowState(ctx context.Context, userID, handle string) (Follo
 	return s.followStateForTarget(ctx, userID, target)
 }
 
-func (s *Service) blockedSet(ctx context.Context, userID string) map[string]bool {
+// blockedSet returns the caller's block-set. It fails closed: if the
+// underlying safety store cannot be queried, callers must treat this as a
+// hard error rather than silently proceeding with an unfiltered (or empty)
+// set, since either could leak a blocked user into a list/Explore surface.
+func (s *Service) blockedSet(ctx context.Context, userID string) (map[string]bool, error) {
 	if s.blocked == nil {
-		return nil
+		return nil, nil
 	}
 	set, err := s.blocked.BlockedPairUserIDs(ctx, userID)
 	if err != nil {
-		return nil
+		return nil, ErrSafetyUnavailable
 	}
-	return set
+	return set, nil
 }
 
 func (s *Service) Following(ctx context.Context, userID string) (UserListResponse, error) {
@@ -138,7 +148,10 @@ func (s *Service) Following(ctx context.Context, userID string) (UserListRespons
 	if err != nil {
 		return UserListResponse{}, err
 	}
-	blocked := s.blockedSet(ctx, userID)
+	blocked, err := s.blockedSet(ctx, userID)
+	if err != nil {
+		return UserListResponse{}, err
+	}
 	out := make([]FriendItem, 0, len(items))
 	for _, item := range items {
 		if blocked[item.FollowingUserID] {
@@ -156,7 +169,10 @@ func (s *Service) Followers(ctx context.Context, userID string) (UserListRespons
 	if err != nil {
 		return UserListResponse{}, err
 	}
-	blocked := s.blockedSet(ctx, userID)
+	blocked, err := s.blockedSet(ctx, userID)
+	if err != nil {
+		return UserListResponse{}, err
+	}
 	out := make([]FriendItem, 0, len(items))
 	for _, item := range items {
 		if blocked[item.FollowerUserID] {
@@ -174,7 +190,10 @@ func (s *Service) Friends(ctx context.Context, userID string) (FriendsResponse, 
 	if err != nil {
 		return FriendsResponse{}, err
 	}
-	blocked := s.blockedSet(ctx, userID)
+	blocked, err := s.blockedSet(ctx, userID)
+	if err != nil {
+		return FriendsResponse{}, err
+	}
 	out := make([]FriendItem, 0, len(items))
 	for _, item := range items {
 		if blocked[item.UserID] {
@@ -192,7 +211,10 @@ func (s *Service) Conversations(ctx context.Context, userID string) (Conversatio
 	if err != nil {
 		return ConversationsResponse{}, err
 	}
-	blocked := s.blockedSet(ctx, userID)
+	blocked, err := s.blockedSet(ctx, userID)
+	if err != nil {
+		return ConversationsResponse{}, err
+	}
 	out := make([]ConversationSummary, 0, len(items))
 	for _, c := range items {
 		other := c.ParticipantA

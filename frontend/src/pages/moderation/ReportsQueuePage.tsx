@@ -17,7 +17,14 @@ import {
 } from "@/hooks/useSafety";
 import type { ResolveReportInput } from "@/types/safety";
 
-const STATUS_FILTERS = ["open", "under_review", "resolved_action_taken", "resolved_no_action", ""] as const;
+const ALL_STATUSES = "all";
+const STATUS_FILTERS = [
+  ALL_STATUSES,
+  "open",
+  "under_review",
+  "resolved_action_taken",
+  "resolved_no_action",
+] as const;
 
 /** Minimal moderator/admin report queue: list, evidence view, resolution
  * form. Not shown to ordinary users — gated on the current account's role. */
@@ -25,7 +32,7 @@ export function ReportsQueuePage() {
   const { user } = useAuth();
   const [status, setStatus] = useState<string>("open");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const reports = useModerationReports(status || undefined);
+  const reports = useModerationReports(status === ALL_STATUSES ? undefined : status);
   const detail = useModerationReport(selectedId);
   const resolve = useResolveReport();
 
@@ -50,8 +57,8 @@ export function ReportsQueuePage() {
             </SelectTrigger>
             <SelectContent>
               {STATUS_FILTERS.map((s) => (
-                <SelectItem key={s || "all"} value={s}>
-                  {s || "all"}
+                <SelectItem key={s} value={s}>
+                  {s}
                 </SelectItem>
               ))}
             </SelectContent>

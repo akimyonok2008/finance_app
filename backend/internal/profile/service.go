@@ -102,15 +102,19 @@ type Service struct {
 // out of public profile views and Explore results.
 func (s *Service) SetBlockedFilter(b BlockedPairSource) { s.blocked = b }
 
-func (s *Service) blockedSet(ctx context.Context, userID string) map[string]bool {
+// blockedSet returns the caller's block-set. It fails closed: a safety-store
+// error is returned to the caller rather than silently treated as "no
+// blocks", since that would leak blocked users into public profile views and
+// Explore.
+func (s *Service) blockedSet(ctx context.Context, userID string) (map[string]bool, error) {
 	if s.blocked == nil || userID == "" {
-		return nil
+		return nil, nil
 	}
 	set, err := s.blocked.BlockedPairUserIDs(ctx, userID)
 	if err != nil {
-		return nil
+		return nil, ErrSafetyUnavailable
 	}
-	return set
+	return set, nil
 }
 
 // SetRankedPerformanceProvider attaches the ranked-performance source used for
@@ -290,8 +294,14 @@ func (s *Service) GetPublic(ctx context.Context, callerID, handle string) (Publi
 	if err != nil {
 		return PublicProfile{}, err
 	}
-	if callerID != "" && callerID != p.UserID && s.blockedSet(ctx, callerID)[p.UserID] {
-		return PublicProfile{}, ErrNotFound
+	if callerID != "" && callerID != p.UserID {
+		blocked, err := s.blockedSet(ctx, callerID)
+		if err != nil {
+			return PublicProfile{}, err
+		}
+		if blocked[p.UserID] {
+			return PublicProfile{}, ErrNotFound
+		}
 	}
 	return s.publicProjection(ctx, p), nil
 }

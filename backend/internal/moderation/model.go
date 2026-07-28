@@ -29,20 +29,37 @@ const (
 	StatusResolvedNoAction    = "resolved_no_action"
 )
 
-// Report is the persisted report record.
+// Report is the persisted report record. The reporter_user_id/reported_user_id
+// FK columns are nullable at the DB layer: a future hard account deletion
+// sets the FK to NULL (see migration 0028_moderation_retention.sql) rather
+// than cascading the report away. Report surfaces that as ReporterUserID/
+// ReportedUserID == "" (a UUID is never empty, so this is an unambiguous
+// sentinel) rather than as a pointer, to avoid touching every call site that
+// already treats these as plain strings; ReporterDeleted/ReportedDeleted
+// spell the same fact out explicitly for callers that want it.
+// reporterSubjectID/reportedSubjectID are opaque, non-reversible per-user
+// ids assigned by that same migration's moderation_subject_ids table; they
+// let a moderator recognize "the same reporter/target across multiple
+// reports" even after the live user_id has been nulled out. They are
+// deliberately unexported so no JSON encoding of Report (there is none
+// today, but this guards against one being added later) can ever leak them.
 type Report struct {
-	ID             string
-	ReporterUserID string
-	ReportedUserID string
-	MessageID      *string
-	Category       string
-	Explanation    string
-	Status         string
-	CreatedAt      time.Time
-	ReviewedAt     *time.Time
-	ReviewerID     *string
-	Decision       string
-	ModeratorNotes string
+	ID                string
+	ReporterUserID    string
+	ReportedUserID    string
+	ReporterDeleted   bool
+	ReportedDeleted   bool
+	reporterSubjectID string
+	reportedSubjectID string
+	MessageID         *string
+	Category          string
+	Explanation       string
+	Status            string
+	CreatedAt         time.Time
+	ReviewedAt        *time.Time
+	ReviewerID        *string
+	Decision          string
+	ModeratorNotes    string
 }
 
 // Evidence is an immutable snapshot captured at report-creation time. It
@@ -75,15 +92,23 @@ var ValidActionTypes = map[string]bool{
 }
 
 // ModerationAction is an append-only audit record. Never overwritten.
+// ModeratorID/TargetUserID follow the same "" == deleted-account sentinel as
+// Report (see its comment); moderatorSubjectID/targetSubjectID are the
+// opaque per-user ids from moderation_subject_ids, unexported so they can
+// never leak through a JSON encoding of this type.
 type ModerationAction struct {
-	ID           string
-	ModeratorID  string
-	TargetUserID string
-	ReportID     *string
-	ActionType   string
-	Reason       string
-	CreatedAt    time.Time
-	ExpiresAt    *time.Time
+	ID                 string
+	ModeratorID        string
+	TargetUserID       string
+	ModeratorDeleted   bool
+	TargetDeleted      bool
+	moderatorSubjectID string
+	targetSubjectID    string
+	ReportID           *string
+	ActionType         string
+	Reason             string
+	CreatedAt          time.Time
+	ExpiresAt          *time.Time
 }
 
 // --- request/response DTOs -------------------------------------------------

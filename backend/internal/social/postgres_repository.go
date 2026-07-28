@@ -18,13 +18,50 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	return &PostgresRepository{pool: pool}
 }
 
+// Follow inserts a follow relationship. It takes a Postgres advisory
+// transaction lock keyed on the unordered (follower, following) pair —
+// the same key ordering safety.PostgresBlockCoordinator uses — so a
+// concurrent block cannot commit between this method's block check and its
+// insert. It fails closed: if a block exists in either direction, the
+// follow is rejected rather than silently created.
 func (r *PostgresRepository) Follow(ctx context.Context, followerUserID, followingUserID string) error {
-	_, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	lo, hi := followerUserID, followingUserID
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, lo, hi); err != nil {
+		return err
+	}
+
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM user_blocks
+			WHERE (blocker_user_id = $1 AND blocked_user_id = $2)
+			   OR (blocker_user_id = $2 AND blocked_user_id = $1)
+		)
+	`, followerUserID, followingUserID).Scan(&blocked); err != nil {
+		return err
+	}
+	if blocked {
+		return ErrInteractionBlocked
+	}
+
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO follows (follower_user_id, following_user_id)
 		VALUES ($1, $2)
 		ON CONFLICT (follower_user_id, following_user_id) DO NOTHING
-	`, followerUserID, followingUserID)
-	return mapPGError(err)
+	`, followerUserID, followingUserID); err != nil {
+		return mapPGError(err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) Unfollow(ctx context.Context, followerUserID, followingUserID string) error {
