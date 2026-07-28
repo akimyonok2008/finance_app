@@ -8,6 +8,23 @@ import type { PortfolioActivity } from "@/types/portfolio";
 import { cn } from "@/utils/cn";
 import { formatMoney } from "@/utils/formatMoney";
 import { gainLossColor } from "@/utils/gainLoss";
+import { decimalToChartNumber } from "@/utils/decimal";
+
+/**
+ * This timeline groups multiple immutable activity legs (e.g. buy + fee +
+ * automatic funding deposit) into one human summary line — there is no
+ * single backend field for "purchase cost including fee" at the group
+ * level, so some client-side combination is unavoidable here. Per the
+ * decimal-string migration policy this is treated as a display boundary
+ * (like a chart): each authoritative decimal-string field is converted to a
+ * `number` via `decimalToChartNumber` right where it is read, the derived
+ * numbers are used only to build display labels/amounts (never sent back to
+ * the API or used for reconciliation), and non-finite conversions fall back
+ * to 0 so the UI degrades gracefully instead of crashing.
+ */
+function amountOf(value: string | undefined): number {
+  return decimalToChartNumber(value) ?? 0;
+}
 
 export function ActivityTimeline({ activities }: { activities: PortfolioActivity[] }) {
   return (
@@ -157,29 +174,32 @@ function summarize(items: PortfolioActivity[], primary: PortfolioActivity) {
     return {
       title: `${reinvested.symbol ?? "Investment"} dividend reinvested`,
       details: [
-        { label: "Income", amount: reinvested.net_amount ?? reinvested.gross_amount, currency, tone: "positive" as Tone },
+        { label: "Income", amount: amountOf(reinvested.net_amount ?? reinvested.gross_amount), currency, tone: "positive" as Tone },
         { label: "Shares added", text: `${buy?.quantity ?? reinvested.quantity ?? 0}`, tone: "neutral" as Tone },
       ],
     };
   }
   if (sell) {
-    const proceeds = sell.net_amount ?? Math.max(0, sell.gross_amount - fee);
+    const netProceeds = sell.net_amount !== undefined ? amountOf(sell.net_amount) : null;
+    const proceeds = netProceeds ?? Math.max(0, amountOf(sell.gross_amount) - fee);
+    const realizedPnl =
+      sell.realized_gain_loss_base !== undefined ? amountOf(sell.realized_gain_loss_base) : undefined;
     return {
-      title: `Sold ${sell.quantity ?? 0} ${sell.symbol ?? ""} at ${formatMoney(sell.unit_price ?? 0, currency)}`,
+      title: `Sold ${sell.quantity ?? 0} ${sell.symbol ?? ""} at ${formatMoney(sell.unit_price ?? "0", currency)}`,
       headline: { label: "Net proceeds", amount: proceeds, currency, tone: "neutral" as Tone },
       details: [
-        ...(sell.realized_gain_loss_base !== undefined
-          ? [{ label: "Realized P&L", amount: sell.realized_gain_loss_base, currency: "USD", tone: sell.realized_gain_loss_base >= 0 ? "positive" as Tone : "negative" as Tone }]
+        ...(realizedPnl !== undefined
+          ? [{ label: "Realized P&L", amount: realizedPnl, currency: "USD", tone: realizedPnl >= 0 ? "positive" as Tone : "negative" as Tone }]
           : []),
         ...(fee > 0 ? [{ label: "Transaction fee", amount: fee, currency, tone: "negative" as Tone }] : []),
       ],
     };
   }
   if (buy) {
-    const total = buy.gross_amount + fee;
+    const total = amountOf(buy.gross_amount) + fee;
     const existingCash = Math.max(0, total - funding);
     return {
-      title: `Bought ${buy.quantity ?? 0} ${buy.symbol ?? ""} at ${formatMoney(buy.unit_price ?? 0, currency)}`,
+      title: `Bought ${buy.quantity ?? 0} ${buy.symbol ?? ""} at ${formatMoney(buy.unit_price ?? "0", currency)}`,
       headline: { label: "Purchase cost", amount: total, currency, tone: "neutral" as Tone },
       details: [
         ...(funding > 0 ? [{ label: "Used existing cash", amount: existingCash, currency, tone: "neutral" as Tone }] : []),
@@ -189,7 +209,7 @@ function summarize(items: PortfolioActivity[], primary: PortfolioActivity) {
     };
   }
 
-  const amount = primary.net_amount ?? primary.gross_amount;
+  const amount = amountOf(primary.net_amount ?? primary.gross_amount);
   const semantic = semanticFor(primary, amount);
   return {
     title: primary.activity_type.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()),
@@ -214,7 +234,7 @@ function semanticFor(activity: PortfolioActivity, amount: number): { label: stri
     return { label: "Income", tone: "positive" };
   }
   if (activity.realized_gain_loss_base !== undefined) {
-    return { label: "Realized P&L", tone: activity.realized_gain_loss_base >= 0 ? "positive" : "negative" };
+    return { label: "Realized P&L", tone: amountOf(activity.realized_gain_loss_base) >= 0 ? "positive" : "negative" };
   }
   return { label: "Amount", tone: amount < 0 ? "negative" : "neutral" };
 }
@@ -223,6 +243,6 @@ function isFee(activity: PortfolioActivity) {
   return activity.activity_type.includes("fee");
 }
 
-function sum(items: PortfolioActivity[], value: (item: PortfolioActivity) => number) {
-  return items.reduce((total, item) => total + Math.abs(value(item)), 0);
+function sum(items: PortfolioActivity[], value: (item: PortfolioActivity) => string | undefined) {
+  return items.reduce((total, item) => total + Math.abs(amountOf(value(item))), 0);
 }

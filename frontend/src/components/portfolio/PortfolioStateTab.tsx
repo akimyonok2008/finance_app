@@ -24,6 +24,7 @@ import { cn } from "@/utils/cn";
 import { formatMoney } from "@/utils/formatMoney";
 import { formatPercent } from "@/utils/formatPercent";
 import { gainLossColor } from "@/utils/gainLoss";
+import { decimalToChartNumber } from "@/utils/decimal";
 
 type Props = {
   view: StateView;
@@ -178,17 +179,19 @@ function AllocationView() {
 
   const rows = useMemo(() => {
     const positions = data?.positions ?? [];
-    const total = positions.reduce(
-      (sum, position) => sum + (position.current_value_base ?? 0),
-      0,
-    );
+    // Allocation weight is a derived display-only aggregate (no backend field
+    // for "share of holdings value") — decimalToChartNumber is the sanctioned
+    // conversion boundary for this kind of presentation math.
+    const valueOf = (position: (typeof positions)[number]) =>
+      decimalToChartNumber(position.current_value_base) ?? 0;
+    const total = positions.reduce((sum, position) => sum + valueOf(position), 0);
     if (total <= 0) return [];
     return positions
       .map((position) => ({
         symbol: position.symbol,
         assetType: position.asset_type,
-        value: position.current_value_base ?? 0,
-        weight: ((position.current_value_base ?? 0) / total) * 100,
+        value: valueOf(position),
+        weight: (valueOf(position) / total) * 100,
       }))
       .sort((a, b) => b.weight - a.weight);
   }, [data]);

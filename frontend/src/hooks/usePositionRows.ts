@@ -3,21 +3,23 @@ import { useMemo } from "react";
 import { usePositions } from "@/hooks/usePositions";
 import { usePortfolioSummary } from "@/hooks/usePortfolioSummary";
 import type { Position, PositionSummary } from "@/types/portfolio";
+import type { DecimalString } from "@/utils/decimal";
 
 /**
  * A raw position (the editable source of truth) enriched with pricing fields
  * from the summary when available. Edit/delete always use {@link Position.id}.
  */
 export type PositionRow = Position & {
-  current_price?: number;
+  current_price?: DecimalString;
   current_price_currency?: string;
-  current_value?: number;
-  gain_loss?: number;
+  current_value?: DecimalString;
+  gain_loss?: DecimalString;
+  /** presentation-only float64, not part of the money contract */
   gain_loss_percentage?: number;
-  cost_basis?: number;
-  local_current_value?: number;
-  local_gain_loss?: number;
-  local_cost_basis?: number;
+  cost_basis?: DecimalString;
+  local_current_value?: DecimalString;
+  local_gain_loss?: DecimalString;
+  local_cost_basis?: DecimalString;
   base_currency?: string;
   quote_provider?: string;
   quote_provider_status?: string;

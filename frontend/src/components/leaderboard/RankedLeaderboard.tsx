@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import type { LeaderboardEntry } from "@/types/leaderboard";
 import { cn } from "@/utils/cn";
 import { formatPercent } from "@/utils/formatPercent";
+import { compareDecimal, decimalToChartNumber } from "@/utils/decimal";
 
 function rankTone(rank: number): string {
   if (rank === 1) return "border-amber-300/30 bg-amber-300/10 text-amber-200";
@@ -56,11 +57,13 @@ export function RankedLeaderboard({
             </div>
             <div className="flex items-center justify-between sm:block sm:text-right">
               <span className="text-xs text-zinc-600 sm:hidden">Index</span>
-              <span className="font-mono text-sm font-medium tabular-nums text-sky-100/75">{entry.ranked_index.toFixed(2)}</span>
+              <span className="font-mono text-sm font-medium tabular-nums text-sky-100/75">
+                {decimalToChartNumber(entry.ranked_index)?.toFixed(2) ?? "—"}
+              </span>
             </div>
             <div className="flex items-center justify-between sm:block sm:text-right">
               <span className="text-xs text-zinc-600 sm:hidden">Return</span>
-              <span className={cn("font-mono text-sm font-semibold tabular-nums", entry.ranked_return_percentage >= 0 ? "text-emerald-400" : "text-rose-400")}>
+              <span className={cn("font-mono text-sm font-semibold tabular-nums", compareDecimal(entry.ranked_return_percentage, "0") >= 0 ? "text-emerald-400" : "text-rose-400")}>
                 {formatPercent(entry.ranked_return_percentage)}
               </span>
             </div>

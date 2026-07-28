@@ -13,6 +13,14 @@ import type {
   SellPositionInput,
   SellPreview,
 } from "@/types/portfolio";
+import type { DecimalString } from "@/utils/decimal";
+import {
+  assertShape,
+  cashResponseSchema,
+  sellPreviewSchema,
+  activityMutationResponseSchema,
+  portfolioSummaryShapeSchema,
+} from "@/api/schemas";
 
 export function getPositions(signal?: AbortSignal): Promise<Position[]> {
   return apiRequest<Position[]>("/portfolio/positions", { signal });
@@ -40,7 +48,10 @@ export function getClosedPositions(signal?: AbortSignal): Promise<ClosedPosition
 export function getPortfolioSummary(
   signal?: AbortSignal,
 ): Promise<PortfolioSummary> {
-  return apiRequest<PortfolioSummary>("/portfolio/summary", { signal });
+  return apiRequest<PortfolioSummary>("/portfolio/summary", { signal }).then((data) => {
+    assertShape(portfolioSummaryShapeSchema, data, "GET /portfolio/summary");
+    return data;
+  });
 }
 
 export function createPosition(
@@ -71,6 +82,9 @@ export function closePosition(input: SellPositionInput): Promise<ActivityMutatio
     method: "POST",
     body: input,
     idempotencyKey: crypto.randomUUID(),
+  }).then((data) => {
+    assertShape(activityMutationResponseSchema, data, "POST /portfolio/sells");
+    return data;
   });
 }
 
@@ -78,11 +92,17 @@ export function previewSale(input: SellPositionInput): Promise<SellPreview> {
   return apiRequest<SellPreview>("/portfolio/sells/preview", {
     method: "POST",
     body: input,
+  }).then((data) => {
+    assertShape(sellPreviewSchema, data, "POST /portfolio/sells/preview");
+    return data;
   });
 }
 
 export function getCash(signal?: AbortSignal): Promise<CashResponse> {
-  return apiRequest<CashResponse>("/portfolio/cash", { signal });
+  return apiRequest<CashResponse>("/portfolio/cash", { signal }).then((data) => {
+    assertShape(cashResponseSchema, data, "GET /portfolio/cash");
+    return data;
+  });
 }
 
 export function getActivities(signal?: AbortSignal): Promise<PortfolioActivity[]> {
@@ -110,7 +130,7 @@ export function deletePosition(id: string): Promise<void> {
 export type FeeInput = {
   type: "management_fee" | "custody_fee" | "other_fee";
   currency: string;
-  amount: number;
+  amount: DecimalString;
   symbol?: string;
   description?: string;
   effective_at?: string;
@@ -169,11 +189,18 @@ export type IncomeCorrectionInput = {
     | "actual_fee"
     | "mark_not_received"
     | "actual_reinvestment";
-  actual_net?: number;
-  actual_withholding?: number;
-  actual_fee?: number;
-  actual_reinvestment_quantity?: number;
-  actual_reinvestment_price?: number;
+  /**
+   * Verified against internal/portfolio/handler_activities.go: this request
+   * struct decodes ActualNet/ActualWithholding/ActualFee as `money.Amount`
+   * and ActualReinvestmentQty/Price as `money.Quantity`/`money.Price` — all
+   * decimal strings on the wire — even though the income *read* model
+   * (IncomeEventView above) is still float64 (untouched by this migration).
+   */
+  actual_net?: DecimalString;
+  actual_withholding?: DecimalString;
+  actual_fee?: DecimalString;
+  actual_reinvestment_quantity?: DecimalString;
+  actual_reinvestment_price?: DecimalString;
 };
 
 export function getIncomeEvents(signal?: AbortSignal): Promise<IncomeEventView[]> {

@@ -6,6 +6,18 @@ import type {
   PortfolioValueHistory,
   RankedPerformanceHistory,
 } from "@/types/performance";
+import { assertShape, rankedPerformanceHistorySchema } from "@/api/schemas";
+import { z } from "zod";
+
+/**
+ * `available: false` responses omit `points`/`starting_index`/etc entirely
+ * (see RankedPerformanceHistory's docstring), so validate leniently when
+ * unavailable and strictly (full decimal-string shape) when available.
+ */
+const rankedHistoryResponseSchema = z.union([
+  z.object({ available: z.literal(false) }).passthrough(),
+  rankedPerformanceHistorySchema,
+]);
 
 /**
  * The performance layer's own summary DTO. The economic breakdown and the
@@ -30,7 +42,10 @@ export function getPerformanceHistory(
   return apiRequest<RankedPerformanceHistory>(
     `/performance/history?timeframe=${timeframe}`,
     { signal },
-  );
+  ).then((data) => {
+    assertShape(rankedHistoryResponseSchema, data, "GET /performance/history");
+    return data;
+  });
 }
 
 /**

@@ -18,7 +18,7 @@ export const queryKeys = {
     cash: ["portfolio", "cash"] as const,
     allocation: ["portfolio", "allocation"] as const,
     settings: ["portfolio", "settings"] as const,
-    sellPreview: (positionId: string, quantity: number, price: number, fee: number) =>
+    sellPreview: (positionId: string, quantity: string, price: string, fee: string) =>
       ["portfolio", "sellPreview", positionId, quantity, price, fee] as const,
   },
   performance: {

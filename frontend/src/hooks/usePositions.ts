@@ -25,6 +25,7 @@ import {
   previewSale,
 } from "@/api/portfolioApi";
 import { POSITION_MUTATION_INVALIDATIONS, queryKeys } from "@/hooks/queryKeys";
+import { compareDecimal, isValidDecimalString } from "@/utils/decimal";
 import type {
   CreatePositionInput,
   UpdatePositionInput,
@@ -123,12 +124,14 @@ export function useSalePreview(input: SellPositionInput | null) {
   return useQuery({
     queryKey: queryKeys.portfolio.sellPreview(
       input?.position_id ?? "",
-      input?.quantity ?? 0,
-      input?.execution_price ?? 0,
-      input?.fee ?? 0,
+      input?.quantity ?? "0",
+      input?.execution_price ?? "0",
+      input?.fee ?? "0",
     ),
     queryFn: () => previewSale(input!),
-    enabled: Boolean(input && input.quantity > 0),
+    enabled: Boolean(
+      input && isValidDecimalString(input.quantity) && compareDecimal(input.quantity, "0") > 0,
+    ),
     retry: false,
   });
 }
