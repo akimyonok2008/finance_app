@@ -143,58 +143,58 @@ type portfolioView struct {
 // locked at add time (today's market price) — there is no average buy price in
 // the product.
 type positionView struct {
-	ID                string  `json:"id"`
-	Symbol            string  `json:"symbol"`
-	InstrumentID      string  `json:"instrument_id,omitempty"`
-	AssetType         string  `json:"asset_type"`
-	Quantity          float64 `json:"quantity"`
-	BaselinePrice     float64 `json:"baseline_price"`
-	Currency          string  `json:"currency"`
-	Status            string  `json:"status"`
-	PositionEpisodeID string  `json:"position_episode_id"`
-	OpenedAt          string  `json:"opened_at"`
+	ID                string         `json:"id"`
+	Symbol            string         `json:"symbol"`
+	InstrumentID      string         `json:"instrument_id,omitempty"`
+	AssetType         string         `json:"asset_type"`
+	Quantity          money.Quantity `json:"quantity"`
+	BaselinePrice     money.Price    `json:"baseline_price"`
+	Currency          string         `json:"currency"`
+	Status            string         `json:"status"`
+	PositionEpisodeID string         `json:"position_episode_id"`
+	OpenedAt          string         `json:"opened_at"`
 }
 
 // positionRequest is the create payload: no price, no currency — the baseline
 // is locked server-side at the current market quote.
 type positionRequest struct {
-	Symbol    string  `json:"symbol"`
-	AssetType string  `json:"asset_type"`
-	Quantity  float64 `json:"quantity"`
+	Symbol    string         `json:"symbol"`
+	AssetType string         `json:"asset_type"`
+	Quantity  money.Quantity `json:"quantity"`
 }
 
 // updatePositionRequest allows quantity changes only; the symbol and locked
 // baseline price are immutable after creation.
 type updatePositionRequest struct {
-	Quantity float64 `json:"quantity"`
+	Quantity money.Quantity `json:"quantity"`
 }
 
 type cashFlowRequest struct {
-	Currency   string  `json:"currency"`
-	Amount     float64 `json:"amount"`
-	OccurredAt string  `json:"occurred_at,omitempty"`
+	Currency   string       `json:"currency"`
+	Amount     money.Amount `json:"amount"`
+	OccurredAt string       `json:"occurred_at,omitempty"`
 }
 
 type buyRequest struct {
-	Symbol       string  `json:"symbol"`
-	ExchangeCode string  `json:"exchange_code,omitempty"`
-	MIC          string  `json:"mic,omitempty"`
-	AssetType    string  `json:"asset_type"`
-	Quantity     float64 `json:"quantity"`
+	Symbol       string         `json:"symbol"`
+	ExchangeCode string         `json:"exchange_code,omitempty"`
+	MIC          string         `json:"mic,omitempty"`
+	AssetType    string         `json:"asset_type"`
+	Quantity     money.Quantity `json:"quantity"`
 	// Optional real execution details. Omitted price/fee/date default to the
 	// latest tracked quote / zero / now and are labelled as estimates.
-	ExecutionPrice float64 `json:"execution_price,omitempty"`
-	Fee            float64 `json:"fee,omitempty"`
-	EffectiveAt    string  `json:"effective_at,omitempty"`
+	ExecutionPrice money.Price  `json:"execution_price,omitempty"`
+	Fee            money.Amount `json:"fee,omitempty"`
+	EffectiveAt    string       `json:"effective_at,omitempty"`
 }
 
 type sellRequest struct {
-	PositionID     string  `json:"position_id,omitempty"`
-	Symbol         string  `json:"symbol,omitempty"`
-	Quantity       float64 `json:"quantity"`
-	ExecutionPrice float64 `json:"execution_price,omitempty"`
-	Fee            float64 `json:"fee,omitempty"`
-	EffectiveAt    string  `json:"effective_at,omitempty"`
+	PositionID     string         `json:"position_id,omitempty"`
+	Symbol         string         `json:"symbol,omitempty"`
+	Quantity       money.Quantity `json:"quantity"`
+	ExecutionPrice money.Price    `json:"execution_price,omitempty"`
+	Fee            money.Amount   `json:"fee,omitempty"`
+	EffectiveAt    string         `json:"effective_at,omitempty"`
 }
 
 type activityMutationView struct {
@@ -211,8 +211,8 @@ func toPositionView(p *Position) positionView {
 		Symbol:            p.Symbol,
 		InstrumentID:      p.InstrumentID,
 		AssetType:         p.AssetType,
-		Quantity:          p.Quantity.Float64(),
-		BaselinePrice:     p.AverageBuyPrice.Float64(),
+		Quantity:          p.Quantity,
+		BaselinePrice:     p.AverageBuyPrice,
 		Currency:          p.Currency,
 		Status:            positionStatus(p),
 		PositionEpisodeID: p.ID,
@@ -224,7 +224,7 @@ func (r positionRequest) toInput() PositionInput {
 	return PositionInput{
 		Symbol:    r.Symbol,
 		AssetType: r.AssetType,
-		Quantity:  money.QuantityFromFloat64(r.Quantity),
+		Quantity:  r.Quantity,
 	}
 }
 
@@ -416,7 +416,7 @@ func (h *Handler) cashFlow(w http.ResponseWriter, r *http.Request, kind Mutation
 		}
 		occurredAt = &parsed
 	}
-	input := CashFlowInput{Currency: req.Currency, Amount: money.AmountFromFloat64(req.Amount), OccurredAt: occurredAt}
+	input := CashFlowInput{Currency: req.Currency, Amount: req.Amount, OccurredAt: occurredAt}
 	requestID, ok := requiredIdempotencyKey(w, r)
 	if !ok {
 		return
@@ -454,9 +454,9 @@ func (h *Handler) BuyPosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.BuyPosition(r.Context(), uid, requestID, BuyInput{
-		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: money.QuantityFromFloat64(req.Quantity),
+		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
 		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
-		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: effectiveAt,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -484,8 +484,8 @@ func (h *Handler) SellPosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.SellPosition(r.Context(), uid, requestID, SellInput{
-		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: money.QuantityFromFloat64(req.Quantity),
-		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: effectiveAt,
+		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -512,9 +512,9 @@ func (h *Handler) PreviewBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview, err := h.svc.PreviewBuy(r.Context(), uid, BuyInput{
-		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: money.QuantityFromFloat64(req.Quantity),
+		Symbol: req.Symbol, AssetType: req.AssetType, Quantity: req.Quantity,
 		ExchangeCode: req.ExchangeCode, MIC: req.MIC,
-		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: effectiveAt,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: effectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -538,8 +538,8 @@ func (h *Handler) PreviewSell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview, err := h.svc.PreviewSell(r.Context(), uid, SellInput{
-		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: money.QuantityFromFloat64(req.Quantity),
-		ExecutionPrice: money.PriceFromFloat64(req.ExecutionPrice), Fee: money.AmountFromFloat64(req.Fee), EffectiveAt: sellEffectiveAt,
+		PositionID: req.PositionID, Symbol: req.Symbol, Quantity: req.Quantity,
+		ExecutionPrice: req.ExecutionPrice, Fee: req.Fee, EffectiveAt: sellEffectiveAt,
 	})
 	if err != nil {
 		writeServiceError(w, err)

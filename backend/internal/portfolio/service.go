@@ -643,7 +643,7 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 // open status are verified INSIDE the transaction, against the locked position
 // set. The added or removed quantity enters at current prices, so resizing —
 // including scaling a winner — cannot create retroactive gains.
-func (s *Service) UpdatePosition(ctx context.Context, userID, positionID string, quantity float64) (*Position, error) {
+func (s *Service) UpdatePosition(ctx context.Context, userID, positionID string, quantity money.Quantity) (*Position, error) {
 	res, err := s.Mutate(ctx, MutationRequest{
 		Kind: MutationResize, UserID: userID, PositionID: positionID, Quantity: quantity,
 	})

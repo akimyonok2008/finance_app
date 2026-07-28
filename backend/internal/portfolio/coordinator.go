@@ -54,7 +54,7 @@ type MutationRequest struct {
 
 	Input      PositionInput         // add
 	PositionID string                // resize / delete / close / write_off
-	Quantity   float64               // resize
+	Quantity   money.Quantity        // resize
 	Weights    []StrategyWeightInput // replace
 	CashFlow   CashFlowInput
 	Buy        BuyInput
@@ -1249,9 +1249,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			return mutationPlan{}, err
 		}
 		updated := *existing
-		// req.Quantity (MutationRequest.Quantity) stays float64: it's a
-		// resize-only external API field, out of this section's scope.
-		updated.Quantity = money.QuantizeQuantity(money.QuantityFromFloat64(req.Quantity))
+		updated.Quantity = money.QuantizeQuantity(req.Quantity)
 		updated.UpdatedAt = val.ObservedAt
 		return mutationPlan{
 			newOpen:          replaceInSet(oldOpen, req.PositionID, &updated),
@@ -2063,7 +2061,7 @@ func (c *MutationCoordinator) validate(req *MutationRequest) ([]string, error) {
 		return []string{clean.Symbol}, nil
 
 	case MutationResize:
-		if !finitePositive(req.Quantity) {
+		if req.Quantity.Cmp(money.ZeroQuantity()) <= 0 {
 			return nil, ErrInvalidQuantity
 		}
 		return nil, nil

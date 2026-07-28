@@ -197,7 +197,7 @@ func TestUpdatePosition_QuantityOnly(t *testing.T) {
 	pos, err := svc.AddPosition(ctx(), "user-1", validInput())
 	require.NoError(t, err)
 
-	updated, err := svc.UpdatePosition(ctx(), "user-1", pos.ID, 12)
+	updated, err := svc.UpdatePosition(ctx(), "user-1", pos.ID, testQuantity("12"))
 	require.NoError(t, err)
 	assertQuantityEqual(t, "12", updated.Quantity)
 	// Baseline price and symbol survive the edit untouched.
@@ -211,7 +211,7 @@ func TestUpdatePosition_BaselineSurvivesPriceMoves(t *testing.T) {
 	require.NoError(t, err)
 
 	pp.Set("AAPL", 250, "USD") // market moves
-	updated, err := svc.UpdatePosition(ctx(), "user-1", pos.ID, 20)
+	updated, err := svc.UpdatePosition(ctx(), "user-1", pos.ID, testQuantity("20"))
 	require.NoError(t, err)
 	// Editing quantity must NOT re-lock the baseline at the new price.
 	assertPriceEqual(t, "195", updated.AverageBuyPrice)
@@ -222,7 +222,7 @@ func TestUpdatePosition_RejectsNonPositiveQuantity(t *testing.T) {
 	pos, err := svc.AddPosition(ctx(), "user-1", validInput())
 	require.NoError(t, err)
 
-	_, err = svc.UpdatePosition(ctx(), "user-1", pos.ID, 0)
+	_, err = svc.UpdatePosition(ctx(), "user-1", pos.ID, testQuantity("0"))
 	assert.ErrorIs(t, err, ErrInvalidQuantity)
 }
 
@@ -231,7 +231,7 @@ func TestUpdatePosition_OtherUsersFails(t *testing.T) {
 	pos, err := svc.AddPosition(ctx(), "user-1", validInput())
 	require.NoError(t, err)
 
-	_, err = svc.UpdatePosition(ctx(), "user-2", pos.ID, 5)
+	_, err = svc.UpdatePosition(ctx(), "user-2", pos.ID, testQuantity("5"))
 	assert.ErrorIs(t, err, ErrPositionNotFound)
 }
 

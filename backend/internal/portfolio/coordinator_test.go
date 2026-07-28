@@ -86,7 +86,7 @@ func TestRollback_FaultOnSecondMutationPreservesFirst(t *testing.T) {
 
 	// A failing ranked-state UPDATE must not leave the position change behind.
 	repo.SetFaults(Faults{UpdateRankedState: boom})
-	_, err = svc.UpdatePosition(ctx(), "u1", first.ID, 999)
+	_, err = svc.UpdatePosition(ctx(), "u1", first.ID, testQuantity("999"))
 	require.ErrorIs(t, err, boom)
 
 	positions, stateAfter := readAggregate(t, repo, svc, "u1")
@@ -168,7 +168,7 @@ func TestConcurrent_MixedMutationsRemainConsistent(t *testing.T) {
 	run(func() {
 		_, _ = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("3")})
 	})
-	run(func() { _, _ = svc.UpdatePosition(ctx(), "u1", seed.ID, 11) })
+	run(func() { _, _ = svc.UpdatePosition(ctx(), "u1", seed.ID, testQuantity("11")) })
 	run(func() { _ = svc.DeletePosition(ctx(), "u1", other.ID) })
 	run(func() { _, _ = svc.ClosePosition(ctx(), "u1", seed.ID) })
 	run(func() {
@@ -340,7 +340,7 @@ func TestAudit_ProvesEveryMutationIsRankNeutral(t *testing.T) {
 	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("1")})
 	require.NoError(t, err)
 	pp.Set("AAPL", 300, "USD") // market move between mutations
-	_, err = svc.UpdatePosition(ctx(), "u1", pos.ID, 50)
+	_, err = svc.UpdatePosition(ctx(), "u1", pos.ID, testQuantity("50"))
 	require.NoError(t, err)
 	pp.Set("AAPL", 150, "USD")
 	_, err = svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "SPY", AssetType: "etf", Quantity: testQuantity("10")})

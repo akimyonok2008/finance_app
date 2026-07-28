@@ -72,7 +72,7 @@ func TestRanked_QuantityIncreaseNoRetroactiveGain(t *testing.T) {
 	pp.Set("AAPL", 214.5, "USD") // +10% -> index 110
 	assertIndexEqual(t, "110.0", rankedIndex(t, perf, "u1"))
 	// Scale the winner x1000; index must remain 110.
-	_, err = svc.UpdatePosition(ctx(), "u1", pos.ID, 1000)
+	_, err = svc.UpdatePosition(ctx(), "u1", pos.ID, testQuantity("1000"))
 	require.NoError(t, err)
 	assertIndexEqual(t, "110.0", rankedIndex(t, perf, "u1"))
 }

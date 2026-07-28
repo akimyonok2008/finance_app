@@ -114,7 +114,7 @@ func TestAddPosition_CreatesValidPosition(t *testing.T) {
 	assert.Equal(t, "AAPL", body["symbol"])
 	assert.NotEmpty(t, body["id"])
 	// Baseline locked at today's quote; no average_buy_price anywhere.
-	assert.Equal(t, 195.0, body["baseline_price"])
+	assert.Equal(t, "195", body["baseline_price"])
 	assert.NotContains(t, rec.Body.String(), "average_buy_price")
 }
 
@@ -173,9 +173,9 @@ func TestUpdatePosition_UpdatesOwn(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, 12.0, body["quantity"])
+	assert.Equal(t, "12", body["quantity"])
 	// The locked baseline is untouched by the quantity edit.
-	assert.Equal(t, 195.0, body["baseline_price"])
+	assert.Equal(t, "195", body["baseline_price"])
 }
 
 func TestUpdatePosition_RejectsOtherUsersPosition(t *testing.T) {

@@ -139,8 +139,8 @@ func (h *Handler) CorrectIncomeEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 type activityCorrectionRequest struct {
-	ActualAmount float64 `json:"actual_amount"`
-	Reason       string  `json:"reason"`
+	ActualAmount money.Amount `json:"actual_amount"`
+	Reason       string       `json:"reason"`
 }
 
 // CorrectActivity handles POST /portfolio/activities/{id}/correction. It
@@ -165,7 +165,7 @@ func (h *Handler) CorrectActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.svc.CorrectActivity(r.Context(), uid, requestID, ActivityCorrectionInput{
 		ActivityID:   chi.URLParam(r, "id"),
-		ActualAmount: money.AmountFromFloat64(req.ActualAmount),
+		ActualAmount: req.ActualAmount,
 		Reason:       req.Reason,
 	})
 	if err != nil {
