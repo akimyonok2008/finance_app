@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -401,6 +402,29 @@ func (a leaderboardProfileAdapter) PublicInfo(ctx context.Context, userID string
 	}, true, nil
 }
 
+// PublicInfoBatch implements leaderboard.ProfilePublicBatchProvider, letting a
+// leaderboard page enrich in one query instead of one per row.
+func (a leaderboardProfileAdapter) PublicInfoBatch(ctx context.Context, userIDs []string) (map[string]leaderboard.ProfilePublicInfo, error) {
+	infos, err := a.s.PublicInfoForUsers(ctx, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]leaderboard.ProfilePublicInfo, len(infos))
+	for userID, info := range infos {
+		weights := make([]leaderboard.PublicWeight, 0, len(info.Weights))
+		for _, w := range info.Weights {
+			weights = append(weights, leaderboard.PublicWeight{
+				Symbol: w.Symbol, AssetType: w.AssetType, WeightPercentage: w.Weight,
+			})
+		}
+		out[userID] = leaderboard.ProfilePublicInfo{
+			Handle: info.Handle, StrategyTag: info.StrategyTag,
+			IsPublic: info.IsPublic, ShowWeights: info.ShowWeights, Weights: weights,
+		}
+	}
+	return out, nil
+}
+
 // rankedPerformanceAdapter bridges the ranked-performance service to the
 // leaderboard's narrow provider port, translating the paused status into the
 // boolean the leaderboard uses to exclude empty portfolios.
@@ -587,7 +611,7 @@ func main() {
 		slog.Warn("using the default development JWT secret; set JWT_SECRET before production")
 	}
 
-	// --- Redis (optional) ---
+	// --- Redis (optional cache/rate-limit backend; never gates startup) ---
 	var redisClient *redis.Client
 	if cfg.RedisURL != "" {
 		opts, err := redis.ParseURL(cfg.RedisURL)
@@ -595,12 +619,17 @@ func main() {
 			slog.Error("invalid REDIS_URL", "error", err)
 			os.Exit(1)
 		}
-		redisClient = redis.NewClient(opts)
-		if err := redisClient.Ping(ctx).Err(); err != nil {
-			slog.Error("redis connection failed", "error", err)
-			os.Exit(1)
+		client := redis.NewClient(opts)
+		if err := client.Ping(ctx).Err(); err != nil {
+			// Redis backs caches and the rate limiter, both of which have
+			// documented in-memory fallbacks; a transient outage here must
+			// not become a full application outage.
+			slog.Error("redis connection failed; continuing with in-memory fallbacks", "error", err)
+			_ = client.Close()
+		} else {
+			redisClient = client
+			slog.Info("redis connected")
 		}
-		slog.Info("redis connected")
 	}
 
 	var priceCache prices.PriceCache = prices.NewInMemoryPriceCache()
@@ -731,12 +760,8 @@ func main() {
 	// freshness is still governed by marketDataSvc's own QuoteCacheTTL
 	// underneath, which this sits in front of, not instead of.
 	priceProvider = prices.NewCachedPriceProvider(priceProvider, prices.NewInMemoryPriceCache(), mutationPriceCacheTTL)
-	if redisClient != nil {
-		readinessChecks = append(readinessChecks, server.ReadinessCheck{
-			Name:  "redis",
-			Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
-		})
-	}
+	// Redis is a cache/rate-limit optimization with in-memory fallbacks, so its
+	// availability does not gate readiness (see connection setup above).
 
 	// --- services ---
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTExpiry)
@@ -775,6 +800,7 @@ func main() {
 	authSvc.StartEmailOutboxProcessor(ctx, 5*time.Second)
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
+	authSvc.RegisterCreationHook(portfolioSvc)
 	var identityProvider instrument.IdentityProvider
 	if cfg.OpenFIGIEnabled {
 		identityProvider = instrument.NewOpenFIGIProvider(instrument.OpenFIGIConfig{
@@ -782,7 +808,27 @@ func main() {
 			Timeout: cfg.OpenFIGIRequestTimeout,
 		})
 	}
-	portfolioSvc.SetInstrumentResolver(instrument.NewResolver(repos.instruments, identityProvider))
+	identityResolver := instrument.NewResolver(repos.instruments, identityProvider)
+	portfolioSvc.SetInstrumentResolver(identityResolver)
+	portfolioSvc.SetPriceProviderName(priceProviderName)
+	portfolioSvc.SetInstrumentResolutionRequired(cfg.InstrumentResolutionRequired)
+
+	// One-shot CLI mode: `go run ./cmd/api backfill-instruments` resolves
+	// legacy positions/activities against the local identity register (never
+	// OpenFIGI) and queues anything ambiguous/unresolved for admin review
+	// via GET /admin/identity-reconciliation, then exits — it never starts
+	// the HTTP server or background workers.
+	if len(os.Args) > 1 && os.Args[1] == "backfill-instruments" {
+		summary, err := portfolioSvc.RunInstrumentBackfill(ctx, 0)
+		if err != nil {
+			slog.Error("instrument backfill failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("instrument backfill complete",
+			"positions_scanned", summary.PositionsScanned, "positions_resolved", summary.PositionsResolved, "positions_queued", summary.PositionsQueued,
+			"activities_scanned", summary.ActivitiesScanned, "activities_resolved", summary.ActivitiesResolved, "activities_queued", summary.ActivitiesQueued)
+		return
+	}
 	// Ranked-performance engine: the single trusted source of global ranked
 	// performance. It is READ-ONLY — ranked state is written exclusively inside
 	// the portfolio aggregate transaction (portfolio.MutationCoordinator), so a
@@ -807,6 +853,15 @@ func main() {
 	// leaderboard/standing and /performance/history agree on how large a gap
 	// in recorded snapshots is still acceptable for a given window.
 	leaderboardSvc.SetMaxSnapshotAge(cfg.RankedBoundaryTolerance)
+	// Denormalized ranking projection (table leaderboard_rankings): lets board,
+	// per-user-rank, and windowed-standing reads become a single indexed query
+	// instead of enumerating every user. Populated by leaderboardSvc's own
+	// RefreshCache from the same per-user valuation it already pays for. A nil
+	// pool (memory-mode storage) leaves it unset, and every read path falls
+	// back to live computation exactly as before.
+	if repos.pgPool != nil {
+		leaderboardSvc.SetRankingStore(leaderboard.NewPostgresRankingStore(repos.pgPool))
+	}
 	competitionsSvc := competitions.NewService(
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
@@ -1075,6 +1130,7 @@ func main() {
 		}
 		corpSvc := corpactions.NewService(corpProvider, corpStore, corpActionGateway{svc: portfolioSvc})
 		corpSvc.SetLookback(cfg.CorporateActionLookback)
+		corpSvc.SetInstrumentResolver(identityResolver)
 		corpActionView = corpActionViewAdapter{svc: corpSvc}
 		if optionalJobs {
 			jobs.NewCorporateActionWorker(corpSvc, cfg.CorporateActionPollInterval).Start(ctx)
@@ -1145,8 +1201,17 @@ func main() {
 		ReadinessChecks:             readinessChecks,
 		AppEnv:                      cfg.AppEnv,
 		CORSAllowedOrigins:          cfg.CORSAllowedOrigins,
+		TrustedProxyCIDRs:           cfg.TrustedProxyCIDRs,
 		RateLimitRedis:              redisClient,
 		DisablePasswordRegistration: !cfg.PasswordRegistrationEnabled,
+		Info: map[string]string{
+			"storage_provider": cfg.StorageProvider,
+			"price_provider":   priceProviderName,
+			"real_market_data": strconv.FormatBool(cfg.EnableRealMarketData && priceProviderName == "twelvedata"),
+		},
+	})
+	operationsHandler := server.NewOperations(server.Deps{
+		ReadinessChecks: readinessChecks,
 		Info: map[string]string{
 			"storage_provider": cfg.StorageProvider,
 			"price_provider":   priceProviderName,
@@ -1157,6 +1222,7 @@ func main() {
 	slog.Info("finance_app API starting",
 		"app_env", cfg.AppEnv,
 		"port", cfg.Port,
+		"operations_addr", cfg.OperationsAddr,
 		"storage_provider", cfg.StorageProvider,
 		"price_provider", priceProviderName,
 		"real_market_data", cfg.EnableRealMarketData && priceProviderName == "twelvedata",
@@ -1180,15 +1246,25 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	operationsSrv := &http.Server{
+		Addr:              cfg.OperationsAddr,
+		Handler:           operationsHandler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	serveErr := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- err
+	serveErr := make(chan error, 2)
+	startServer := func(name string, target *http.Server) {
+		if err := target.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- fmt.Errorf("%s server: %w", name, err)
 			return
 		}
 		serveErr <- nil
-	}()
+	}
+	go startServer("public", srv)
+	go startServer("operations", operationsSrv)
 
 	select {
 	case err := <-serveErr:
@@ -1202,6 +1278,10 @@ func main() {
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("graceful shutdown failed", "error", err)
+			os.Exit(1)
+		}
+		if err := operationsSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("operations graceful shutdown failed", "error", err)
 			os.Exit(1)
 		}
 		slog.Info("server shut down cleanly")

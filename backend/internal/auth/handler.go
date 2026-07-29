@@ -3,6 +3,8 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -10,8 +12,10 @@ import (
 
 // authResponse is the shared success shape for register and login.
 type authResponse struct {
-	User  PublicUser `json:"user"`
-	Token string     `json:"token"`
+	User PublicUser `json:"user"`
+	// Token is retained only as an internal test helper field. Browser JSON
+	// responses deliberately never expose the session JWT.
+	Token string `json:"-"`
 }
 
 // errorResponse is the consistent error envelope: {"error": "message"}.
@@ -22,12 +26,36 @@ type errorResponse struct {
 
 // Handler adapts HTTP requests to the auth Service.
 type Handler struct {
-	svc *Service
+	svc          *Service
+	secureCookie bool
 }
 
 // NewHandler constructs a Handler backed by the given service.
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, secureCookie ...bool) *Handler {
+	return &Handler{svc: svc, secureCookie: len(secureCookie) > 0 && secureCookie[0]}
+}
+
+func (h *Handler) setSessionCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: h.sessionCookieName(), Value: token, Path: "/", HttpOnly: true,
+		Secure: h.secureCookie, SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (h *Handler) clearSessionCookie(w http.ResponseWriter) {
+	for _, name := range []string{SessionCookieName, developmentSessionCookieName} {
+		http.SetCookie(w, &http.Cookie{
+			Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+			Secure: name == SessionCookieName, SameSite: http.SameSiteStrictMode,
+		})
+	}
+}
+
+func (h *Handler) sessionCookieName() string {
+	if h.secureCookie {
+		return SessionCookieName
+	}
+	return developmentSessionCookieName
 }
 
 type registerRequest struct {
@@ -135,7 +163,15 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+	h.setSessionCookie(w, token)
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public()})
+}
+
+// Logout clears the browser session cookie. JWT revocation remains available
+// through the authenticated revoke-sessions endpoint.
+func (h *Handler) Logout(w http.ResponseWriter, _ *http.Request) {
+	h.clearSessionCookie(w)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +185,8 @@ func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, statusForError(err), err.Error(), "invalid_verification_token")
 		return
 	}
-	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+	h.setSessionCookie(w, token)
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public()})
 }
 
 func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +241,8 @@ func (h *Handler) Google(w http.ResponseWriter, r *http.Request) {
 		writeProviderError(w, err, "Google sign-in failed.")
 		return
 	}
-	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+	h.setSessionCookie(w, token)
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public()})
 }
 
 func (h *Handler) Apple(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +259,8 @@ func (h *Handler) Apple(w http.ResponseWriter, r *http.Request) {
 		writeProviderError(w, err, "Apple sign-in failed.")
 		return
 	}
-	writeJSON(w, http.StatusOK, authResponse{User: user.Public(), Token: token})
+	h.setSessionCookie(w, token)
+	writeJSON(w, http.StatusOK, authResponse{User: user.Public()})
 }
 
 // Me handles GET /me. It relies on RequireAuth having placed the user id in the
@@ -264,7 +303,8 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+	h.setSessionCookie(w, token)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) SetPassword(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +323,8 @@ func (h *Handler) SetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+	h.setSessionCookie(w, token)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) Reauthenticate(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +442,16 @@ func clientIP(r *http.Request) string {
 func decodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	return dec.Decode(dst)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain a single JSON value")
+		}
+		return fmt.Errorf("request body must contain a single JSON value: %w", err)
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

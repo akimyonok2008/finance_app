@@ -11,7 +11,10 @@ function accountRole(value: unknown): AuthUser["role"] {
 
 export function readStorage(): { token: string | null; user: AuthUser | null } {
   try {
-    const token = localStorage.getItem(TOKEN_KEY);
+    // The JWT lives only in an HttpOnly cookie. This non-secret marker keeps
+    // the existing auth context shape while /me validates the cookie.
+    localStorage.removeItem(TOKEN_KEY);
+    const token = localStorage.getItem(USER_KEY) ? "cookie-session" : null;
     const raw = localStorage.getItem(USER_KEY);
     const parsed = raw ? (JSON.parse(raw) as Partial<AuthUser>) : null;
     const user: AuthUser | null = parsed
@@ -39,8 +42,8 @@ export function readStorage(): { token: string | null; user: AuthUser | null } {
   }
 }
 
-export function writeStorage(token: string, user: AuthUser) {
-  localStorage.setItem(TOKEN_KEY, token);
+export function writeStorage(_token: string, user: AuthUser) {
+  localStorage.removeItem(TOKEN_KEY);
   localStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 

@@ -192,6 +192,55 @@ func (s *Service) PublicInfoForUser(ctx context.Context, userID string) (Leaderb
 	return info, true, nil
 }
 
+// batchProfileRepository is Repository's optional batch-fetch capability
+// (only PostgresRepository implements it); PublicInfoForUsers falls back to
+// one GetByUserID call per id when the backing repository doesn't.
+type batchProfileRepository interface {
+	GetByUserIDs(ctx context.Context, userIDs []string) (map[string]Profile, error)
+}
+
+// PublicInfoForUsers batch-enriches a leaderboard page: one profile query for
+// the whole page instead of one per row. Users with no profile row are simply
+// absent from the result map (equivalent to hasProfile=false).
+func (s *Service) PublicInfoForUsers(ctx context.Context, userIDs []string) (map[string]LeaderboardInfo, error) {
+	var profiles map[string]Profile
+	if batch, ok := s.repo.(batchProfileRepository); ok {
+		var err error
+		profiles, err = batch.GetByUserIDs(ctx, userIDs)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		profiles = make(map[string]Profile, len(userIDs))
+		for _, id := range userIDs {
+			if p, err := s.repo.GetByUserID(ctx, id); err == nil {
+				profiles[id] = p
+			} else if !errors.Is(err, ErrNotFound) {
+				return nil, err
+			}
+		}
+	}
+
+	out := make(map[string]LeaderboardInfo, len(profiles))
+	for userID, p := range profiles {
+		info := LeaderboardInfo{
+			Handle: p.Handle, StrategyTag: p.StrategyTag,
+			IsPublic: p.IsPublic, ShowWeights: p.ShowPublicWeights,
+		}
+		if p.IsPublic && p.ShowPublicWeights {
+			if s.weights != nil {
+				if summary, err := s.weights.GetPublicWeights(ctx, userID); err == nil && summary != nil {
+					info.Weights, _, _, _ = buildComposition(summary)
+				}
+			} else if summary, err := s.summaries.GetSummary(ctx, userID); err == nil && summary != nil {
+				info.Weights, _, _, _ = buildComposition(summary)
+			}
+		}
+		out[userID] = info
+	}
+	return out, nil
+}
+
 func (s *Service) SetAchievementProvider(provider AchievementProvider) {
 	s.achievements = provider
 }

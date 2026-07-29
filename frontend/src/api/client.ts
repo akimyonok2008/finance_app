@@ -1,11 +1,9 @@
 /**
  * Thin fetch wrapper for the Go backend.
  *
- * Authentication stores the backend JWT in localStorage under
- * `TOKEN_STORAGE_KEY`, and every authenticated request attaches it here.
+ * Browser authentication uses an HttpOnly session cookie. JavaScript never
+ * reads or persists the JWT.
  */
-
-export const TOKEN_STORAGE_KEY = "finance_app_token";
 
 const BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ||
@@ -21,24 +19,9 @@ export class ApiError extends Error {
   }
 }
 
-export function getToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_STORAGE_KEY, token);
-}
-
-export function clearToken(): void {
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
-}
-
 function handleUnauthorized(): void {
-  clearToken();
+  // Remove values left by versions that predated HttpOnly cookie sessions.
+  localStorage.removeItem("finance_app_token");
   localStorage.removeItem("finance_app_user");
   // Hard-redirect to login so the router picks it up cleanly.
   if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
@@ -74,8 +57,6 @@ export async function apiRequest<T>(
   const { method = "GET", body, signal, idempotencyKey, skipAuthRedirectOn401 } = options;
 
   const headers: Record<string, string> = { Accept: "application/json" };
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
 
@@ -84,6 +65,7 @@ export async function apiRequest<T>(
     res = await fetch(`${BASE_URL}${path}`, {
       method,
       headers,
+      credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal,
     });

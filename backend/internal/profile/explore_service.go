@@ -22,11 +22,15 @@ type scoredCard struct {
 //
 // Trending holdings are computed from the full public dataset (a global
 // discovery feature), independent of the q/symbol filters and pagination, while
-// featured/top_performers reflect the filtered + sorted set.
-//
-// Prototype note: this iterates the full public-profile set and calls the
-// summary/rank providers per profile (N+1). That is acceptable at prototype
-// scale; see TODOs on the repository for the materialized/cached path.
+// featured/top_performers reflect the filtered + sorted set. Because those
+// rails are full-dataset aggregates, pagination alone can't bound this
+// request's cost the way it did for the leaderboard — instead, the two
+// per-profile costs that used to run unconditionally (a live portfolio
+// valuation, and an uncached full ledger scan) are eliminated/cached below:
+// ranking is resolved once via s.timeframeRanks' bulk projection lookup
+// (falling back to a single live valuation only when that lookup has no
+// entry — see resolveExploreRanking), and composition reads through the
+// existing short-TTL-cached SummaryProvider (see buildPublicProfile).
 func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFilter) (ExploreResponse, error) {
 	profiles, err := s.repo.ListPublicProfiles(ctx)
 	if err != nil {
@@ -38,6 +42,7 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 		return ExploreResponse{}, err
 	}
 
+	summaries := s.exploreSummaryProvider()
 	all := make([]scoredCard, 0, len(profiles))
 	allCards := make([]PublicProfile, 0, len(profiles))
 	for _, p := range profiles {
@@ -47,19 +52,20 @@ func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFi
 		if blocked[p.UserID] {
 			continue
 		}
-		card, err := s.publicProjection(ctx, p)
-		if err != nil {
-			return ExploreResponse{}, err
+		rank, hasRank, index, returnPct, ok := s.resolveExploreRanking(ctx, p.UserID, ranks, fallback)
+		if !ok {
+			// Unranked, excluded from the requested timeframe, or a live
+			// valuation failed for just this one profile — skip it rather
+			// than aborting the whole discovery response for every caller.
+			continue
 		}
+		card := s.buildPublicProfile(ctx, p, summaries, index, returnPct)
 		if len(card.PublicWeights) == 0 {
 			continue
 		}
-		if rank, ok := ranks[p.UserID]; ok {
-			card.GlobalRank = &rank.Rank
-			card.ReturnPercentage = rank.RankedReturnPercentage
-			card.PortfolioIndex = rank.RankedIndex
-		} else if s.timeframeRanks != nil && !fallback {
-			continue
+		if hasRank {
+			r := rank.Rank
+			card.GlobalRank = &r
 		}
 		all = append(all, scoredCard{profile: p, card: card})
 		allCards = append(allCards, card)
@@ -147,6 +153,30 @@ func (s *Service) exploreRankings(ctx context.Context, timeframe string) (map[st
 		out[row.UserID] = row
 	}
 	return out, false
+}
+
+// resolveExploreRanking resolves userID's ranked index/return percentage for a
+// single Explore card, preferring the bulk-fetched ranks map (populated once
+// per request from the ranking projection via s.timeframeRanks.UserRankings)
+// over a live per-profile valuation. ok=false means the profile must be
+// excluded from Explore entirely (no ranking for the requested timeframe, or
+// — only reached when no ranking provider is configured at all — a live
+// valuation failure).
+func (s *Service) resolveExploreRanking(ctx context.Context, userID string, ranks map[string]TimeframeRanking, fallback bool) (rank TimeframeRanking, hasRank bool, index, returnPct float64, ok bool) {
+	if rank, hasRank = ranks[userID]; hasRank {
+		return rank, true, rank.RankedIndex, rank.RankedReturnPercentage, true
+	}
+	if s.timeframeRanks != nil && !fallback {
+		return TimeframeRanking{}, false, 0, 0, false
+	}
+	if s.ranked == nil {
+		return TimeframeRanking{}, false, 0, 0, false
+	}
+	rp, err := s.ranked.CurrentRankedPerformance(ctx, userID)
+	if err != nil {
+		return TimeframeRanking{}, false, 0, 0, false
+	}
+	return TimeframeRanking{}, false, round2(rp.RankedIndex), round2(rp.RankedReturnPercentage), true
 }
 
 // buildSimilar returns deterministic, quality-thresholded matches using symbol,

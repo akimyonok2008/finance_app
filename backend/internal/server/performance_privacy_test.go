@@ -24,7 +24,7 @@ func newPrivacyUser(t *testing.T, h http.Handler, email, name, keyPrefix string)
 	login := doReq(t, h, http.MethodPost, "/auth/login", fmt.Sprintf(
 		`{"email":%q,"password":"StrongPassword123"}`, email), "")
 	require.Equal(t, http.StatusOK, login.Code, login.Body.String())
-	token = extractToken(t, login.Body.String())
+	token = extractToken(t, login)
 
 	require.Equal(t, http.StatusCreated, doIdempotentReq(
 		t, h, "/portfolio/deposits", `{"currency":"USD","amount":10000}`, token, keyPrefix+"-dep").Code)

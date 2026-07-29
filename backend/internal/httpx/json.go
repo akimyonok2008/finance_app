@@ -4,6 +4,8 @@ package httpx
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -28,5 +30,14 @@ func WriteError(w http.ResponseWriter, status int, message string) {
 func DecodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	return dec.Decode(dst)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain a single JSON value")
+		}
+		return fmt.Errorf("request body must contain a single JSON value: %w", err)
+	}
+	return nil
 }

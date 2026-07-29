@@ -33,7 +33,7 @@ func (s *Service) PortfolioValueBase(ctx context.Context, userID string) (string
 // quality to the private ranked valuation, so readers can distinguish a value
 // derived from fresh quotes from one derived from allowed stale quotes.
 func (s *Service) PortfolioValueObservation(ctx context.Context, userID string) (performance.ValuationObservation, error) {
-	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
+	pf, err := s.repo.GetPortfolioByUser(ctx, userID)
 	if err != nil {
 		return performance.ValuationObservation{}, err
 	}
@@ -92,7 +92,7 @@ func (s *Service) valueOpenObserved(ctx context.Context, positions []*Position) 
 		hasActive = true
 		q, ok := quotes[pos.Symbol]
 		if !ok {
-			price, perr := s.provider.GetLatestPrice(ctx, pos.Symbol)
+			price, perr := s.provider.GetLatestPrice(ctx, s.priceLookupSymbol(ctx, pos.Symbol, pos.InstrumentID))
 			if perr != nil || price == nil || !finitePositive(price.Price) {
 				return money.ZeroAmount(), false, "", time.Time{}, ErrPriceProvider
 			}

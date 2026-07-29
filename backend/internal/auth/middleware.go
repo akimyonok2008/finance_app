@@ -10,13 +10,12 @@ type contextKey string
 
 const userIDKey contextKey = "auth.userID"
 
-// RequireAuth returns middleware that validates the Bearer JWT in the
-// Authorization header. On success it stores the user id in the request context
-// and calls the next handler; otherwise it writes a 401 and stops.
+// RequireAuth validates the HttpOnly session cookie, with Bearer retained for
+// non-browser API clients.
 func RequireAuth(tm *TokenManager) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := bearerToken(r)
+			token, ok := sessionToken(r)
 			if !ok {
 				writeError(w, http.StatusUnauthorized, "missing or malformed authorization header")
 				return
@@ -33,6 +32,18 @@ func RequireAuth(tm *TokenManager) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+const SessionCookieName = "__Host-finance_session"
+const developmentSessionCookieName = "finance_session"
+
+func sessionToken(r *http.Request) (string, bool) {
+	for _, name := range []string{SessionCookieName, developmentSessionCookieName} {
+		if cookie, err := r.Cookie(name); err == nil && strings.TrimSpace(cookie.Value) != "" {
+			return cookie.Value, true
+		}
+	}
+	return bearerToken(r)
 }
 
 // UserExistenceChecker reports whether a user id still exists. *Service

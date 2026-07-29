@@ -15,9 +15,11 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/performancehistory"
 )
 
-// UserProvider enumerates the users to rank. Implemented by *auth.Service.
+// UserProvider enumerates the users to rank. Implemented by *auth.Service via
+// ListRankableUsers, which returns only the narrow projection the leaderboard
+// needs — never the password hash or other sensitive account fields.
 type UserProvider interface {
-	ListUsers(ctx context.Context) ([]auth.User, error)
+	ListRankableUsers(ctx context.Context) ([]auth.RankableUser, error)
 }
 
 // RankedPerformance is the leaderboard's view of a user's persistent ranked
@@ -58,6 +60,48 @@ type ProfilePublicProvider interface {
 // maxLeaderboardSize caps how many entries are served from the cache path.
 const maxLeaderboardSize = 100
 
+// RankingStore is the optional denormalized ranking projection (a Postgres
+// table populated by RefreshCache from the same per-user valuation it already
+// pays for). Reading it back lets board, per-user-rank, and windowed-standing
+// queries do O(page size) work with rank computed by a Postgres window
+// function, instead of enumerating every user and sorting in application
+// memory. It is a pure optimization layer: any error, staleness, or absence
+// falls back to the existing live computation, exactly like LeaderboardCache.
+type RankingStore interface {
+	Upsert(ctx context.Context, tf Timeframe, userID string, idx money.IndexValue, retPct money.Ratio, trackingStartedAt time.Time) error
+	Delete(ctx context.Context, tf Timeframe, userID string) error
+	// TopPage returns up to limit rows for tf, ranked by a window function and
+	// joined to display metadata in a single round trip.
+	TopPage(ctx context.Context, tf Timeframe, limit int) ([]rankedRow, error)
+	// RankOf returns userID's exact rank/index/return for tf. found=false means
+	// userID has no row for tf — this can mean genuinely unranked OR simply
+	// "not yet reached by a refresh cycle", so callers must treat it as
+	// "unknown" and fall back rather than as an authoritative negative.
+	RankOf(ctx context.Context, tf Timeframe, userID string) (rank int, idx money.IndexValue, retPct money.Ratio, found bool, err error)
+	// ValueAtRank returns the return percentage of the row at an exact 1-based
+	// rank, for milestone-gap calculations.
+	ValueAtRank(ctx context.Context, tf Timeframe, rank int) (retPct money.Ratio, found bool, err error)
+	Count(ctx context.Context, tf Timeframe) (int, error)
+	// OldestComputedAt reports the least-recently-refreshed row's timestamp for
+	// tf. found=false means tf has no rows yet (never refreshed).
+	OldestComputedAt(ctx context.Context, tf Timeframe) (at time.Time, found bool, err error)
+}
+
+// ProfilePublicBatchProvider is an optional capability of ProfilePublicProvider:
+// implementing it lets enrichPage join profile data for an entire page in one
+// query instead of one round trip per row.
+type ProfilePublicBatchProvider interface {
+	PublicInfoBatch(ctx context.Context, userIDs []string) (map[string]ProfilePublicInfo, error)
+}
+
+// allTimeframes is every timeframe RefreshCache maintains a ranking-projection
+// row for.
+var allTimeframes = []Timeframe{TimeframeAll, Timeframe1W, Timeframe1M, Timeframe3M, Timeframe6M, Timeframe1Y}
+
+// defaultMaxRankingAge bounds how stale the ranking projection may be and
+// still be trusted; older than this, callers fall back to live computation.
+const defaultMaxRankingAge = 30 * time.Minute
+
 // Service builds the anonymous leaderboard. With a cache attached it serves the
 // precomputed Redis ranking; otherwise (or when the cache is empty or failing)
 // it falls back to live calculation, so the cache is never a single point of
@@ -76,6 +120,12 @@ type Service struct {
 	profiles       ProfilePublicProvider // optional; enriches rows with handle/tag/weights
 	maxSnapshotAge time.Duration
 	now            func() time.Time
+
+	// ranking is the optional denormalized ranking projection (see
+	// RankingStore). maxRankingAge bounds how stale it may be and still be
+	// preferred over live computation.
+	ranking       RankingStore
+	maxRankingAge time.Duration
 
 	// refreshBatchSize bounds how many users RefreshCache revalues (one
 	// CurrentRankedPerformance call each, which does a full portfolio
@@ -97,7 +147,8 @@ type Service struct {
 func NewService(users UserProvider, ranked RankedPerformanceProvider) *Service {
 	return &Service{
 		users: users, ranked: ranked, maxSnapshotAge: defaultMaxSnapshotAge,
-		now: func() time.Time { return time.Now().UTC() },
+		maxRankingAge: defaultMaxRankingAge,
+		now:           func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -139,6 +190,21 @@ func (s *Service) SetProfileProvider(p ProfilePublicProvider) {
 	s.profiles = p
 }
 
+// SetRankingStore attaches the optional denormalized ranking projection (see
+// RankingStore). Without it, every read falls back to the pre-existing live
+// computation — this call is additive, not required.
+func (s *Service) SetRankingStore(r RankingStore) {
+	s.ranking = r
+}
+
+// SetMaxRankingAge overrides how stale the ranking projection may be and still
+// be preferred over live computation. d <= 0 is ignored.
+func (s *Service) SetMaxRankingAge(d time.Duration) {
+	if d > 0 {
+		s.maxRankingAge = d
+	}
+}
+
 // Build computes the ranked, privacy-safe leaderboard:
 //
 //	list users -> summarize each -> keep only percentage + index ->
@@ -149,6 +215,11 @@ func (s *Service) SetProfileProvider(p ProfilePublicProvider) {
 // partial-error metadata (which users were skipped, and why) for internal
 // monitoring — for now a failed user is silently omitted.
 func (s *Service) Build(ctx context.Context) ([]LeaderboardEntry, error) {
+	// Fastest path: the denormalized ranking projection, when fresh — a single
+	// query for exactly the rows shown, metadata joined only for those rows.
+	if entries, ok := s.buildFromRanking(ctx, TimeframeAll); ok {
+		return entries, nil
+	}
 	// Fast path: serve from the cache when it has data. Any cache problem falls
 	// through to live calculation — the cache is an optimization, not the truth.
 	if s.cache != nil {
@@ -161,17 +232,81 @@ func (s *Service) Build(ctx context.Context) ([]LeaderboardEntry, error) {
 }
 
 // BuildTimeframe ranks users over the given window. ALL uses the cache fast
-// path (identical to Build); trailing windows are computed live from index
-// snapshots. A user with no snapshot old enough is excluded from that window.
+// path (identical to Build); trailing windows prefer the ranking projection
+// when fresh, else are computed live from index snapshots. A user with no
+// snapshot old enough is excluded from that window.
 func (s *Service) BuildTimeframe(ctx context.Context, tf Timeframe) ([]LeaderboardEntry, error) {
 	if tf == TimeframeAll {
 		return s.Build(ctx)
+	}
+	if entries, ok := s.buildFromRanking(ctx, tf); ok {
+		return entries, nil
 	}
 	rows, _, err := s.rankRows(ctx, tf)
 	if err != nil {
 		return nil, err
 	}
 	return entriesOf(rows), nil
+}
+
+// rankingFresh reports whether the ranking projection for tf is populated and
+// recent enough to be preferred over live computation.
+func (s *Service) rankingFresh(ctx context.Context, tf Timeframe) bool {
+	if s.ranking == nil {
+		return false
+	}
+	at, found, err := s.ranking.OldestComputedAt(ctx, tf)
+	if err != nil || !found {
+		return false
+	}
+	return s.now().Sub(at) <= s.maxRankingAge
+}
+
+// buildFromRanking assembles the board for tf directly from the ranking
+// projection. ok=false means "use the next fallback path" (no ranking store,
+// stale, or a query error).
+func (s *Service) buildFromRanking(ctx context.Context, tf Timeframe) ([]LeaderboardEntry, bool) {
+	if !s.rankingFresh(ctx, tf) {
+		return nil, false
+	}
+	rows, err := s.ranking.TopPage(ctx, tf, maxLeaderboardSize)
+	if err != nil {
+		return nil, false
+	}
+	s.enrichPage(ctx, rows)
+	return entriesOf(rows), true
+}
+
+// enrichPage joins public profile data onto every row in a page, batching the
+// lookup into a single query when the attached ProfilePublicProvider supports
+// it (see ProfilePublicBatchProvider), else falling back to one lookup per row.
+func (s *Service) enrichPage(ctx context.Context, rows []rankedRow) {
+	if s.profiles == nil || len(rows) == 0 {
+		return
+	}
+	if batch, ok := s.profiles.(ProfilePublicBatchProvider); ok {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.userID
+		}
+		if infos, err := batch.PublicInfoBatch(ctx, ids); err == nil {
+			for i := range rows {
+				info, found := infos[rows[i].userID]
+				if !found || !info.IsPublic {
+					continue
+				}
+				rows[i].entry.Handle = info.Handle
+				rows[i].entry.StrategyTag = info.StrategyTag
+				if info.ShowWeights {
+					rows[i].entry.PublicWeights = info.Weights
+				}
+			}
+			return
+		}
+	}
+	for i := range rows {
+		s.enrich(ctx, rows[i].userID, &rows[i].entry)
+	}
 }
 
 // enrich joins public profile data onto a row. Private profiles (or users with
@@ -218,16 +353,16 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 	if len(scores) == 0 {
 		return nil, false
 	}
-	users, err := s.users.ListUsers(ctx)
+	users, err := s.users.ListRankableUsers(ctx)
 	if err != nil {
 		return nil, false
 	}
-	byID := make(map[string]auth.User, len(users))
+	byID := make(map[string]auth.RankableUser, len(users))
 	for _, u := range users {
 		byID[u.ID] = u
 	}
 
-	entries := make([]LeaderboardEntry, 0, len(scores))
+	rows := make([]rankedRow, 0, len(scores))
 	for _, sc := range scores {
 		u, ok := byID[sc.UserID]
 		if !ok {
@@ -239,18 +374,26 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 			}
 			continue
 		}
-		// portfolio_index = 100 + gain% holds exactly for our formulas.
-		// sc.Score comes from the Redis cache boundary, which is a documented
-		// legacy IEEE-754 read (CachedLeaderboardScore.Score); the exact value
-		// is reconstructed at this float64->money boundary conversion.
-		e := rankedEntry(
-			len(entries)+1, u.DisplayName, u.AvatarKey,
-			money.RatioFromFloat64(round2(sc.Score)), money.IndexValueFromFloat64(round2(100+sc.Score)),
-		)
+		// Redis is only a membership accelerator. Re-read the exact persistent
+		// ranked projection and apply the same comparator as the live path; a
+		// float64 Redis score must never decide application rank or tie order.
+		rp, err := s.ranked.CurrentRankedPerformance(ctx, sc.UserID)
+		if err != nil {
+			return nil, false
+		}
+		if rp.Paused {
+			_ = s.cache.RemoveGlobalScore(ctx, sc.UserID)
+			continue
+		}
+		e := rankedEntry(0, u.DisplayName, u.AvatarKey, rp.RankedReturnPercentage, rp.RankedIndex)
 		s.enrich(ctx, sc.UserID, &e)
-		entries = append(entries, e)
+		rows = append(rows, rankedRow{
+			userID: sc.UserID, entry: e,
+			returnPct: rp.RankedReturnPercentage, rankedIndex: rp.RankedIndex,
+		})
 	}
-	return entries, len(entries) > 0
+	sortRankedRows(rows)
+	return entriesOf(rows), len(rows) > 0
 }
 
 // RefreshCache recomputes every user's live performance and upserts the all-time
@@ -265,14 +408,14 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 // caller invoking RefreshCache on a fixed interval eventually covers every
 // user over ceil(len(users)/refreshBatchSize) calls, with each individual
 // call doing bounded work.
-func (s *Service) nextBatch(users []auth.User) ([]auth.User, bool) {
+func (s *Service) nextBatch(users []auth.RankableUser) ([]auth.RankableUser, bool) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
 
 	if s.refreshBatchSize <= 0 || s.refreshBatchSize >= len(users) {
 		return users, true
 	}
-	sorted := make([]auth.User, len(users))
+	sorted := make([]auth.RankableUser, len(users))
 	copy(sorted, users)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
@@ -285,7 +428,7 @@ func (s *Service) nextBatch(users []auth.User) ([]auth.User, bool) {
 	if size > n {
 		size = n
 	}
-	batch := make([]auth.User, 0, size)
+	batch := make([]auth.RankableUser, 0, size)
 	for i := 0; i < size; i++ {
 		batch = append(batch, sorted[(start+i)%n])
 	}
@@ -293,11 +436,51 @@ func (s *Service) nextBatch(users []auth.User) ([]auth.User, bool) {
 	return batch, false
 }
 
+// refreshRankingRows upserts userID's ranking-projection row for every
+// timeframe it's currently eligible for, and deletes the row for any
+// timeframe it's no longer eligible for (e.g. a snapshot gap that just grew
+// past maxSnapshotAge). rp is the already-fetched (non-paused) ranked
+// performance from this refresh tick — no extra valuation call is made.
+func (s *Service) refreshRankingRows(ctx context.Context, userID string, rp RankedPerformance) {
+	if s.ranking == nil {
+		return
+	}
+	for _, tf := range allTimeframes {
+		retPct, idx, ok := s.timeframeReturn(ctx, userID, rp, tf)
+		if !ok {
+			if err := s.ranking.Delete(ctx, tf, userID); err != nil {
+				slog.Warn("leaderboard_ranking_update_failed",
+					"operation", "delete_ineligible", "timeframe", tf, "user_id", userID, "error", err)
+			}
+			continue
+		}
+		if err := s.ranking.Upsert(ctx, tf, userID, idx, retPct, rp.TrackingStartedAt); err != nil {
+			slog.Warn("leaderboard_ranking_update_failed",
+				"operation", "upsert", "timeframe", tf, "user_id", userID, "error", err)
+		}
+	}
+}
+
+// deleteRankingRows removes userID's ranking-projection rows for the given
+// timeframes (used when a user becomes paused — excluded from ranking
+// entirely, same as the Redis cache eviction above).
+func (s *Service) deleteRankingRows(ctx context.Context, userID string, timeframes []Timeframe) {
+	if s.ranking == nil {
+		return
+	}
+	for _, tf := range timeframes {
+		if err := s.ranking.Delete(ctx, tf, userID); err != nil {
+			slog.Warn("leaderboard_ranking_update_failed",
+				"operation", "delete_paused", "timeframe", tf, "user_id", userID, "error", err)
+		}
+	}
+}
+
 func (s *Service) RefreshCache(ctx context.Context) (int, error) {
-	if s.cache == nil && s.snapshots == nil {
+	if s.cache == nil && s.snapshots == nil && s.ranking == nil {
 		return 0, nil
 	}
-	users, err := s.users.ListUsers(ctx)
+	users, err := s.users.ListRankableUsers(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrListUsers, err)
 	}
@@ -339,6 +522,7 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 					pausedRemoved++
 				}
 			}
+			s.deleteRankingRows(ctx, u.ID, allTimeframes)
 			continue
 		}
 		ranked[u.ID] = true
@@ -355,6 +539,7 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 				activeUpserted++
 			}
 		}
+		s.refreshRankingRows(ctx, u.ID, rp)
 	}
 	// Prune members that are no longer rankable at all (deleted users, or users
 	// whose ranked state disappeared), so the cache converges on the live set
@@ -419,11 +604,23 @@ type UserRanking struct {
 	RankedIndex            money.IndexValue
 }
 
+// UserRankings returns every ranked user's row for tf — the full per-user
+// join Explore uses to enrich its discovery feed with timeframe ranks. It
+// prefers the ranking projection when fresh (one bounded query instead of one
+// valuation per user); the live path remains the fallback for identical
+// results when the projection is absent, stale, or errors.
 func (s *Service) UserRankings(ctx context.Context, tf Timeframe) ([]UserRanking, error) {
+	if rows, ok := s.allRankingRows(ctx, tf); ok {
+		return toUserRankings(rows), nil
+	}
 	rows, _, err := s.rankRows(ctx, tf)
 	if err != nil {
 		return nil, err
 	}
+	return toUserRankings(rows), nil
+}
+
+func toUserRankings(rows []rankedRow) []UserRanking {
 	out := make([]UserRanking, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, UserRanking{
@@ -433,7 +630,25 @@ func (s *Service) UserRankings(ctx context.Context, tf Timeframe) ([]UserRanking
 			RankedIndex:            row.entry.RankedIndex,
 		})
 	}
-	return out, nil
+	return out
+}
+
+// allRankingRows returns every row for tf from the ranking projection when
+// fresh. ok=false means "use the live path" (no ranking store, stale, or a
+// query error) — same fallback contract as buildFromRanking.
+func (s *Service) allRankingRows(ctx context.Context, tf Timeframe) ([]rankedRow, bool) {
+	if !s.rankingFresh(ctx, tf) {
+		return nil, false
+	}
+	n, err := s.ranking.Count(ctx, tf)
+	if err != nil || n == 0 {
+		return nil, false
+	}
+	rows, err := s.ranking.TopPage(ctx, tf, n)
+	if err != nil {
+		return nil, false
+	}
+	return rows, true
 }
 
 // GetUserRank returns the exact global rank for userID, or 0 when the user's
@@ -442,7 +657,8 @@ func (s *Service) UserRankings(ctx context.Context, tf Timeframe) ([]UserRanking
 func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
 	// The requested user's current lifecycle state is cheap to validate and must
 	// take precedence over a stale cached membership.
-	if current, err := s.ranked.CurrentRankedPerformance(ctx, userID); err == nil && current.Paused {
+	current, currentErr := s.ranked.CurrentRankedPerformance(ctx, userID)
+	if currentErr == nil && current.Paused {
 		if s.cache != nil {
 			if err := s.cache.RemoveGlobalScore(ctx, userID); err != nil {
 				slog.Warn("leaderboard_cache_update_failed",
@@ -451,18 +667,24 @@ func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
 		}
 		return 0, nil
 	}
-	if s.cache != nil {
-		if scores, err := s.cache.GetGlobalTop(ctx, maxLeaderboardSize); err == nil && len(scores) > 0 {
-			for i, score := range scores {
-				if score.UserID == userID {
-					return i + 1, nil
-				}
-			}
-			return 0, nil
+	// Prefer the denormalized ranking projection when fresh: a single indexed
+	// query instead of scanning every user. found=false is treated as
+	// "unknown" (could be a brand-new user not yet reached by a refresh
+	// cycle), not as an authoritative "unranked" — fall through instead.
+	if currentErr == nil && s.rankingFresh(ctx, TimeframeAll) {
+		if rank, _, _, found, err := s.ranking.RankOf(ctx, TimeframeAll, userID); err == nil && found {
+			return rank, nil
+		}
+	}
+	// Only trust a cached rank after the persistent ranked projection confirms
+	// that this user still exists in an active, rankable lifecycle state.
+	if s.cache != nil && currentErr == nil {
+		if rank, err := s.cache.GetGlobalRank(ctx, userID); err == nil && rank > 0 {
+			return rank, nil
 		}
 	}
 
-	users, err := s.users.ListUsers(ctx)
+	users, err := s.users.ListRankableUsers(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrListUsers, err)
 	}
@@ -534,9 +756,14 @@ type Milestone struct {
 }
 
 // UserStanding computes the caller's rank within the timeframe board, plus the
-// total number of ranked participants. Always uses the live path so the result
-// is consistent for any timeframe.
+// total number of ranked participants. Prefers the denormalized ranking
+// projection when fresh (a couple of indexed queries instead of building the
+// whole board); falls back to the live path for consistent behavior on any
+// timeframe otherwise.
 func (s *Service) UserStanding(ctx context.Context, userID string, tf Timeframe) (Standing, error) {
+	if st, ok := s.userStandingFromRanking(ctx, userID, tf); ok {
+		return st, nil
+	}
 	rows, _, err := s.rankRows(ctx, tf)
 	if err != nil {
 		return Standing{}, err
@@ -581,18 +808,60 @@ type rankedRow struct {
 	rankedIndex money.IndexValue
 }
 
+// timeframeReturn computes the return percentage and index for tf given an
+// already-fetched (non-paused) rp. For ALL it's just rp's own since-baseline
+// values. For a windowed timeframe it requires an eligible snapshot at or
+// before now-window: ok=false means userID is excluded from tf rather than
+// mis-ranked (no snapshot, a pre-epoch snapshot, or a gap wider than
+// maxSnapshotAge — see SnapshotStore.IndexAtOrBefore's doc).
+func (s *Service) timeframeReturn(ctx context.Context, userID string, rp RankedPerformance, tf Timeframe) (retPct money.Ratio, idx money.IndexValue, ok bool) {
+	window, windowed := tf.window()
+	if !windowed {
+		return rp.RankedReturnPercentage, rp.RankedIndex, true
+	}
+	if s.snapshots == nil {
+		return money.ZeroRatio(), money.ZeroIndexValue(), false
+	}
+	cutoff := s.now().Add(-window)
+	// Only post-epoch snapshots are eligible; legacy pre-epoch history is
+	// ignored so a windowed return can never use a manipulable old index.
+	base, capturedAt, found, err := s.snapshots.IndexAtOrBefore(ctx, userID, cutoff, rp.TrackingStartedAt)
+	if err != nil {
+		log.Printf("leaderboard: skipping user %s due to snapshot error: %v", userID, err)
+		return money.ZeroRatio(), money.ZeroIndexValue(), false
+	}
+	if !found || base.Sign() <= 0 {
+		return money.ZeroRatio(), money.ZeroIndexValue(), false
+	}
+	// A base snapshot far older than the window's own start means a gap in
+	// recorded history (a missed snapshot run, a paused-then-resumed account) —
+	// using it would silently stretch e.g. "1W" into a much longer real span,
+	// so the user is excluded from this timeframe instead of mis-measured.
+	if cutoff.Sub(capturedAt) > s.maxSnapshotAge {
+		return money.ZeroRatio(), money.ZeroIndexValue(), false
+	}
+	retPct, err = performancehistory.TimeframeReturnRatio(base, rp.RankedIndex)
+	if err != nil {
+		return money.ZeroRatio(), money.ZeroIndexValue(), false
+	}
+	factor, err := rp.RankedIndex.DivExact(base, money.ScaleIndex+money.ScaleWeight)
+	if err != nil {
+		return money.ZeroRatio(), money.ZeroIndexValue(), false
+	}
+	idx = money.MustIndexValue("100").MulRatio(factor)
+	return retPct, idx, true
+}
+
 // rankRows is the single live-ranking core: summarize each user, compute the
 // timeframe return (since-baseline for ALL, else current-index vs the snapshot
 // at now-window), enrich with public profile data, then sort and assign ranks.
 // Windowed rows require old-enough snapshots; otherwise the user is excluded
 // from that timeframe rather than being ranked on all-time performance.
 func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int, error) {
-	users, err := s.users.ListUsers(ctx)
+	users, err := s.users.ListRankableUsers(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %v", ErrListUsers, err)
 	}
-	window, windowed := tf.window()
-	cutoff := s.now().Add(-window)
 
 	rows := make([]rankedRow, 0, len(users))
 	skipped := 0
@@ -606,48 +875,22 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 		if rp.Paused {
 			continue // empty portfolio: preserved but excluded from active ranking
 		}
-		// Default = all-time (since epoch): the ranked index already encodes it.
-		retPct := rp.RankedReturnPercentage
-		idx := rp.RankedIndex
-		if windowed {
-			if s.snapshots == nil {
-				continue
-			}
-			// Only post-epoch snapshots are eligible; legacy pre-epoch history is
-			// ignored so a windowed return can never use a manipulable old index.
-			base, capturedAt, found, err := s.snapshots.IndexAtOrBefore(ctx, u.ID, cutoff, rp.TrackingStartedAt)
-			if err != nil {
-				skipped++
-				log.Printf("leaderboard: skipping user %s due to snapshot error: %v", u.ID, err)
-				continue
-			}
-			if !found || base.Sign() <= 0 {
-				continue
-			}
-			// A base snapshot far older than the window's own start means a gap
-			// in recorded history (a missed snapshot run, a paused-then-resumed
-			// account) — using it would silently stretch e.g. "1W" into a much
-			// longer real span, so the user is excluded from this timeframe
-			// instead of mis-measured.
-			if cutoff.Sub(capturedAt) > s.maxSnapshotAge {
-				continue
-			}
-			var calcErr error
-			retPct, calcErr = performancehistory.TimeframeReturnRatio(base, rp.RankedIndex)
-			if calcErr != nil {
-				continue
-			}
-			factor, divErr := rp.RankedIndex.DivExact(base, money.ScaleIndex+money.ScaleWeight)
-			if divErr != nil {
-				continue
-			}
-			idx = money.MustIndexValue("100").MulRatio(factor)
+		retPct, idx, ok := s.timeframeReturn(ctx, u.ID, rp, tf)
+		if !ok {
+			continue
 		}
 		e := rankedEntry(0, u.DisplayName, u.AvatarKey, retPct, idx)
 		s.enrich(ctx, u.ID, &e)
 		rows = append(rows, rankedRow{userID: u.ID, entry: e, returnPct: retPct, rankedIndex: idx})
 	}
 
+	sortRankedRows(rows)
+	return rows, skipped, nil
+}
+
+// sortRankedRows is the one canonical global ranking rule. Both cached and
+// live reads call it after loading exact persistent ranked values.
+func sortRankedRows(rows []rankedRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i].entry, rows[j].entry
 		if cmp := rows[i].returnPct.Cmp(rows[j].returnPct); cmp != 0 {
@@ -661,7 +904,6 @@ func (s *Service) rankRows(ctx context.Context, tf Timeframe) ([]rankedRow, int,
 	for i := range rows {
 		rows[i].entry.Rank = i + 1
 	}
-	return rows, skipped, nil
 }
 
 func entriesOf(rows []rankedRow) []LeaderboardEntry {
@@ -679,19 +921,25 @@ func percentile(rank, participants int) float64 {
 	return round2(float64(participants-rank+1) / float64(participants) * 100)
 }
 
+// milestoneTarget picks the next reachable rank tier above rank.
+func milestoneTarget(rank int) (targetRank int, label string) {
+	switch {
+	case rank > 100:
+		return 100, "Top 100"
+	case rank > 25:
+		return 25, "Top 25"
+	case rank > 10:
+		return 10, "Top 10"
+	default:
+		return 1, "#1"
+	}
+}
+
 func nextMilestone(rows []rankedRow, rank int, returnPct money.Ratio) *Milestone {
 	if rank <= 1 {
 		return nil
 	}
-	targetRank, label := 1, "#1"
-	switch {
-	case rank > 100:
-		targetRank, label = 100, "Top 100"
-	case rank > 25:
-		targetRank, label = 25, "Top 25"
-	case rank > 10:
-		targetRank, label = 10, "Top 10"
-	}
+	targetRank, label := milestoneTarget(rank)
 	gap := money.ZeroRatio()
 	if targetRank > 0 && targetRank <= len(rows) {
 		gap = rows[targetRank-1].entry.RankedReturnPercentage.Sub(returnPct)
@@ -705,6 +953,59 @@ func nextMilestone(rows []rankedRow, rank int, returnPct money.Ratio) *Milestone
 		RankGap:             rank - targetRank,
 		ReturnGapPercentage: gap,
 	}
+}
+
+// nextMilestoneFromRanking is nextMilestone's counterpart for the ranking
+// projection: instead of indexing into an in-memory rows slice, it fetches the
+// exact value at the target rank with a single query.
+func (s *Service) nextMilestoneFromRanking(ctx context.Context, tf Timeframe, rank int, returnPct money.Ratio, total int) *Milestone {
+	if rank <= 1 {
+		return nil
+	}
+	targetRank, label := milestoneTarget(rank)
+	gap := money.ZeroRatio()
+	if targetRank > 0 && targetRank <= total {
+		if targetPct, found, err := s.ranking.ValueAtRank(ctx, tf, targetRank); err == nil && found {
+			gap = targetPct.Sub(returnPct)
+			if gap.Sign() < 0 {
+				gap = money.ZeroRatio()
+			}
+		}
+	}
+	return &Milestone{
+		Label:               label,
+		TargetRank:          targetRank,
+		RankGap:             rank - targetRank,
+		ReturnGapPercentage: gap,
+	}
+}
+
+// userStandingFromRanking is UserStanding's ranking-projection-preferred path.
+// ok=false means "fall back to the live path" — no ranking store, stale data,
+// a query error, or userID simply has no row yet (ambiguous between
+// genuinely-unranked and not-yet-refreshed, so it's always safe to defer to
+// the live path rather than guess).
+func (s *Service) userStandingFromRanking(ctx context.Context, userID string, tf Timeframe) (Standing, bool) {
+	if !s.rankingFresh(ctx, tf) {
+		return Standing{}, false
+	}
+	total, err := s.ranking.Count(ctx, tf)
+	if err != nil {
+		return Standing{}, false
+	}
+	rank, idx, retPct, found, err := s.ranking.RankOf(ctx, tf, userID)
+	if err != nil || !found {
+		return Standing{}, false
+	}
+	best := rank
+	st := Standing{
+		Timeframe: tf, ParticipantCount: total,
+		Rank: rank, RankedReturnPercentage: retPct, RankedIndex: idx,
+		Ranked: true, BestRank: &best,
+	}
+	st.Percentile = percentile(rank, total)
+	st.NextMilestone = s.nextMilestoneFromRanking(ctx, tf, rank, retPct, total)
+	return st, true
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }

@@ -1,6 +1,6 @@
 import { apiRequest } from "@/api/client";
 
-type ReplacementToken = { token: string };
+type ReplacementToken = void;
 export type ReauthenticationResult = { reauthentication_token: string };
 
 export function changePasswordRequest(

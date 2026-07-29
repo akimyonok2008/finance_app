@@ -60,6 +60,7 @@ export async function loginWithEmailRequest(
   const res = await fetch(`${API_BASE_URL}${AUTH_LOGIN_PATH}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ email: values.email, password: values.password }),
   });
 
@@ -75,7 +76,7 @@ export async function loginWithEmailRequest(
   }
 
   const payload = data as Record<string, unknown>;
-  const token = String(payload.token ?? "");
+  const token = "cookie-session";
   const userRaw =
     (payload.user as Record<string, unknown>) ?? payload;
 
@@ -88,6 +89,7 @@ export async function registerRequest(
   const res = await fetch(`${API_BASE_URL}${AUTH_REGISTER_PATH}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(input),
   });
 
@@ -116,6 +118,7 @@ async function publicJSON<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
@@ -162,6 +165,7 @@ async function providerRequest(
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
@@ -173,7 +177,7 @@ async function providerRequest(
     );
   }
   const payload = data as Record<string, unknown>;
-  const token = String(payload.token ?? "");
+  const token = "cookie-session";
   const userRaw = (payload.user as Record<string, unknown>) ?? payload;
   return { token, user: normalizeUser(userRaw) };
 }

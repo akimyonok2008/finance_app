@@ -32,20 +32,22 @@ func (s *PostgresStore) UpsertEvent(ctx context.Context, ev CorporateAction) (bo
 	}
 	var existingFingerprint string
 	var existingStatus Status
+	var existingRevision int
 	err = s.pool.QueryRow(ctx,
-		`SELECT raw_fingerprint, status FROM corporate_actions WHERE id=$1`, ev.ID).
-		Scan(&existingFingerprint, &existingStatus)
+		`SELECT raw_fingerprint, status, revision FROM corporate_actions WHERE id=$1`, ev.ID).
+		Scan(&existingFingerprint, &existingStatus, &existingRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, err = s.pool.Exec(ctx, `
 			INSERT INTO corporate_actions (
 				id, provider, provider_event_id, event_type, source_symbol, target_symbol,
 				effective_at, status, quality, normalized_payload, source_url, raw_fingerprint,
-				retrieved_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
+				retrieved_at, created_at, updated_at, revision, source_instrument_id, target_instrument_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now(),$14,$15,$16)
 			ON CONFLICT (id) DO NOTHING`,
 			ev.ID, ev.Provider, ev.ProviderEventID, string(ev.Type), ev.Source.Symbol,
 			targetSymbol(ev), ev.EffectiveAt, string(ev.Status), string(ev.Quality),
-			payload, ev.SourceURL, ev.RawFingerprint, ev.RetrievedAt)
+			payload, ev.SourceURL, ev.RawFingerprint, ev.RetrievedAt, ev.Revision,
+			nullableInstrumentID(ev.Source.InstrumentID), nullableInstrumentID(targetInstrumentID(ev)))
 		if err != nil {
 			return false, fmt.Errorf("corpactions: insert event: %w", err)
 		}
@@ -61,18 +63,39 @@ func (s *PostgresStore) UpsertEvent(ctx context.Context, ev CorporateAction) (bo
 	if existingStatus == StatusApplied {
 		status = StatusSuperseded // material change after application: correction workflow
 	}
+	ev.Revision = existingRevision + 1
+	payload, err = json.Marshal(ev)
+	if err != nil {
+		return false, fmt.Errorf("corpactions: marshal event: %w", err)
+	}
 	_, err = s.pool.Exec(ctx, `
 		UPDATE corporate_actions
 		SET event_type=$2, source_symbol=$3, target_symbol=$4, effective_at=$5, status=$6,
 		    quality=$7, normalized_payload=$8, source_url=$9, raw_fingerprint=$10,
-		    retrieved_at=$11, updated_at=now()
+		    retrieved_at=$11, updated_at=now(), revision=$12, source_instrument_id=$13,
+		    target_instrument_id=$14
 		WHERE id=$1`,
 		ev.ID, string(ev.Type), ev.Source.Symbol, targetSymbol(ev), ev.EffectiveAt,
-		string(status), string(ev.Quality), payload, ev.SourceURL, ev.RawFingerprint, ev.RetrievedAt)
+		string(status), string(ev.Quality), payload, ev.SourceURL, ev.RawFingerprint, ev.RetrievedAt,
+		ev.Revision, nullableInstrumentID(ev.Source.InstrumentID), nullableInstrumentID(targetInstrumentID(ev)))
 	if err != nil {
 		return false, fmt.Errorf("corpactions: update event: %w", err)
 	}
 	return true, nil
+}
+
+func targetInstrumentID(ev CorporateAction) string {
+	if ev.Target == nil {
+		return ""
+	}
+	return ev.Target.InstrumentID
+}
+
+func nullableInstrumentID(id string) any {
+	if id == "" {
+		return nil
+	}
+	return id
 }
 
 func targetSymbol(ev CorporateAction) any {

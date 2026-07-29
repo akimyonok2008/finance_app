@@ -5,6 +5,7 @@ set -euo pipefail
 : "${DATABASE_URL:?DATABASE_URL is required}"
 
 api_port="${PORT:-18082}"
+operations_port="${OPERATIONS_PORT:-18083}"
 log_file="${API_LOG_FILE:-api-startup.log}"
 
 APP_ENV="${APP_ENV:-test}" \
@@ -13,6 +14,7 @@ PRICE_PROVIDER=mock \
 ENABLE_BACKGROUND_WORKERS=false \
 ENABLE_QUOTE_REFRESH_WORKER=false \
 PORT="$api_port" \
+OPERATIONS_ADDR="127.0.0.1:${operations_port}" \
 "$API_BINARY" >"$log_file" 2>&1 &
 api_pid=$!
 
@@ -25,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 for _ in {1..60}; do
-  if curl --fail --silent "http://127.0.0.1:${api_port}/ready" >/dev/null; then
+  if curl --fail --silent "http://127.0.0.1:${operations_port}/ready" >/dev/null; then
     kill -TERM "$api_pid"
     wait "$api_pid"
     trap - EXIT

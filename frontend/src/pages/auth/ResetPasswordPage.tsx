@@ -1,14 +1,15 @@
 import { ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { resetPasswordRequest } from "@/api/authApi";
+import { useScrubbedURLToken } from "@/auth/useScrubbedURLToken";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export function ResetPasswordPage() {
-  const [params] = useSearchParams();
+  const token = useScrubbedURLToken();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [pending, setPending] = useState(false);
@@ -24,7 +25,7 @@ export function ResetPasswordPage() {
     setPending(true);
     setError("");
     try {
-      await resetPasswordRequest(params.get("token") ?? "", password);
+      await resetPasswordRequest(token, password);
       setComplete(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to reset password");
@@ -50,7 +51,7 @@ export function ResetPasswordPage() {
               <div><Label htmlFor="confirm-password">Confirm password</Label><Input id="confirm-password" className="mt-2" type="password" autoComplete="new-password" value={confirm} onChange={(event) => setConfirm(event.target.value)} /></div>
             </div>
             {error ? <p role="alert" className="mt-3 text-xs text-rose-300">{error}</p> : null}
-            <Button className="mt-5 w-full" disabled={pending || !params.get("token")}>{pending ? "Updating…" : "Update password"}</Button>
+            <Button className="mt-5 w-full" disabled={pending || !token}>{pending ? "Updating…" : "Update password"}</Button>
           </>
         )}
       </form>

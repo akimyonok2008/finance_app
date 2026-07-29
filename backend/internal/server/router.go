@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -12,6 +13,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/achievements"
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/competitions"
+	"github.com/ardakimyonok/finance_app/internal/httpx"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/marketdata"
 	"github.com/ardakimyonok/finance_app/internal/moderation"
@@ -58,6 +60,9 @@ type Deps struct {
 	// silently falling back to "*".
 	AppEnv             string
 	CORSAllowedOrigins []string
+	// TrustedProxyCIDRs is the explicit allow-list of immediate peers allowed
+	// to supply forwarding headers used for client-IP rate-limit keys.
+	TrustedProxyCIDRs []string
 
 	// RateLimitRedis is optional. When set, the auth/account rate limiters
 	// (see ratelimit.go) share their budget across every replica via Redis
@@ -87,21 +92,44 @@ func (m moderationUserAdmin) Ban(ctx context.Context, userID string, reason stri
 	return m.auth.Ban(ctx, userID, reason)
 }
 
+// requireAdmin gates admin-only endpoints (e.g. instrument-identity
+// reconciliation) on role=="admin" exactly — stricter than moderation.
+// RequireModerator, which also allows role=="moderator". The caller's role
+// is re-read from the database on every request, never trusted from a
+// client-supplied claim.
+func requireAdmin(users moderation.UserAdmin) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userID, ok := auth.UserIDFromContext(r.Context())
+			if !ok || userID == "" {
+				httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			view, err := users.UserByID(r.Context(), userID)
+			if err != nil || !view.IsAdmin {
+				httpx.WriteError(w, http.StatusForbidden, "admin_forbidden")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // New builds the application's HTTP router, wiring public auth routes and
 // JWT-protected portfolio and price routes.
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(trustedRealIPMiddleware(d.TrustedProxyCIDRs))
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(maxBodyBytes(globalBodyLimit))
 	r.Use(metricsMiddleware)
 	r.Use(corsMiddleware(d.AppEnv, d.CORSAllowedOrigins))
 
-	authHandler := auth.NewHandler(d.Auth)
+	authHandler := auth.NewHandler(d.Auth, strings.EqualFold(d.AppEnv, "production"))
 	portfolioHandler := portfolio.NewHandler(d.Portfolio)
-	portfolioHandler.SetAchievementEvaluator(d.Achievements) // trigger badges on add/summary
 	if d.CorporateActionView != nil {
 		portfolioHandler.SetCorporateActionView(d.CorporateActionView)
 	}
@@ -141,8 +169,6 @@ func New(d Deps) http.Handler {
 	r.Get("/", serveIndex)
 
 	r.Get("/health", healthHandler)
-	r.Get("/ready", readyHandler(d.ReadinessChecks, d.Info))
-	r.Handle("/metrics", metricsHandler())
 
 	// Per-IP rate limits. Without them, /auth/login and /auth/register are an
 	// unbounded credential-stuffing surface: each guess costs the attacker
@@ -175,11 +201,13 @@ func New(d Deps) http.Handler {
 
 	// Public auth routes.
 	r.Route("/auth", func(r chi.Router) {
+		r.Use(maxBodyBytes(authBodyLimit))
 		r.Use(rateLimitMiddleware(authLimiter))
 		if !d.DisablePasswordRegistration {
 			r.With(rateLimitMiddleware(registerLimiter)).Post("/register", authHandler.Register)
 		}
 		r.Post("/login", authHandler.Login)
+		r.Post("/logout", authHandler.Logout)
 		r.Post("/google", authHandler.Google)
 		r.Post("/verify-email", authHandler.VerifyEmail)
 		r.With(rateLimitMiddleware(recoveryLimiter)).Post("/resend-verification", authHandler.ResendVerification)
@@ -193,11 +221,11 @@ func New(d Deps) http.Handler {
 		r.Use(auth.RequireAuthWithUser(d.Tokens, d.Auth))
 
 		r.Get("/me", authHandler.Me)
-		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/change-password", authHandler.ChangePassword)
-		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/set-password", authHandler.SetPassword)
-		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/reauthenticate", authHandler.Reauthenticate)
+		r.With(maxBodyBytes(authBodyLimit), rateLimitMiddleware(accountLimiter)).Post("/auth/change-password", authHandler.ChangePassword)
+		r.With(maxBodyBytes(authBodyLimit), rateLimitMiddleware(accountLimiter)).Post("/auth/set-password", authHandler.SetPassword)
+		r.With(maxBodyBytes(authBodyLimit), rateLimitMiddleware(accountLimiter)).Post("/auth/reauthenticate", authHandler.Reauthenticate)
 		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/revoke-sessions", authHandler.RevokeSessions)
-		r.With(rateLimitMiddleware(accountLimiter)).Post("/auth/delete-account", authHandler.DeleteAccount)
+		r.With(maxBodyBytes(authBodyLimit), rateLimitMiddleware(accountLimiter)).Post("/auth/delete-account", authHandler.DeleteAccount)
 
 		if marketDataHandler != nil {
 			r.Get("/instruments/search", marketDataHandler.SearchInstruments)
@@ -212,9 +240,9 @@ func New(d Deps) http.Handler {
 			r.Get("/social/friends", socialHandler.Friends)
 
 			r.Get("/dm/conversations", socialHandler.Conversations)
-			r.Post("/dm/conversations", socialHandler.CreateConversation)
+			r.With(maxBodyBytes(socialBodyLimit)).Post("/dm/conversations", socialHandler.CreateConversation)
 			r.Get("/dm/conversations/{conversationId}/messages", socialHandler.Messages)
-			r.With(rateLimitMiddlewareByKey(messageLimiter, authenticatedUserOrIPKey)).
+			r.With(maxBodyBytes(socialBodyLimit), rateLimitMiddlewareByKey(messageLimiter, authenticatedUserOrIPKey)).
 				Post("/dm/conversations/{conversationId}/messages", socialHandler.SendMessage)
 			r.Post("/dm/conversations/{conversationId}/read", socialHandler.MarkRead)
 			r.Get("/dm/unread-count", socialHandler.UnreadCount)
@@ -228,8 +256,8 @@ func New(d Deps) http.Handler {
 		}
 
 		if moderationHandler != nil {
-			r.With(rateLimitMiddleware(reportLimiter)).Post("/reports/users/{userId}", moderationHandler.ReportUser)
-			r.With(rateLimitMiddleware(reportLimiter)).Post("/reports/messages/{messageId}", moderationHandler.ReportMessage)
+			r.With(maxBodyBytes(socialBodyLimit), rateLimitMiddleware(reportLimiter)).Post("/reports/users/{userId}", moderationHandler.ReportUser)
+			r.With(maxBodyBytes(socialBodyLimit), rateLimitMiddleware(reportLimiter)).Post("/reports/messages/{messageId}", moderationHandler.ReportMessage)
 
 			r.Get("/notifications", moderationHandler.Notifications)
 			r.Get("/notifications/unread-count", moderationHandler.UnreadNotificationCount)
@@ -240,9 +268,20 @@ func New(d Deps) http.Handler {
 				r.Use(moderation.RequireModerator(moderationUserAdmin{d.Auth}))
 				r.Get("/moderation/reports", moderationHandler.ListReports)
 				r.Get("/moderation/reports/{reportId}", moderationHandler.GetReport)
-				r.Post("/moderation/reports/{reportId}/resolve", moderationHandler.ResolveReport)
+				r.With(maxBodyBytes(profileBodyLimit)).Post("/moderation/reports/{reportId}/resolve", moderationHandler.ResolveReport)
 			})
 		}
+
+		// Instrument-identity reconciliation: an internal operations surface,
+		// never linked from any user-facing UI. Legacy positions/activities
+		// the backfill job couldn't resolve unambiguously (see
+		// portfolio.BackfillJob) land here for manual review.
+		r.Group(func(r chi.Router) {
+			r.Use(requireAdmin(moderationUserAdmin{d.Auth}))
+			r.Get("/admin/identity-reconciliation", portfolioHandler.ListPendingReconciliation)
+			r.Post("/admin/identity-reconciliation/{id}/resolve", portfolioHandler.ResolvePendingReconciliation)
+			r.Post("/admin/identity-reconciliation/{id}/reject", portfolioHandler.RejectPendingReconciliation)
+		})
 
 		r.Get("/portfolio", portfolioHandler.GetPortfolio)
 		r.Patch("/portfolio/settings", portfolioHandler.UpdatePortfolioSettings)
@@ -302,7 +341,7 @@ func New(d Deps) http.Handler {
 
 		if profileHandler != nil {
 			r.Get("/profiles/me", profileHandler.GetMe)
-			r.Patch("/profiles/me", profileHandler.UpdateMe)
+			r.With(maxBodyBytes(profileBodyLimit)).Patch("/profiles/me", profileHandler.UpdateMe)
 			// Static segment registered before {handle} so Explore is never
 			// shadowed by the public-profile wildcard.
 			r.Get("/profiles/explore", profileHandler.Explore)
@@ -310,5 +349,19 @@ func New(d Deps) http.Handler {
 		}
 	})
 
+	return r
+}
+
+// NewOperations builds the private operations router. Deployments should bind
+// it to loopback or a network reachable only by orchestrator health checks and
+// monitoring systems.
+func NewOperations(d Deps) http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Get("/health", healthHandler)
+	r.Get("/ready", readyHandler(d.ReadinessChecks, d.Info))
+	r.Handle("/metrics", metricsHandler())
 	return r
 }

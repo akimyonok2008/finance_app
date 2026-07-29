@@ -171,15 +171,10 @@ const API_BASE =
     ? location.origin
     : "http://localhost:8080";
 
-// Token storage. localStorage is blocked in some contexts (e.g. data: URLs in
-// a preview panel), so we keep an in-memory copy and only use localStorage when
-// it is actually available (lets the token survive reloads at localhost:8080).
-const TOKEN_KEY = "fa_token";
-let memToken = null;
-function safeLS(fn) { try { return fn(); } catch (_) { return null; } }
-const getToken = () => memToken ?? safeLS(() => localStorage.getItem(TOKEN_KEY));
-const setToken = (t) => { memToken = t; safeLS(() => localStorage.setItem(TOKEN_KEY, t)); };
-const clearToken = () => { memToken = null; safeLS(() => localStorage.removeItem(TOKEN_KEY)); };
+// Authentication uses an HttpOnly cookie; JavaScript never receives the JWT.
+const getToken = () => "cookie-session";
+const setToken = () => {};
+const clearToken = () => {};
 
 function show(id, data) {
   const el = document.getElementById(id);
@@ -190,10 +185,10 @@ function show(id, data) {
 // Wraps fetch, parses JSON, and throws a clean message on error responses.
 async function api(method, path, body, auth) {
   const headers = { "Content-Type": "application/json" };
-  if (auth) headers["Authorization"] = "Bearer " + getToken();
   const res = await fetch(API_BASE + path, {
     method,
     headers,
+    credentials: "include",
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();

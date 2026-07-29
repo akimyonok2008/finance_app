@@ -9,20 +9,21 @@ import (
 
 func validProductionConfig() Config {
 	return Config{
-		AppEnv:                      "production",
-		JWTSecret:                   "0123456789abcdef0123456789abcdef",
-		StorageProvider:             "postgres",
-		DatabaseURL:                 "postgres://app:secret@db/finance",
-		CORSAllowedOrigins:          []string{"https://app.example.com"},
-		PriceProvider:               "twelvedata",
-		EnableRealMarketData:        true,
-		TwelveDataAPIKey:            "ci-provider-key",
-		BaseCurrency:                "USD",
-		BenchmarkAwardMode:          "verified_only",
-		EnableBackgroundWorkers:     true,
-		EnableQuoteRefreshWorker:    true,
-		PasswordRegistrationEnabled: false,
-		EmailSender:                 "development",
+		AppEnv:                       "production",
+		JWTSecret:                    "0123456789abcdef0123456789abcdef",
+		StorageProvider:              "postgres",
+		DatabaseURL:                  "postgres://app:secret@db/finance",
+		CORSAllowedOrigins:           []string{"https://app.example.com"},
+		PriceProvider:                "twelvedata",
+		EnableRealMarketData:         true,
+		TwelveDataAPIKey:             "ci-provider-key",
+		BaseCurrency:                 "USD",
+		BenchmarkAwardMode:           "verified_only",
+		EnableBackgroundWorkers:      true,
+		EnableQuoteRefreshWorker:     true,
+		PasswordRegistrationEnabled:  false,
+		EmailSender:                  "development",
+		InstrumentResolutionRequired: true,
 	}
 }
 
@@ -127,6 +128,7 @@ func TestValidateProductionSafetyRequirements(t *testing.T) {
 		{name: "static FX for verified multicurrency", mutate: func(c *Config) { c.BaseCurrency = "EUR" }, message: "historical FX provider"},
 		{name: "background workers disabled", mutate: func(c *Config) { c.EnableBackgroundWorkers = false }, message: "ENABLE_BACKGROUND_WORKERS"},
 		{name: "quote worker disabled", mutate: func(c *Config) { c.EnableQuoteRefreshWorker = false }, message: "ENABLE_QUOTE_REFRESH_WORKER"},
+		{name: "instrument resolution not required", mutate: func(c *Config) { c.InstrumentResolutionRequired = false }, message: "INSTRUMENT_RESOLUTION_REQUIRED"},
 	}
 
 	for _, tt := range tests {
@@ -145,4 +147,31 @@ func TestValidateProductionExplicitDemoAllowsMockPrices(t *testing.T) {
 	cfg.BenchmarkAwardMode = "demo"
 
 	require.NoError(t, cfg.Validate())
+}
+
+// TestLoad_InstrumentResolutionRequiredDefaultsTrueInProduction: an operator
+// who deploys APP_ENV=production without ever hearing about
+// INSTRUMENT_RESOLUTION_REQUIRED must not silently get the permissive
+// (ticker-only-position-saving) behavior.
+func TestLoad_InstrumentResolutionRequiredDefaultsTrueInProduction(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("FINANCE_APP_ENV_FILE", "/nonexistent-so-no-.env-leaks-in")
+	cfg := Load()
+	assert.True(t, cfg.InstrumentResolutionRequired)
+
+	t.Setenv("APP_ENV", "development")
+	cfg = Load()
+	assert.False(t, cfg.InstrumentResolutionRequired)
+
+	t.Setenv("INSTRUMENT_RESOLUTION_REQUIRED", "true")
+	cfg = Load()
+	assert.True(t, cfg.InstrumentResolutionRequired, "explicit override must still work outside production")
+}
+
+func TestValidateRejectsInvalidTrustedProxyCIDR(t *testing.T) {
+	cfg := validProductionConfig()
+	cfg.TrustedProxyCIDRs = []string{"10.0.0.0/8", "not-a-cidr"}
+
+	err := cfg.Validate()
+	require.ErrorContains(t, err, "TRUSTED_PROXY_CIDRS")
 }

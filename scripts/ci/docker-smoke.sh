@@ -5,6 +5,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 compose=(docker compose -f .github/ci/docker-smoke.yml)
+ready() {
+  "${compose[@]}" exec -T api wget -q -O /dev/null http://127.0.0.1:9090/ready
+}
 cleanup() {
   "${compose[@]}" down --volumes --remove-orphans
 }
@@ -22,9 +25,10 @@ test "$frontend_user" != "0"
 test "$frontend_user" != "root"
 
 curl --fail --silent http://127.0.0.1:18080/health >/dev/null
-curl --fail --silent http://127.0.0.1:18080/ready >/dev/null
+ready
 curl --fail --silent http://127.0.0.1:18081/health >/dev/null
 curl --fail --silent http://127.0.0.1:18081/ >/dev/null
+curl --fail --silent http://127.0.0.1:18081/api/health >/dev/null
 
 expected="$(find backend/internal/db/migrations -maxdepth 1 -name '*.sql' | wc -l | tr -d ' ')"
 actual="$("${compose[@]}" exec -T postgres psql -U postgres -d finance_app -Atc \
@@ -36,7 +40,7 @@ test "$actual" = "$expected"
 "${compose[@]}" stop postgres
 curl --fail --silent http://127.0.0.1:18080/health >/dev/null
 for _ in {1..20}; do
-  if ! curl --fail --silent http://127.0.0.1:18080/ready >/dev/null; then
+  if ! ready; then
     readiness_failed=true
     break
   fi
@@ -46,7 +50,7 @@ test "${readiness_failed:-false}" = "true"
 
 "${compose[@]}" start postgres
 for _ in {1..30}; do
-  if curl --fail --silent http://127.0.0.1:18080/ready >/dev/null; then
+  if ready; then
     readiness_recovered=true
     break
   fi

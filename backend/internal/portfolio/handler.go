@@ -15,18 +15,10 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
-// AchievementEvaluator lets the portfolio handler trigger achievement checks
-// after a position change or summary view, without importing the achievements
-// package (avoids an import cycle). Optional — a nil evaluator skips triggers.
-type AchievementEvaluator interface {
-	EvaluatePortfolioAchievements(ctx context.Context, userID string) error
-}
-
 // Handler adapts HTTP requests to the portfolio Service. Every handler assumes
 // it runs behind auth.RequireAuth and reads the user id from the context.
 type Handler struct {
 	svc        *Service
-	evaluator  AchievementEvaluator      // optional
 	corpView   CorporateActionViewReader // optional; read-only automatic-adjustments view
 	incomeView IncomeEventViewReader     // optional; read-only automatic-income view
 }
@@ -113,20 +105,6 @@ type IncomeEventViewReader interface {
 // SetIncomeEventView attaches the read-only automatic-income reader.
 func (h *Handler) SetIncomeEventView(r IncomeEventViewReader) {
 	h.incomeView = r
-}
-
-// SetAchievementEvaluator attaches an optional achievement evaluator that fires
-// (best-effort) after a position is added and after the summary is computed.
-func (h *Handler) SetAchievementEvaluator(e AchievementEvaluator) {
-	h.evaluator = e
-}
-
-// evaluatePortfolio fires the achievement evaluator if one is attached. Errors
-// are intentionally ignored so badge evaluation never breaks the main request.
-func (h *Handler) evaluatePortfolio(ctx context.Context, userID string) {
-	if h.evaluator != nil {
-		_ = h.evaluator.EvaluatePortfolioAchievements(ctx, userID)
-	}
 }
 
 // --- response views ----------------------------------------------------------
@@ -236,7 +214,7 @@ func (h *Handler) GetPortfolio(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pf, err := h.svc.GetOrCreateDefaultPortfolio(r.Context(), userID)
+	pf, err := h.svc.GetPortfolio(r.Context(), userID)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -302,8 +280,6 @@ func (h *Handler) AddPosition(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	// First position (and any positive/index-110 state) may unlock badges.
-	h.evaluatePortfolio(r.Context(), userID)
 	httpx.WriteJSON(w, http.StatusCreated, toPositionView(res.Position))
 }
 
@@ -610,7 +586,6 @@ func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	h.evaluatePortfolio(r.Context(), userID)
 	if res.Closed == nil {
 		// Idempotent replay of a close whose summary is no longer reconstructable.
 		w.WriteHeader(http.StatusNoContent)
@@ -642,7 +617,6 @@ func (h *Handler) WriteOffPosition(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	h.evaluatePortfolio(r.Context(), userID)
 	if res.Closed == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -664,7 +638,6 @@ func (h *Handler) DeletePosition(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	h.evaluatePortfolio(r.Context(), userID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -679,8 +652,6 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	// Viewing the summary may unlock green_portfolio / index_110.
-	h.evaluatePortfolio(r.Context(), uid)
 	httpx.WriteJSON(w, http.StatusOK, summary)
 }
 
@@ -783,7 +754,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrDuplicateActivity):
 		httpx.WriteError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrMutationConflict):
+	case errors.Is(err, ErrMutationConflict), errors.Is(err, ErrIdempotencyConflict):
 		// The portfolio kept changing underneath the mutation. Nothing was
 		// committed; the client may safely retry (ideally with the same
 		// Idempotency-Key).

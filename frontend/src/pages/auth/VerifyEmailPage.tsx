@@ -1,16 +1,16 @@
 import { CircleCheck, CircleX, LoaderCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { verifyEmailRequest } from "@/api/authApi";
 import { useAuth } from "@/auth/useAuth";
+import { useScrubbedURLToken } from "@/auth/useScrubbedURLToken";
 import { Button } from "@/components/ui/button";
 
 type State = "loading" | "success" | "error";
 
 export function VerifyEmailPage() {
-  const [params] = useSearchParams();
-  const token = params.get("token") ?? "";
+  const token = useScrubbedURLToken();
   const { acceptSession } = useAuth();
   const [state, setState] = useState<State>(token ? "loading" : "error");
   const [message, setMessage] = useState(token ? "" : "This verification link is incomplete.");

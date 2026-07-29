@@ -26,9 +26,10 @@ func doCORSRequest(t *testing.T, appEnv string, allowed []string, origin string)
 	return rec
 }
 
-func TestCORS_DevelopmentWithNoAllowListIsWildcard(t *testing.T) {
+func TestCORS_DevelopmentWithNoAllowListReflectsOriginForCredentials(t *testing.T) {
 	rec := doCORSRequest(t, "development", nil, "https://evil.example.com")
-	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "https://evil.example.com", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "true", rec.Header().Get("Access-Control-Allow-Credentials"))
 }
 
 func TestCORS_ProductionWithNoAllowListSetsNoOriginHeader(t *testing.T) {

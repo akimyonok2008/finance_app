@@ -10,6 +10,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/corpactions"
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/instrument"
 	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
@@ -30,7 +31,18 @@ func (g testGateway) HoldersOfSymbol(ctx context.Context, symbol string) ([]corp
 	}
 	out := make([]corpactions.Holder, 0, len(hs))
 	for _, h := range hs {
-		out = append(out, corpactions.Holder{UserID: h.UserID, PortfolioID: h.PortfolioID, AcquiredAt: h.AcquiredAt})
+		out = append(out, corpactions.Holder{UserID: h.UserID, PortfolioID: h.PortfolioID, AcquiredAt: h.AcquiredAt, Symbol: h.Symbol})
+	}
+	return out, nil
+}
+func (g testGateway) HoldersOfInstrument(ctx context.Context, instrumentID string) ([]corpactions.Holder, error) {
+	hs, err := g.svc.HoldersOfInstrument(ctx, instrumentID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]corpactions.Holder, 0, len(hs))
+	for _, h := range hs {
+		out = append(out, corpactions.Holder{UserID: h.UserID, PortfolioID: h.PortfolioID, AcquiredAt: h.AcquiredAt, Symbol: h.Symbol})
 	}
 	return out, nil
 }
@@ -123,6 +135,114 @@ func TestAutomaticSplitAppliedAndIdempotent(t *testing.T) {
 	require.NoError(t, pipeline.RunOnce(context.Background()))
 	again := position(t, svc, "u1", "AAPL")
 	assert.InDelta(t, after.Quantity.Float64(), again.Quantity.Float64(), 1e-9, "split must not apply twice")
+}
+
+// TestIngest_MatchInstrumentResolvesSourceIdentity verifies that Ingest
+// resolves ev.Source.InstrumentID via the wired resolver, and that an event
+// still applies normally when it does (no regression to the existing
+// symbol-only auto-apply path).
+func TestIngest_MatchInstrumentResolvesSourceIdentity(t *testing.T) {
+	svc, _, _ := fundedService(t, "u1")
+	identities := instrument.NewInMemoryRepository()
+	resolver := instrument.NewResolver(identities, nil)
+	ctx := context.Background()
+	in, err := identities.CreateInstrument(ctx, instrument.Instrument{
+		CurrentSymbol: "AAPL", Status: instrument.StatusActive, IdentityQuality: instrument.QualityResolved,
+	})
+	require.NoError(t, err)
+	_, err = identities.CreateAlias(ctx, instrument.InstrumentAlias{
+		InstrumentID: in.ID, AliasType: instrument.AliasTicker, AliasValue: "AAPL",
+		ValidFrom: time.Now().UTC().Add(-time.Hour),
+	})
+	require.NoError(t, err)
+
+	store := corpactions.NewInMemoryStore()
+	provider := corpactions.NewManualDevelopmentProvider()
+	pipeline := corpactions.NewService(provider, store, testGateway{svc})
+	pipeline.SetInstrumentResolver(resolver)
+
+	provider.Seed(corpactions.ProviderCorporateAction{
+		ProviderEventID: "SPLIT-AAPL-MATCH", Type: corpactions.TypeSplit,
+		Source:      corpactions.InstrumentReference{Symbol: "AAPL"},
+		EffectiveAt: time.Now().UTC().Add(time.Minute), Effective: true,
+		RatioNumerator: fptr(2), RatioDenominator: fptr(1),
+	})
+	require.NoError(t, pipeline.Ingest(ctx))
+
+	ev, ok, err := store.GetEvent(ctx, "manual_dev:SPLIT-AAPL-MATCH")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, in.ID, ev.Source.InstrumentID, "Ingest must resolve the source instrument identity")
+
+	// No regression: the event still applies normally.
+	require.NoError(t, pipeline.Process(ctx))
+	pos := position(t, svc, "u1", "AAPL")
+	require.NotNil(t, pos)
+	assert.InDelta(t, 20, pos.Quantity.Float64(), 1e-9)
+}
+
+// TestProcessEvent_UsesInstrumentBasedHolderDiscoveryOnSymbolDrift is the
+// corporate-action identity-wiring regression: when a normalized event
+// already carries a resolved Source.InstrumentID (see Service.
+// matchInstrument, exercised separately in Ingest tests), processEvent must
+// still find a holder whose position.Symbol no longer matches the event's
+// symbol string — something HoldersOfSymbol alone cannot do. This isolates
+// the holder-discovery step from Ingest's provider-fetch filtering by
+// writing the normalized event directly into the store.
+func TestProcessEvent_UsesInstrumentBasedHolderDiscoveryOnSymbolDrift(t *testing.T) {
+	quotes := prices.NewMockPriceProvider()
+	quotes.Set("OLDX", 100, "USD")
+	repo := portfolio.NewInMemoryRepository()
+	svc := portfolio.NewService(repo, quotes, fx.NewMockFXProvider())
+	identities := instrument.NewInMemoryRepository()
+	resolver := instrument.NewResolver(identities, nil)
+	svc.SetInstrumentResolver(resolver)
+
+	ctx := context.Background()
+	in, err := identities.CreateInstrument(ctx, instrument.Instrument{
+		CurrentSymbol: "OLDX", Status: instrument.StatusActive, IdentityQuality: instrument.QualityResolved,
+	})
+	require.NoError(t, err)
+	_, err = identities.CreateAlias(ctx, instrument.InstrumentAlias{
+		InstrumentID: in.ID, AliasType: instrument.AliasTicker, AliasValue: "OLDX",
+		ValidFrom: time.Now().UTC().Add(-time.Hour),
+	})
+	require.NoError(t, err)
+
+	_, err = svc.DepositCash(ctx, "u1", "dep-u1", portfolio.CashFlowInput{Currency: "USD", Amount: money.AmountFromFloat64(10000)})
+	require.NoError(t, err)
+	_, err = svc.BuyPosition(ctx, "u1", "buy-u1", portfolio.BuyInput{Symbol: "OLDX", AssetType: portfolio.AssetTypeStock, Quantity: money.QuantityFromFloat64(10)})
+	require.NoError(t, err)
+	before := position(t, svc, "u1", "OLDX")
+	require.NotNil(t, before)
+	require.Equal(t, in.ID, before.InstrumentID)
+
+	store := corpactions.NewInMemoryStore()
+	pipeline := corpactions.NewService(corpactions.NewManualDevelopmentProvider(), store, testGateway{svc})
+
+	// A provider event under a DIFFERENT symbol string than the position's
+	// stored symbol, but already resolved (by matchInstrument, upstream of
+	// this test) to the SAME instrument identity as the held position.
+	num, den := 2.0, 1.0
+	_, err = store.UpsertEvent(ctx, corpactions.CorporateAction{
+		ID: "manual_dev:SPLIT-DRIFT-1", Provider: "manual_dev", ProviderEventID: "SPLIT-DRIFT-1",
+		Type:             corpactions.TypeSplit,
+		Source:           corpactions.InstrumentReference{Symbol: "DRIFTEDX", InstrumentID: in.ID},
+		EffectiveAt:      time.Now().UTC().Add(time.Minute),
+		RatioNumerator:   &num,
+		RatioDenominator: &den,
+		Status:           corpactions.StatusValidated,
+		Quality:          corpactions.QualityVerified,
+		RawFingerprint:   "drift-fp-1",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, pipeline.Process(ctx))
+
+	after := position(t, svc, "u1", "OLDX")
+	require.NotNil(t, after)
+	assert.InDelta(t, before.Quantity.Float64()*2, after.Quantity.Float64(), 1e-9,
+		"split must apply via instrument-based holder discovery despite the symbol string mismatch")
 }
 
 func TestSymbolChangeAppliedAutomatically(t *testing.T) {

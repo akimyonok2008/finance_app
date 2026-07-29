@@ -50,6 +50,18 @@ func TestGetOrCreateDefaultPortfolio_ReturnsExisting(t *testing.T) {
 	assert.Equal(t, first.ID, second.ID)
 }
 
+func TestPortfolioReadsDoNotCreateMissingAggregate(t *testing.T) {
+	repo := NewInMemoryRepository()
+	svc := NewService(repo, prices.NewMockPriceProvider(), fx.NewMockFXProvider())
+
+	_, err := svc.GetPortfolio(ctx(), "user-without-portfolio")
+	require.ErrorIs(t, err, ErrPortfolioNotFound)
+	_, err = svc.Summary(ctx(), "user-without-portfolio")
+	require.ErrorIs(t, err, ErrPortfolioNotFound)
+	_, err = repo.GetPortfolioByUser(ctx(), "user-without-portfolio")
+	require.ErrorIs(t, err, ErrPortfolioNotFound)
+}
+
 // --- baseline locking (current-day price model) --------------------------------
 
 func TestAddPosition_LocksBaselineAtCurrentPrice(t *testing.T) {
@@ -310,6 +322,7 @@ func TestSummary_MixedCurrencyNormalizedToUSD(t *testing.T) {
 
 func TestSummary_EmptyPortfolio(t *testing.T) {
 	svc, _ := newTestService()
+	require.NoError(t, svc.OnAccountCreated(ctx(), "user-1"))
 
 	sum, err := svc.Summary(ctx(), "user-1")
 	require.NoError(t, err)

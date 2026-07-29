@@ -36,6 +36,33 @@ func (r *PostgresRepository) GetByUserID(ctx context.Context, userID string) (Pr
 	`, userID))
 }
 
+// GetByUserIDs batch-fetches profiles for exactly the given IDs in one query
+// — used to enrich a leaderboard page without one round trip per row. Missing
+// IDs (no profile row) are simply absent from the result map.
+func (r *PostgresRepository) GetByUserIDs(ctx context.Context, userIDs []string) (map[string]Profile, error) {
+	out := make(map[string]Profile, len(userIDs))
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT user_id, handle, display_name, avatar_key, bio, strategy_tag,
+			is_public, show_public_weights, created_at, updated_at
+		FROM profiles WHERE user_id = ANY($1)
+	`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		p, err := scanProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[p.UserID] = p
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepository) GetByHandle(ctx context.Context, handle string) (Profile, error) {
 	return scanProfile(r.pool.QueryRow(ctx, `
 		SELECT user_id, handle, display_name, avatar_key, bio, strategy_tag,
@@ -45,13 +72,21 @@ func (r *PostgresRepository) GetByHandle(ctx context.Context, handle string) (Pr
 }
 
 func (r *PostgresRepository) ListPublicProfiles(ctx context.Context) ([]Profile, error) {
-	// TODO: accept ExploreFilter and push search/symbol/sort/pagination into SQL
-	// (plus a materialized public-card view + cached trending holdings) once the
-	// public-profile set is large enough that fetching all rows is wasteful.
+	// show_public_weights=false is pushed down too: every caller immediately
+	// discards those rows (Explore requires public weights to build a card at
+	// all), so there's no reason to fetch or scan them.
+	//
+	// TODO: accept ExploreFilter and push search/symbol/sort/pagination into
+	// SQL (plus a materialized public-card view + cached trending holdings)
+	// once the public-profile set is large enough that fetching all
+	// (public, weights-visible) rows is wasteful. Symbol/composition data
+	// itself isn't in this table (it's derived from live portfolio positions
+	// per profile), so that part needs its own materialized projection, not
+	// just a WHERE clause here.
 	rows, err := r.pool.Query(ctx, `
 		SELECT user_id, handle, display_name, avatar_key, bio, strategy_tag,
 			is_public, show_public_weights, created_at, updated_at
-		FROM profiles WHERE is_public = true
+		FROM profiles WHERE is_public = true AND show_public_weights = true
 	`)
 	if err != nil {
 		return nil, err

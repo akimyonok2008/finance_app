@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -13,8 +14,9 @@ import (
 // secret MUST be overridden in production (see README).
 const (
 	defaultPort                   = "8080"
+	defaultOperationsAddr         = "127.0.0.1:9090"
 	defaultJWTSecret              = "dev-secret-change-me"
-	defaultJWTExpiryHr            = 24
+	defaultJWTExpiryHr            = 4
 	defaultPriceProvider          = "mock"
 	defaultStorageProvider        = "memory"
 	defaultAppEnv                 = "development"
@@ -49,6 +51,7 @@ const (
 type Config struct {
 	AppEnv          string
 	Port            string
+	OperationsAddr  string
 	JWTSecret       string
 	JWTExpiry       time.Duration
 	PriceProvider   string
@@ -63,6 +66,9 @@ type Config struct {
 	// allow-list configured" — the server then falls back to "*" outside
 	// production, or to no CORS headers at all in production.
 	CORSAllowedOrigins []string
+	// TrustedProxyCIDRs lists the ingress proxy networks whose forwarding
+	// headers may be used to determine the client IP. Empty trusts no proxy.
+	TrustedProxyCIDRs []string
 
 	EnableBackgroundWorkers    bool
 	OutboxReadinessMaxPending  int
@@ -145,6 +151,13 @@ type Config struct {
 	OpenFIGIBaseURL        string
 	OpenFIGIRequestTimeout time.Duration
 
+	// InstrumentResolutionRequired rejects a buy whose ticker resolves to
+	// QualityUnresolved (no candidate identity found) instead of saving a
+	// ticker-only position. Ambiguous resolutions are always rejected
+	// regardless of this flag. Validate() forces this true under
+	// APP_ENV=production — see the comment there for why.
+	InstrumentResolutionRequired bool
+
 	GoogleAuthEnabled bool
 	GoogleClientID    string
 	AppleAuthEnabled  bool
@@ -177,11 +190,14 @@ type Config struct {
 // development-friendly defaults when a variable is missing or invalid.
 func Load() Config {
 	loadDotEnvFiles(envFileCandidates()...)
+	appEnv := getEnv("APP_ENV", defaultAppEnv)
 
 	return Config{
-		AppEnv:             getEnv("APP_ENV", defaultAppEnv),
+		AppEnv:             appEnv,
 		CORSAllowedOrigins: getEnvList("CORS_ALLOWED_ORIGINS"),
+		TrustedProxyCIDRs:  getEnvList("TRUSTED_PROXY_CIDRS"),
 		Port:               getEnv("PORT", defaultPort),
+		OperationsAddr:     getEnv("OPERATIONS_ADDR", defaultOperationsAddr),
 		JWTSecret:          getEnv("JWT_SECRET", defaultJWTSecret),
 		JWTExpiry:          time.Duration(getEnvInt("JWT_EXPIRY_HOURS", defaultJWTExpiryHr)) * time.Hour,
 		PriceProvider:      getEnv("PRICE_PROVIDER", defaultPriceProvider),
@@ -247,6 +263,12 @@ func Load() Config {
 
 		DataUsageMode: getEnv("DATA_USAGE_MODE", defaultDataUsageMode),
 
+		// Defaults true in production even if unset: an unresolved buy saving
+		// a ticker-only position is exactly the drift this whole identity
+		// layer exists to prevent. An operator can still force it off, but
+		// there is no silent-by-default gap.
+		InstrumentResolutionRequired: getEnvBool("INSTRUMENT_RESOLUTION_REQUIRED", strings.EqualFold(appEnv, "production")),
+
 		OpenFIGIEnabled:        getEnvBool("OPENFIGI_ENABLED", false),
 		OpenFIGIAPIKey:         getEnv("OPENFIGI_API_KEY", ""),
 		OpenFIGIBaseURL:        getEnv("OPENFIGI_BASE_URL", defaultOpenFIGIBaseURL),
@@ -296,6 +318,11 @@ func (c Config) UsingDefaultSecret() bool {
 }
 
 func (c Config) Validate() error {
+	for _, cidr := range c.TrustedProxyCIDRs {
+		if _, err := netip.ParsePrefix(strings.TrimSpace(cidr)); err != nil {
+			return fmt.Errorf("TRUSTED_PROXY_CIDRS contains invalid CIDR %q", cidr)
+		}
+	}
 	if c.GoogleAuthEnabled && strings.TrimSpace(c.GoogleClientID) == "" {
 		return fmt.Errorf("GOOGLE_AUTH_ENABLED=true requires GOOGLE_CLIENT_ID")
 	}
@@ -321,6 +348,9 @@ func (c Config) Validate() error {
 		}
 		if err := validateProductionCORS(c.CORSAllowedOrigins); err != nil {
 			return err
+		}
+		if !c.InstrumentResolutionRequired {
+			return fmt.Errorf("APP_ENV=production requires INSTRUMENT_RESOLUTION_REQUIRED=true (or unset, which defaults true in production)")
 		}
 		if strings.EqualFold(strings.TrimSpace(c.PriceProvider), "mock") || strings.TrimSpace(c.PriceProvider) == "" {
 			if !c.DemoModeEnabled || !strings.EqualFold(c.BenchmarkAwardMode, "demo") {

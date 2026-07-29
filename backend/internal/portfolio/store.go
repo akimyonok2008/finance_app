@@ -65,6 +65,17 @@ type OutboxEvent struct {
 	ProcessedAt       *time.Time
 	AttemptCount      int
 	LastError         string
+
+	// InstrumentID, DisplaySymbolAtEventTime and ProviderReferenceAtEventTime
+	// are snapshots of the mutation's instrument identity at commit time, so
+	// a later ticker rename or alias change never rewrites what already
+	// happened. All three are empty for cash-only mutations (deposit,
+	// withdrawal) which have no instrument. ProviderReferenceAtEventTime is
+	// currently unpopulated (reserved) — provider-symbol resolution is not
+	// yet threaded into the mutation coordinator.
+	InstrumentID                 string
+	DisplaySymbolAtEventTime     string
+	ProviderReferenceAtEventTime string
 }
 
 // MutationAudit is the privacy-safe mutation log. It proves the neutrality
@@ -76,6 +87,7 @@ type MutationAudit struct {
 	PortfolioID              string
 	UserID                   string
 	MutationType             string
+	RequestFingerprint       string
 	PortfolioVersionBefore   int64
 	PortfolioVersionAfter    int64
 	PerformanceVersionBefore int64

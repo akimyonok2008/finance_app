@@ -2,6 +2,7 @@ package leaderboard
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -288,6 +289,24 @@ func TestGetUserRank_PausedStateEvictsStaleCachedRank(t *testing.T) {
 	top, err := cache.GetGlobalTop(context.Background(), 0)
 	require.NoError(t, err)
 	assert.Empty(t, top)
+}
+
+func TestGetUserRank_UsesDirectCacheRankBeyondTopHundred(t *testing.T) {
+	users := make([]auth.User, 0, 101)
+	ranked := make(map[string]RankedPerformance, 101)
+	cache := newTestCache(t)
+	for i := 1; i <= 101; i++ {
+		id := fmt.Sprintf("u%03d", i)
+		users = append(users, user(id, id))
+		ranked[id] = summary(fmt.Sprintf("%d", 102-i), fmt.Sprintf("%d", 202-i))
+		require.NoError(t, cache.UpsertGlobalScore(context.Background(), id, testRatio(fmt.Sprintf("%d", 102-i))))
+	}
+	svc := NewService(fakeUsers{users: users}, fakeRanked{byUser: ranked})
+	svc.SetCache(cache)
+
+	rank, err := svc.GetUserRank(context.Background(), "u101")
+	require.NoError(t, err)
+	assert.Equal(t, 101, rank)
 }
 
 func TestRefreshCache_DoesNotWriteIndependentSnapshotHistory(t *testing.T) {

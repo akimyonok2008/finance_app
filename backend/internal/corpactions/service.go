@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/instrument"
+	"github.com/ardakimyonok/finance_app/internal/telemetry"
 )
 
 // Holder is a portfolio that currently holds a symbol, with the time it was
@@ -14,6 +17,13 @@ type Holder struct {
 	UserID      string
 	PortfolioID string
 	AcquiredAt  time.Time
+	// Symbol is the position's ACTUAL stored symbol, which may differ from
+	// the event's Source.Symbol when the holder was discovered via
+	// HoldersOfInstrument (a resolved identity survives ticker drift that a
+	// symbol string does not). applyToHolder applies against this, never
+	// against the event's symbol, so the mutation always targets the real
+	// position.
+	Symbol string
 }
 
 // PortfolioGateway is the narrow portfolio surface the pipeline needs. It is
@@ -22,6 +32,12 @@ type Holder struct {
 type PortfolioGateway interface {
 	ActiveSymbols(ctx context.Context) ([]string, error)
 	HoldersOfSymbol(ctx context.Context, symbol string) ([]Holder, error)
+	// HoldersOfInstrument is the identity-based counterpart of
+	// HoldersOfSymbol, preferred over it whenever the event's source resolved
+	// to a stable instrument identity (see Service.matchInstrument) — it
+	// survives a ticker rename between when a position was opened and when
+	// the corporate action is processed, which symbol matching cannot.
+	HoldersOfInstrument(ctx context.Context, instrumentID string) ([]Holder, error)
 	// ApplySplit applies a (reverse) split to a user's holding idempotently by
 	// requestID. num/den are the split ratio.
 	ApplySplit(ctx context.Context, userID, requestID, symbol string, num, den float64, effectiveAt time.Time) error
@@ -47,6 +63,12 @@ type Service struct {
 	now      func() time.Time
 	lookback time.Duration
 	retryIn  time.Duration
+	// identity resolves a provider's InstrumentReference to a stable
+	// instrument identity (see matchInstrument). nil disables matching
+	// entirely — every event stays exactly as symbol-based as before this
+	// was wired, which is the correct degraded behavior for an environment
+	// with no resolver configured.
+	identity *instrument.Resolver
 }
 
 // NewService wires the pipeline.
@@ -68,6 +90,43 @@ func (s *Service) SetMetrics(m Metrics) {
 func (s *Service) SetLookback(d time.Duration) {
 	if d > 0 {
 		s.lookback = d
+	}
+}
+
+// SetInstrumentResolver wires identity resolution into Ingest (see
+// matchInstrument). nil (the zero value) is the safe default: matching is
+// simply skipped and every event stays symbol-based, exactly as before this
+// was introduced.
+func (s *Service) SetInstrumentResolver(resolver *instrument.Resolver) {
+	s.identity = resolver
+}
+
+// matchInstrument resolves ref's stable instrument identity in place, using
+// the same FIGI/ISIN/CUSIP-first, then-ticker+MIC resolution order as the
+// portfolio buy path (Service.resolveBuyIdentity). A miss is not an error —
+// an unresolved or ambiguous provider event is an expected outcome, recorded
+// via telemetry so the deployment can see how much of the corporate-action
+// feed still has no stable identity to key on.
+func (s *Service) matchInstrument(ctx context.Context, ref *InstrumentReference) {
+	if s.identity == nil || ref == nil || ref.Symbol == "" {
+		return
+	}
+	resolution, err := s.identity.ResolveDetailedAt(ctx, instrument.IdentityQuery{
+		Ticker: ref.Symbol, ExchangeCode: ref.Exchange, MIC: ref.MIC,
+		FIGI: ref.FIGI, ISIN: ref.ISIN, CUSIP: ref.CUSIP,
+	}, nil)
+	if err != nil {
+		return
+	}
+	switch resolution.Quality {
+	case instrument.QualityAmbiguous:
+		telemetry.IncInstrumentResolutionAmbiguous()
+	case instrument.QualityUnresolved:
+		telemetry.IncInstrumentResolutionUnresolved()
+	default:
+		if resolution.Instrument != nil {
+			ref.InstrumentID = resolution.Instrument.ID
+		}
 	}
 }
 
@@ -102,6 +161,19 @@ func (s *Service) Ingest(ctx context.Context) error {
 	for _, e := range raw {
 		s.metrics.Inc("corporate_actions_fetched_total")
 		ev := normalize(s.provider.Name(), e, s.now())
+		s.matchInstrument(ctx, &ev.Source)
+		if ev.Target != nil {
+			s.matchInstrument(ctx, ev.Target)
+		}
+		// Mergers/spin-offs/cash-mergers never auto-apply regardless of
+		// identity (see autoAppliesType) — an unresolved source identity on
+		// one of these is worth surfacing distinctly from the generic
+		// "pending complete data" bucket, since it flags the review queue
+		// this whole identity layer exists to feed.
+		if !s.autoAppliesType(ev.Type) && ev.Source.InstrumentID == "" {
+			s.metrics.Inc("corporate_action_quarantined_total")
+			telemetry.IncCorporateActionQuarantined()
+		}
 		changed, err := s.store.UpsertEvent(ctx, ev)
 		if err != nil {
 			return err
@@ -152,6 +224,25 @@ func (s *Service) processEvent(ctx context.Context, ev CorporateAction) {
 	if err != nil {
 		return
 	}
+	// Identity-based discovery is additive, never a replacement: it catches
+	// holders whose position.symbol has drifted from the provider's current
+	// ticker (e.g. a rename this pipeline didn't apply), without risking
+	// dropping any holder the existing symbol match already finds.
+	if ev.Source.InstrumentID != "" {
+		byInstrument, err := s.gateway.HoldersOfInstrument(ctx, ev.Source.InstrumentID)
+		if err == nil {
+			seen := make(map[string]bool, len(holders))
+			for _, h := range holders {
+				seen[h.PortfolioID] = true
+			}
+			for _, h := range byInstrument {
+				if !seen[h.PortfolioID] {
+					seen[h.PortfolioID] = true
+					holders = append(holders, h)
+				}
+			}
+		}
+	}
 	applied := 0
 	for _, h := range holders {
 		// Effective-date eligibility: a holder who acquired the position AFTER the
@@ -184,15 +275,25 @@ func (s *Service) processEvent(ctx context.Context, ev CorporateAction) {
 // gateway, which routes to the aggregate coordinator (atomic, idempotent).
 func (s *Service) applyToHolder(ctx context.Context, ev CorporateAction, h Holder) error {
 	requestID := fmt.Sprintf("ca:%s:%s", ev.ID, h.PortfolioID)
+	// Apply against the holder's ACTUAL stored symbol (h.Symbol), never
+	// ev.Source.Symbol directly: when h was discovered via
+	// HoldersOfInstrument, the event's symbol string may not be what the
+	// position is stored under (that's exactly the drift identity
+	// resolution exists to survive), and the mutation coordinator matches
+	// positions by symbol.
+	symbol := h.Symbol
+	if symbol == "" {
+		symbol = ev.Source.Symbol
+	}
 	switch ev.Type {
 	case TypeSplit, TypeReverseSplit:
-		if err := s.gateway.ApplySplit(ctx, h.UserID, requestID, ev.Source.Symbol,
+		if err := s.gateway.ApplySplit(ctx, h.UserID, requestID, symbol,
 			*ev.RatioNumerator, *ev.RatioDenominator, ev.EffectiveAt); err != nil {
 			return err
 		}
 	case TypeSymbolChange:
 		if err := s.gateway.ApplySymbolChange(ctx, h.UserID, requestID,
-			ev.Source.Symbol, ev.Target.Symbol, ev.EffectiveAt); err != nil {
+			symbol, ev.Target.Symbol, ev.EffectiveAt); err != nil {
 			return err
 		}
 	default:

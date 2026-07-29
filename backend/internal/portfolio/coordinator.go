@@ -2,7 +2,11 @@ package portfolio
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -352,6 +356,18 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		if audit, found, err := tx.FindAuditByRequestID(ctx, req.RequestID); err != nil {
 			return MutationResult{}, nil, err
 		} else if found {
+			fingerprint, err := mutationFingerprint(req)
+			if err != nil {
+				return MutationResult{}, nil, err
+			}
+			if audit.RequestFingerprint != "" && audit.RequestFingerprint != fingerprint {
+				return MutationResult{}, nil, ErrIdempotencyConflict
+			}
+			// Records written before fingerprints were introduced can only be
+			// safely replayed when the operation itself still matches.
+			if audit.RequestFingerprint == "" && audit.MutationType != string(req.Kind) {
+				return MutationResult{}, nil, ErrIdempotencyConflict
+			}
 			return c.replay(ctx, tx, audit), nil, nil
 		}
 	}
@@ -538,6 +554,7 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		PortfolioID:              pf.ID,
 		UserID:                   req.UserID,
 		MutationType:             string(req.Kind),
+		RequestFingerprint:       mustMutationFingerprint(req),
 		PortfolioVersionBefore:   pf.Version,
 		PortfolioVersionAfter:    newVersion,
 		PerformanceVersionBefore: versionBefore,
@@ -554,7 +571,7 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 	// work (private archive snapshot, ranked lifecycle history, leaderboard
 	// cache, projections) is
 	// driven from this after commit.
-	if err := tx.AppendOutbox(ctx, OutboxEvent{
+	outboxEvent := OutboxEvent{
 		ID:                uuid.NewString(),
 		EventType:         EventPortfolioMutated,
 		AggregateType:     "portfolio",
@@ -567,7 +584,16 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		ValuationAsOf:     val.ValuationAsOf,
 		DataQualityStatus: val.DataQualityStatus,
 		CreatedAt:         val.ObservedAt,
-	}); err != nil {
+	}
+	// plan.activity is nil only for mutations that don't record a ledger
+	// entry; every activity carries the instrument identity/symbol snapshot
+	// that was current for THIS mutation, which is exactly what an outbox
+	// consumer needs even if the instrument is later renamed or backfilled.
+	if plan.activity != nil {
+		outboxEvent.InstrumentID = plan.activity.InstrumentID
+		outboxEvent.DisplaySymbolAtEventTime = plan.activity.Symbol
+	}
+	if err := tx.AppendOutbox(ctx, outboxEvent); err != nil {
 		return MutationResult{}, nil, err
 	}
 
@@ -580,6 +606,25 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		RankingStatus:     next.Status,
 		Activity:          plan.activity,
 	}, nil, nil
+}
+
+func mutationFingerprint(req MutationRequest) (string, error) {
+	normalized := req
+	normalized.RequestID = ""
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("portfolio: fingerprint request: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func mustMutationFingerprint(req MutationRequest) string {
+	fingerprint, err := mutationFingerprint(req)
+	if err != nil {
+		panic(err) // MutationRequest contains only JSON-serializable domain values.
+	}
+	return fingerprint
 }
 
 // quantityTolerance is the shared epsilon for quantity comparisons. Quantities

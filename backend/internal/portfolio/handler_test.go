@@ -22,6 +22,7 @@ type testEnv struct {
 	router   http.Handler
 	tm       *auth.TokenManager
 	provider *prices.MockPriceProvider
+	svc      *portfolio.Service
 }
 
 func newTestEnv() *testEnv {
@@ -46,11 +47,12 @@ func newTestEnv() *testEnv {
 		r.Post("/portfolio/positions/{positionId}/write-off", ph.WriteOffPosition)
 		r.Patch("/portfolio/settings", ph.UpdatePortfolioSettings)
 	})
-	return &testEnv{router: r, tm: tm, provider: provider}
+	return &testEnv{router: r, tm: tm, provider: provider, svc: svc}
 }
 
 func (e *testEnv) token(t *testing.T, userID string) string {
 	t.Helper()
+	require.NoError(t, e.svc.OnAccountCreated(t.Context(), userID))
 	tok, err := e.tm.Generate(userID, userID+"@example.com")
 	require.NoError(t, err)
 	return tok
