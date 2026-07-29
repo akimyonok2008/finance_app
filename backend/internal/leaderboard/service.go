@@ -63,28 +63,49 @@ const maxLeaderboardSize = 100
 // RankingStore is the optional denormalized ranking projection (a Postgres
 // table populated by RefreshCache from the same per-user valuation it already
 // pays for). Reading it back lets board, per-user-rank, and windowed-standing
-// queries do O(page size) work with rank computed by a Postgres window
-// function, instead of enumerating every user and sorting in application
-// memory. It is a pure optimization layer: any error, staleness, or absence
-// falls back to the existing live computation, exactly like LeaderboardCache.
+// queries do O(page size) work, because rank is materialized once per
+// generation by CompleteCycle rather than recomputed by a window function on
+// every read — see PostgresRankingStore's doc. It is a pure optimization
+// layer: any error, staleness, or absence falls back to the existing live
+// computation, exactly like LeaderboardCache.
 type RankingStore interface {
+	// Upsert and Delete always act on the projection's current "building"
+	// generation (tracked in leaderboard_ranking_state) — never on the
+	// generation reads are currently served from. Rows only become visible to
+	// TopPage/RankOf/ValueAtRank/Count once CompleteCycle promotes this
+	// generation to active.
 	Upsert(ctx context.Context, tf Timeframe, userID string, idx money.IndexValue, retPct money.Ratio, trackingStartedAt time.Time) error
 	Delete(ctx context.Context, tf Timeframe, userID string) error
-	// TopPage returns up to limit rows for tf, ranked by a window function and
-	// joined to display metadata in a single round trip.
+	// TopPage returns up to limit rows for tf from the active generation,
+	// ranked by a window function and joined to display metadata in a single
+	// round trip.
 	TopPage(ctx context.Context, tf Timeframe, limit int) ([]rankedRow, error)
-	// RankOf returns userID's exact rank/index/return for tf. found=false means
-	// userID has no row for tf — this can mean genuinely unranked OR simply
-	// "not yet reached by a refresh cycle", so callers must treat it as
-	// "unknown" and fall back rather than as an authoritative negative.
+	// RankOf returns userID's exact rank/index/return for tf from the active
+	// generation. found=false means userID has no row for tf — this can mean
+	// genuinely unranked OR simply "not yet reached by a refresh cycle", so
+	// callers must treat it as "unknown" and fall back rather than as an
+	// authoritative negative.
 	RankOf(ctx context.Context, tf Timeframe, userID string) (rank int, idx money.IndexValue, retPct money.Ratio, found bool, err error)
 	// ValueAtRank returns the return percentage of the row at an exact 1-based
-	// rank, for milestone-gap calculations.
+	// rank in the active generation, for milestone-gap calculations.
 	ValueAtRank(ctx context.Context, tf Timeframe, rank int) (retPct money.Ratio, found bool, err error)
 	Count(ctx context.Context, tf Timeframe) (int, error)
-	// OldestComputedAt reports the least-recently-refreshed row's timestamp for
-	// tf. found=false means tf has no rows yet (never refreshed).
-	OldestComputedAt(ctx context.Context, tf Timeframe) (at time.Time, found bool, err error)
+	// ActiveGenerationAge reports when the currently-active generation was
+	// promoted (see CompleteCycle). found=false means no generation has ever
+	// completed a full, verified pass over every eligible user — callers must
+	// fall back to live computation rather than trust a partially-built or
+	// never-built projection.
+	ActiveGenerationAge(ctx context.Context) (activatedAt time.Time, found bool, err error)
+	// CompleteCycle atomically promotes the building generation (the one
+	// Upsert/Delete have been writing into) to active — making its rows the
+	// ones TopPage/RankOf/etc. read — then starts the next building
+	// generation and prunes the rows of the generation that was just
+	// replaced. Callers must only call this once a full pass over every
+	// eligible user has actually been attempted (see Service.nextBatch's
+	// cycle tracking); calling it early would promote an incomplete
+	// generation and reintroduce the "board silently omits users" bug this
+	// mechanism exists to prevent.
+	CompleteCycle(ctx context.Context) error
 }
 
 // ProfilePublicBatchProvider is an optional capability of ProfilePublicProvider:
@@ -141,6 +162,12 @@ type Service struct {
 	refreshBatchSize int
 	refreshMu        sync.Mutex
 	refreshCursor    int
+	// cycleProgress counts users advanced through since the sliding window
+	// last completed a full lap. It reaches len(users) exactly when every
+	// eligible user has been attempted at least once since the previous
+	// generation was promoted — see nextBatch's cycleComplete return value
+	// and RefreshCache's CompleteCycle call.
+	cycleProgress int
 }
 
 // NewService wires a leaderboard Service around the ranked-performance provider.
@@ -171,6 +198,7 @@ func (s *Service) SetRefreshBatchSize(n int) {
 	defer s.refreshMu.Unlock()
 	s.refreshBatchSize = n
 	s.refreshCursor = 0
+	s.cycleProgress = 0
 }
 
 // SetCache attaches an optional ranking cache (Redis in production).
@@ -249,13 +277,17 @@ func (s *Service) BuildTimeframe(ctx context.Context, tf Timeframe) ([]Leaderboa
 	return entriesOf(rows), nil
 }
 
-// rankingFresh reports whether the ranking projection for tf is populated and
-// recent enough to be preferred over live computation.
+// rankingFresh reports whether the ranking projection is populated and recent
+// enough to be preferred over live computation. Every timeframe is built
+// together within the same refresh cycle (see RefreshCache/nextBatch), so a
+// generation's activation age is one signal shared by every timeframe — tf is
+// accepted for readability at call sites, not because a different timeframe
+// could answer differently.
 func (s *Service) rankingFresh(ctx context.Context, tf Timeframe) bool {
 	if s.ranking == nil {
 		return false
 	}
-	at, found, err := s.ranking.OldestComputedAt(ctx, tf)
+	at, found, err := s.ranking.ActiveGenerationAge(ctx)
 	if err != nil || !found {
 		return false
 	}
@@ -401,19 +433,24 @@ func (s *Service) buildFromCache(ctx context.Context) ([]LeaderboardEntry, bool)
 // With neither a cache nor snapshot reader attached this compatibility refresh
 // is a no-op.
 //
-// nextBatch selects the slice of users this call should revalue, and reports
-// whether that slice is every known user (true whenever refreshBatchSize is
-// unset/non-positive, or happens to cover the whole list). Selection is a
-// stable, sorted-by-ID sliding window that advances across calls, so a
+// nextBatch selects the slice of users this call should revalue. allProcessed
+// reports whether THIS SINGLE call touched every known user (true whenever
+// refreshBatchSize is unset/non-positive, or happens to cover the whole
+// list) — the cache-pruning safety check below relies on that narrow,
+// per-call meaning. cycleComplete instead reports whether the CUMULATIVE
+// sliding window has now covered every user at least once since the last
+// completed lap — see the cycleProgress field doc — which is what gates
+// promoting a new ranking-projection generation in RefreshCache. Selection
+// is a stable, sorted-by-ID sliding window that advances across calls, so a
 // caller invoking RefreshCache on a fixed interval eventually covers every
 // user over ceil(len(users)/refreshBatchSize) calls, with each individual
 // call doing bounded work.
-func (s *Service) nextBatch(users []auth.RankableUser) ([]auth.RankableUser, bool) {
+func (s *Service) nextBatch(users []auth.RankableUser) (batch []auth.RankableUser, allProcessed bool, cycleComplete bool) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
 
 	if s.refreshBatchSize <= 0 || s.refreshBatchSize >= len(users) {
-		return users, true
+		return users, true, true
 	}
 	sorted := make([]auth.RankableUser, len(users))
 	copy(sorted, users)
@@ -428,12 +465,17 @@ func (s *Service) nextBatch(users []auth.RankableUser) ([]auth.RankableUser, boo
 	if size > n {
 		size = n
 	}
-	batch := make([]auth.RankableUser, 0, size)
+	batch = make([]auth.RankableUser, 0, size)
 	for i := 0; i < size; i++ {
 		batch = append(batch, sorted[(start+i)%n])
 	}
 	s.refreshCursor = (start + size) % n
-	return batch, false
+	s.cycleProgress += size
+	if s.cycleProgress >= n {
+		cycleComplete = true
+		s.cycleProgress = 0
+	}
+	return batch, false, cycleComplete
 }
 
 // refreshRankingRows upserts userID's ranking-projection row for every
@@ -492,7 +534,7 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 	for _, u := range users {
 		known[u.ID] = true
 	}
-	batch, allProcessed := s.nextBatch(users)
+	batch, allProcessed, cycleComplete := s.nextBatch(users)
 	slog.Info("leaderboard_cache_reconciliation_started", "users", len(users), "batch", len(batch))
 	skipped := 0
 	activeUpserted, pausedRemoved, deletedRemoved, cacheFailures := 0, 0, 0, 0
@@ -540,6 +582,17 @@ func (s *Service) RefreshCache(ctx context.Context) (int, error) {
 			}
 		}
 		s.refreshRankingRows(ctx, u.ID, rp)
+	}
+	// A full lap over every eligible user just finished: the building
+	// generation has now been attempted for everyone, so it's safe to
+	// promote it to active. A user whose valuation kept failing simply has
+	// no row in the new generation rather than blocking promotion — see
+	// RankingStore.CompleteCycle's doc for why this must only happen here,
+	// after cycleComplete, and never mid-lap.
+	if s.ranking != nil && cycleComplete {
+		if err := s.ranking.CompleteCycle(ctx); err != nil {
+			slog.Warn("leaderboard_ranking_cycle_complete_failed", "error", err)
+		}
 	}
 	// Prune members that are no longer rankable at all (deleted users, or users
 	// whose ranked state disappeared), so the cache converges on the live set
@@ -676,14 +729,10 @@ func (s *Service) GetUserRank(ctx context.Context, userID string) (int, error) {
 			return rank, nil
 		}
 	}
-	// Only trust a cached rank after the persistent ranked projection confirms
-	// that this user still exists in an active, rankable lifecycle state.
-	if s.cache != nil && currentErr == nil {
-		if rank, err := s.cache.GetGlobalRank(ctx, userID); err == nil && rank > 0 {
-			return rank, nil
-		}
-	}
-
+	// Redis is deliberately not consulted for an exact rank. Its sorted set
+	// stores only an IEEE-754 performance score and cannot apply the canonical
+	// display-name/user-id tie-breakers. When the exact Postgres projection is
+	// unavailable or stale, compute the rank from exact domain values below.
 	users, err := s.users.ListRankableUsers(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrListUsers, err)

@@ -336,6 +336,75 @@ func TestRefreshCache_BatchedRevaluesBoundedSubsetPerCall(t *testing.T) {
 	assert.Len(t, top, 3)
 }
 
+// TestRefreshCache_PromotesGenerationOnlyAfterFullCycle locks in the fix for
+// finding 4: a partial batch pass must never make the ranking projection
+// look fresh. With SetRefreshBatchSize(1) on three users, the projection must
+// stay unpromoted (ActiveGenerationAge not found) until all three batches —
+// one full cycle — have run, and only then activate.
+func TestRefreshCache_PromotesGenerationOnlyAfterFullCycle(t *testing.T) {
+	users := fakeUsers{users: []auth.User{user("u1", "A"), user("u2", "B"), user("u3", "C")}}
+	sums := fakeRanked{byUser: map[string]RankedPerformance{
+		"u1": summary("1", "101"), "u2": summary("2", "102"), "u3": summary("3", "103"),
+	}}
+	svc := NewService(users, sums)
+	ranking := newFakeRankingStore(users.users)
+	svc.SetRankingStore(ranking)
+	svc.SetRefreshBatchSize(1)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		_, err := svc.RefreshCache(ctx)
+		require.NoError(t, err)
+		_, found, err := ranking.ActiveGenerationAge(ctx)
+		require.NoError(t, err)
+		assert.False(t, found, "generation must not activate before every user has been attempted")
+	}
+
+	_, err := svc.RefreshCache(ctx)
+	require.NoError(t, err)
+	_, found, err := ranking.ActiveGenerationAge(ctx)
+	require.NoError(t, err)
+	assert.True(t, found, "the third batch completes the cycle over all three users; the generation must activate")
+
+	rows, err := ranking.TopPage(ctx, TimeframeAll, 10)
+	require.NoError(t, err)
+	assert.Len(t, rows, 3, "the activated generation must contain every user, not just the last batch")
+}
+
+// TestRefreshCache_FailingUserDoesNotBlockGenerationActivation locks in the
+// fix for finding 3: a user whose valuation keeps failing must not
+// permanently pin the whole projection as stale. The old MIN(computed_at)
+// design left that user's row untouched forever; the generation design
+// simply excludes them from the new generation and still activates it on
+// schedule.
+func TestRefreshCache_FailingUserDoesNotBlockGenerationActivation(t *testing.T) {
+	userList := fakeUsers{users: []auth.User{user("u1", "A"), user("broken", "B")}}
+	sums := fakeRanked{
+		byUser: map[string]RankedPerformance{"u1": summary("1", "101")},
+		errs:   map[string]error{"broken": errors.New("valuation always fails")},
+	}
+	svc := NewService(userList, sums)
+	ranking := newFakeRankingStore(userList.users)
+	svc.SetRankingStore(ranking)
+	ctx := context.Background()
+
+	// Two full cycles: the second proves the first activation didn't get
+	// stuck because "broken" never produced a row.
+	for i := 0; i < 2; i++ {
+		_, err := svc.RefreshCache(ctx)
+		require.NoError(t, err)
+	}
+
+	_, found, err := ranking.ActiveGenerationAge(ctx)
+	require.NoError(t, err)
+	assert.True(t, found, "a persistently failing user must not prevent the generation from activating")
+
+	rows, err := ranking.TopPage(ctx, TimeframeAll, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the failing user is excluded from the generation, not left blocking it")
+	assert.Equal(t, "u1", rows[0].userID)
+}
+
 // countingRanked wraps fakeRanked's data with a per-user call counter so the
 // batching test can assert exactly which users were (and weren't) revalued.
 type countingRanked struct {

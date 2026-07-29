@@ -6,7 +6,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ardakimyonok/finance_app/internal/dbtx"
 )
+
+// TxInitHook runs inside the same transaction as user creation (for
+// PostgresUserRepository), so a failure rolls back the newly created user row
+// along with it instead of leaving an account with no initialized aggregate.
+// InMemoryUserRepository has no real transaction to share, so it invokes
+// hooks with a nil Querier on a best-effort basis.
+type TxInitHook func(ctx context.Context, q dbtx.Querier, userID string) error
 
 // UserRepository is the persistence boundary for accounts. The service depends
 // only on this interface, so InMemoryUserRepository can later be swapped for a
@@ -18,7 +27,7 @@ type UserRepository interface {
 	// CreateWithVerification atomically persists a password user, its initial
 	// verification token, and the corresponding durable email-outbox message.
 	// A failure must leave none of the three records behind.
-	CreateWithVerification(ctx context.Context, user *User, token LifecycleToken, email EmailOutboxMessage) error
+	CreateWithVerification(ctx context.Context, user *User, token LifecycleToken, email EmailOutboxMessage, initHooks ...TxInitHook) error
 	// FindByEmail looks up a user by email. The email is normalized internally,
 	// so callers may pass any casing. Returns ErrUserNotFound on a miss.
 	FindByEmail(email string) (*User, error)
@@ -118,16 +127,17 @@ func (r *InMemoryUserRepository) Create(user *User) error {
 }
 
 func (r *InMemoryUserRepository) CreateWithVerification(
-	_ context.Context,
+	ctx context.Context,
 	user *User,
 	token LifecycleToken,
 	email EmailOutboxMessage,
+	initHooks ...TxInitHook,
 ) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	key := normalizeEmail(user.Email)
 	if _, exists := r.byEmail[key]; exists {
+		r.mu.Unlock()
 		return ErrEmailExists
 	}
 	stored := *user
@@ -144,6 +154,13 @@ func (r *InMemoryUserRepository) CreateWithVerification(
 	r.byEmail[key] = &stored
 	r.emailTokens = append(r.emailTokens, memoryLifecycleToken{LifecycleToken: token})
 	r.emailOutbox = append(r.emailOutbox, email)
+	r.mu.Unlock()
+
+	for _, hook := range initHooks {
+		if err := hook(ctx, nil, user.ID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

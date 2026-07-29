@@ -29,6 +29,7 @@ type Service struct {
 	appleVerifier   ProviderVerifier
 	deletionHooks   []AccountDeletionHook
 	creationHooks   []AccountCreationHook
+	txCreationHooks []TxInitHook
 	emailSender     EmailSender
 	publicAppURL    string
 	verificationTTL time.Duration
@@ -52,6 +53,15 @@ type AccountCreationHook interface {
 
 func (s *Service) RegisterCreationHook(h AccountCreationHook) {
 	s.creationHooks = append(s.creationHooks, h)
+}
+
+// RegisterTxCreationHook attaches a required initialization step that runs
+// inside the same database transaction as user creation (see
+// PostgresUserRepository.CreateWithVerification). A failure rolls back the
+// user row too, so registration can never leave behind a user with a
+// permanently missing required aggregate.
+func (s *Service) RegisterTxCreationHook(h TxInitHook) {
+	s.txCreationHooks = append(s.txCreationHooks, h)
 }
 
 func (s *Service) initializeAccount(ctx context.Context, userID string) error {
@@ -194,7 +204,7 @@ func (s *Service) RegisterContext(ctx context.Context, in RegisterInput) (*User,
 		VerificationURL: s.publicAppURL + "/verify-email?token=" + rawToken,
 		CreatedAt:       now, AvailableAt: now,
 	}
-	if err := s.repo.CreateWithVerification(ctx, user, record, message); err != nil {
+	if err := s.repo.CreateWithVerification(ctx, user, record, message, s.txCreationHooks...); err != nil {
 		return nil, "", err
 	}
 	if err := s.initializeAccount(ctx, user.ID); err != nil {

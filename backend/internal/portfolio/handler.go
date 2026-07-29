@@ -267,13 +267,17 @@ func (h *Handler) AddPosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requestID, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	var req positionRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	res, err := h.svc.Mutate(r.Context(), MutationRequest{
-		Kind: MutationAdd, UserID: userID, RequestID: idempotencyKey(r),
+		Kind: MutationAdd, UserID: userID, RequestID: requestID,
 		Input: req.toInput(),
 	})
 	if err != nil {
@@ -554,6 +558,10 @@ func (h *Handler) UpdatePosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requestID, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	positionID := chi.URLParam(r, "positionId")
 	var req updatePositionRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -561,7 +569,7 @@ func (h *Handler) UpdatePosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.svc.Mutate(r.Context(), MutationRequest{
-		Kind: MutationResize, UserID: userID, RequestID: idempotencyKey(r),
+		Kind: MutationResize, UserID: userID, RequestID: requestID,
 		PositionID: positionID, Quantity: req.Quantity,
 	})
 	if err != nil {
@@ -577,9 +585,13 @@ func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requestID, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	positionID := chi.URLParam(r, "positionId")
 	res, err := h.svc.Mutate(r.Context(), MutationRequest{
-		Kind: MutationClose, UserID: userID, RequestID: idempotencyKey(r),
+		Kind: MutationClose, UserID: userID, RequestID: requestID,
 		PositionID: positionID,
 	})
 	if err != nil {
@@ -630,9 +642,13 @@ func (h *Handler) DeletePosition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requestID, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	positionID := chi.URLParam(r, "positionId")
 	if _, err := h.svc.Mutate(r.Context(), MutationRequest{
-		Kind: MutationDelete, UserID: userID, RequestID: idempotencyKey(r),
+		Kind: MutationDelete, UserID: userID, RequestID: requestID,
 		PositionID: positionID,
 	}); err != nil {
 		writeServiceError(w, err)

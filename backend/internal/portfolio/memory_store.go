@@ -337,6 +337,28 @@ func (r *InMemoryRepository) WithLockedPortfolio(ctx context.Context, userID str
 	return tx.commit()
 }
 
+// FindAuditByRequestID (AggregateStore) is the lock-free preflight used by
+// Apply, mirroring PostgresRepository.FindAuditByRequestID: it resolves the
+// user's portfolio id without taking its mutation lock, then looks up the
+// audit keyed the same way the locked check (memoryTx.FindAuditByRequestID)
+// commits it under.
+func (r *InMemoryRepository) FindAuditByRequestID(_ context.Context, userID, requestID string) (MutationAudit, bool, error) {
+	r.mu.RLock()
+	portfolioID, ok := r.userPortfolio[userID]
+	r.mu.RUnlock()
+	if !ok {
+		return MutationAudit{}, false, nil
+	}
+
+	r.auditMu.RLock()
+	defer r.auditMu.RUnlock()
+	a, ok := r.audits[portfolioID+"|"+requestID]
+	if !ok {
+		return MutationAudit{}, false, nil
+	}
+	return a, true, nil
+}
+
 // aggregateFor resolves the user's default portfolio, creating it if absent.
 // Creation happens under the store lock with a user index, so two concurrent
 // first requests can never produce two default portfolios (the in-memory mirror

@@ -27,10 +27,6 @@ type LeaderboardCache interface {
 
 	UpsertCompetitionScore(ctx context.Context, competitionID, userID string, score money.Ratio) error
 	GetCompetitionTop(ctx context.Context, competitionID string, limit int) ([]CachedLeaderboardScore, error)
-
-	// Rank getters return 0 (not an error) when the user is not in the set.
-	GetGlobalRank(ctx context.Context, userID string) (int, error)
-	GetCompetitionRank(ctx context.Context, competitionID, userID string) (int, error)
 }
 
 // NoopLeaderboardCache satisfies LeaderboardCache but stores nothing; used in
@@ -47,8 +43,4 @@ func (NoopLeaderboardCache) UpsertCompetitionScore(context.Context, string, stri
 }
 func (NoopLeaderboardCache) GetCompetitionTop(context.Context, string, int) ([]CachedLeaderboardScore, error) {
 	return nil, nil
-}
-func (NoopLeaderboardCache) GetGlobalRank(context.Context, string) (int, error) { return 0, nil }
-func (NoopLeaderboardCache) GetCompetitionRank(context.Context, string, string) (int, error) {
-	return 0, nil
 }

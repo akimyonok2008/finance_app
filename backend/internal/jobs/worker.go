@@ -42,12 +42,19 @@ type PortfolioSnapshotter interface {
 	SnapshotAllDaily(ctx context.Context) (recorded int, err error)
 }
 
+// ExploreProjectionRefresher builds privacy-safe public discovery cards after
+// the ranking projection refresh. Implemented by *profile.Service.
+type ExploreProjectionRefresher interface {
+	RefreshExploreProjection(ctx context.Context) (rows int, err error)
+}
+
 // Worker periodically runs all maintenance jobs. Each job is independent: one
 // failing job never prevents the others from running.
 type Worker struct {
 	global    GlobalLeaderboardRefresher
 	sprints   SprintMaintainer
-	snapshots PortfolioSnapshotter // optional
+	snapshots PortfolioSnapshotter       // optional
+	explore   ExploreProjectionRefresher // optional
 	interval  time.Duration
 	leader    Leader // optional; nil means "always leader"
 }
@@ -61,6 +68,13 @@ func NewWorker(global GlobalLeaderboardRefresher, sprints SprintMaintainer, inte
 // worker records daily portfolio snapshots on every pass (idempotent per day).
 func (w *Worker) SetPortfolioSnapshotter(s PortfolioSnapshotter) {
 	w.snapshots = s
+}
+
+// SetExploreProjectionRefresher attaches the off-request Explore projection
+// build. It runs after the global ranking refresh so cards use the newest
+// complete ranking generation.
+func (w *Worker) SetExploreProjectionRefresher(r ExploreProjectionRefresher) {
+	w.explore = r
 }
 
 // SetLeaderElector attaches the coordination gate that keeps these jobs
@@ -113,8 +127,21 @@ func (w *Worker) runIfLeader(ctx context.Context) {
 func (w *Worker) RunOnce(ctx context.Context) {
 	w.ensureSprint(ctx)
 	w.refreshGlobal(ctx)
+	w.refreshExplore(ctx)
 	w.refreshSprints(ctx)
 	w.recordSnapshots(ctx)
+}
+
+func (w *Worker) refreshExplore(ctx context.Context) {
+	if w.explore == nil {
+		return
+	}
+	rows, err := w.explore.RefreshExploreProjection(ctx)
+	if err != nil {
+		slog.Error("job: explore projection refresh failed", "error", err)
+		return
+	}
+	slog.Info("job: explore projection refreshed", "rows", rows)
 }
 
 func (w *Worker) recordSnapshots(ctx context.Context) {

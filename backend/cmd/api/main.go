@@ -24,6 +24,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/config"
 	"github.com/ardakimyonok/finance_app/internal/corpactions"
 	"github.com/ardakimyonok/finance_app/internal/db"
+	"github.com/ardakimyonok/finance_app/internal/dbtx"
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/income"
 	"github.com/ardakimyonok/finance_app/internal/instrument"
@@ -800,7 +801,18 @@ func main() {
 	authSvc.StartEmailOutboxProcessor(ctx, 5*time.Second)
 	fxProvider := fx.NewMockFXProvider()
 	portfolioSvc := portfolio.NewService(repos.portfolio, priceProvider, fxProvider)
-	authSvc.RegisterCreationHook(portfolioSvc)
+	if pgPortfolioRepo, ok := repos.portfolio.(*portfolio.PostgresRepository); ok {
+		// Create the default portfolio inside the SAME transaction as the new
+		// user row (see PostgresUserRepository.CreateWithVerification), so a
+		// portfolio-creation failure rolls the user back too instead of
+		// leaving a registered account with no portfolio.
+		authSvc.RegisterTxCreationHook(func(ctx context.Context, q dbtx.Querier, userID string) error {
+			_, err := pgPortfolioRepo.EnsureDefaultPortfolioTx(ctx, q, userID)
+			return err
+		})
+	} else {
+		authSvc.RegisterCreationHook(portfolioSvc)
+	}
 	var identityProvider instrument.IdentityProvider
 	if cfg.OpenFIGIEnabled {
 		identityProvider = instrument.NewOpenFIGIProvider(instrument.OpenFIGIConfig{
@@ -1082,6 +1094,7 @@ func main() {
 	if optionalJobs {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
 		worker.SetLeaderElector(leader)
+		worker.SetExploreProjectionRefresher(profileSvc)
 		// Private daily portfolio archives remain available for owner analytics;
 		// ranked achievements use the independent canonical snapshot worker below.
 		worker.SetPortfolioSnapshotter(portfolioSnapshotAdapter{

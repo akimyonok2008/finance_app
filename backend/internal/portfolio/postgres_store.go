@@ -356,6 +356,51 @@ func (t *postgresTx) FindAuditByRequestID(ctx context.Context, requestID string)
 	return a, true, nil
 }
 
+// FindAuditByRequestID (AggregateStore) is the lock-free preflight used by
+// Apply. It resolves the user's portfolio without locking it — a plain read,
+// safe to run concurrently with any in-flight mutation — then looks up the
+// audit row scoped to that portfolio, matching the (portfolio_id, request_id)
+// uniqueness the locked check (postgresTx.FindAuditByRequestID) also uses.
+func (r *PostgresRepository) FindAuditByRequestID(ctx context.Context, userID, requestID string) (MutationAudit, bool, error) {
+	pf, err := r.GetPortfolioByUser(ctx, userID)
+	if errors.Is(err, ErrPortfolioNotFound) {
+		return MutationAudit{}, false, nil
+	}
+	if err != nil {
+		return MutationAudit{}, false, err
+	}
+
+	var (
+		a           MutationAudit
+		resultID    *string
+		fingerprint *string
+	)
+	err = r.pool.QueryRow(ctx, `
+		SELECT id, request_id, portfolio_id, user_id, mutation_type,
+		       request_fingerprint, portfolio_version_before, portfolio_version_after,
+		       performance_version_before, performance_version_after,
+		       ranked_index_before, ranked_index_after, result_position_id, occurred_at
+		FROM portfolio_mutation_audit WHERE portfolio_id=$1 AND request_id=$2`,
+		pf.ID, requestID).Scan(
+		&a.ID, &a.RequestID, &a.PortfolioID, &a.UserID, &a.MutationType, &fingerprint,
+		&a.PortfolioVersionBefore, &a.PortfolioVersionAfter,
+		&a.PerformanceVersionBefore, &a.PerformanceVersionAfter,
+		&a.RankedIndexBefore, &a.RankedIndexAfter, &resultID, &a.OccurredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MutationAudit{}, false, nil
+	}
+	if err != nil {
+		return MutationAudit{}, false, fmt.Errorf("portfolio: find audit preflight: %w", err)
+	}
+	if resultID != nil {
+		a.ResultPositionID = *resultID
+	}
+	if fingerprint != nil {
+		a.RequestFingerprint = *fingerprint
+	}
+	return a, true, nil
+}
+
 // metaString reads a string field out of an activity's metadata, returning ""
 // when absent. Provenance is mirrored into dedicated columns so it is queryable
 // without JSONB extraction while the metadata stays the immutable record.

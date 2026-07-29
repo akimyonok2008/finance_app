@@ -37,6 +37,16 @@ type fakeSprints struct {
 	active   []string
 }
 
+type fakeExplore struct {
+	calls int
+	err   error
+}
+
+func (f *fakeExplore) RefreshExploreProjection(context.Context) (int, error) {
+	f.calls++
+	return 42, f.err
+}
+
 func (f *fakeSprints) EnsureCurrentSprint(_ context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -64,11 +74,14 @@ func TestWorker_RunOnceExecutesAllJobs(t *testing.T) {
 	global := &fakeGlobal{}
 	sprints := &fakeSprints{active: []string{"weekly_2026_24", "weekly_2026_25"}}
 	w := NewWorker(global, sprints, time.Minute)
+	explore := &fakeExplore{}
+	w.SetExploreProjectionRefresher(explore)
 
 	w.RunOnce(context.Background())
 
 	assert.Equal(t, 1, sprints.ensured, "sprint existence job must run")
 	assert.Equal(t, 1, global.count(), "global leaderboard job must run")
+	assert.Equal(t, 1, explore.calls, "Explore projection must refresh after global rankings")
 	assert.Equal(t, 1, sprints.refreshs["weekly_2026_24"])
 	assert.Equal(t, 1, sprints.refreshs["weekly_2026_25"])
 }
