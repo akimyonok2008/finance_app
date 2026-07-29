@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/telemetry"
 )
 
@@ -32,14 +33,23 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 // on conflict it does nothing and the row is re-read, so two concurrent first
 // requests always converge on the same portfolio instead of creating two.
 func (r *PostgresRepository) EnsureDefaultPortfolio(ctx context.Context, userID string) (*Portfolio, error) {
-	if pf, err := r.GetPortfolioByUser(ctx, userID); err == nil {
+	return r.EnsureDefaultPortfolioTx(ctx, r.pool, userID)
+}
+
+// EnsureDefaultPortfolioTx is EnsureDefaultPortfolio against an arbitrary
+// dbtx.Querier, so a caller (e.g. auth's registration transaction) can create
+// the default portfolio in the SAME transaction as the user row it belongs
+// to, instead of as a separate, non-atomic step after that transaction
+// commits.
+func (r *PostgresRepository) EnsureDefaultPortfolioTx(ctx context.Context, q DBTX, userID string) (*Portfolio, error) {
+	if pf, err := r.getPortfolioByUserTx(ctx, q, userID); err == nil {
 		return pf, nil
 	} else if !errors.Is(err, ErrPortfolioNotFound) {
 		return nil, err
 	}
 
 	now := time.Now().UTC()
-	if _, err := r.pool.Exec(ctx,
+	if _, err := q.Exec(ctx,
 		`INSERT INTO portfolios (id, user_id, name, currency, version, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,1,$5,$6)
 		 ON CONFLICT (user_id) DO NOTHING`,
@@ -49,13 +59,17 @@ func (r *PostgresRepository) EnsureDefaultPortfolio(ctx context.Context, userID 
 	}
 	// Re-read: this returns OUR row if we inserted, or the winner's row if a
 	// concurrent request got there first.
-	return r.GetPortfolioByUser(ctx, userID)
+	return r.getPortfolioByUserTx(ctx, q, userID)
 }
 
 // GetPortfolioByUser returns the user's (single default) portfolio.
 func (r *PostgresRepository) GetPortfolioByUser(ctx context.Context, userID string) (*Portfolio, error) {
+	return r.getPortfolioByUserTx(ctx, r.pool, userID)
+}
+
+func (r *PostgresRepository) getPortfolioByUserTx(ctx context.Context, q DBTX, userID string) (*Portfolio, error) {
 	var p Portfolio
-	err := r.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT id, user_id, name, currency, COALESCE(version,1),
 		        COALESCE(auto_fund_purchases, TRUE), created_at, updated_at
 		 FROM portfolios WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID,
@@ -476,6 +490,65 @@ func (r *PostgresRepository) ListActivities(ctx context.Context, userID string, 
 		out = append(out, activity)
 	}
 	return out, rows.Err()
+}
+
+// EligibleQuantity folds the complete, instrument-scoped ledger in PostgreSQL.
+// It deliberately does not call ListActivities: that API is newest-first and
+// capped for presentation use, neither of which is safe for entitlement.
+func (r *PostgresRepository) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error) {
+	var quantity money.Quantity
+	err := r.pool.QueryRow(ctx, `
+		WITH RECURSIVE relevant AS (
+			SELECT a.id, a.activity_type, a.quantity, a.metadata_json,
+			       row_number() OVER (
+			           ORDER BY a.occurred_at, a.created_at, a.id
+			       ) AS sequence
+			FROM portfolio_activities a
+			WHERE a.user_id = $1
+			  AND a.occurred_at <= $4
+			  AND (
+			      ($2 <> '' AND a.instrument_id = NULLIF($2, '')::uuid)
+			      OR
+			      ($2 = '' AND upper(btrim(COALESCE(a.symbol, ''))) = upper(btrim($3)))
+			  )
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM portfolio_activities correction
+			      WHERE correction.user_id = $1
+			        AND correction.metadata_json->>'correction_of_activity_id' = a.id::text
+			  )
+		),
+		fold AS (
+			SELECT 0::bigint AS sequence, 0::numeric AS quantity
+			UNION ALL
+			SELECT r.sequence,
+			       CASE
+			         WHEN r.activity_type = 'write_off' THEN 0::numeric
+			         WHEN r.activity_type IN ('buy', 'opening_balance', 'reinvested_dividend')
+			           THEN f.quantity + COALESCE(r.quantity, 0)
+			         WHEN r.activity_type = 'sell'
+			           THEN f.quantity - COALESCE(r.quantity, 0)
+			         WHEN r.activity_type IN ('stock_split', 'reverse_split', 'stock_dividend')
+			              AND r.metadata_json->>'ratio_numerator' ~ '^[0-9]+([.][0-9]+)?$'
+			              AND r.metadata_json->>'ratio_denominator' ~ '^[0-9]+([.][0-9]+)?$'
+			              AND (r.metadata_json->>'ratio_numerator')::numeric > 0
+			              AND (r.metadata_json->>'ratio_denominator')::numeric > 0
+			           THEN f.quantity * (
+			             CASE WHEN r.activity_type = 'stock_dividend' THEN 1 ELSE 0 END
+			             + (r.metadata_json->>'ratio_numerator')::numeric
+			               / (r.metadata_json->>'ratio_denominator')::numeric
+			           )
+			         ELSE f.quantity
+			       END
+			FROM fold f
+			JOIN relevant r ON r.sequence = f.sequence + 1
+		)
+		SELECT GREATEST(COALESCE((SELECT quantity FROM fold ORDER BY sequence DESC LIMIT 1), 0), 0)
+	`, userID, instrumentID, symbol, asOf).Scan(&quantity)
+	if err != nil {
+		return money.ZeroQuantity(), fmt.Errorf("portfolio: calculate eligible quantity: %w", err)
+	}
+	return money.QuantizeQuantity(quantity), nil
 }
 
 func (r *PostgresRepository) GetActivityByID(ctx context.Context, userID, activityID string) (Activity, bool, error) {

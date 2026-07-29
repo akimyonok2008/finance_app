@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -52,6 +53,36 @@ func TestEligibleQuantity_UsesStableIdentityAcrossHistoricalTickerAlias(t *testi
 	got, err := svc.EligibleQuantity(context.Background(), "u1", instrumentID, "NEW", at.Add(time.Hour))
 	require.NoError(t, err)
 	assertQuantityEqual(t, "12", got)
+}
+
+func TestEligibleQuantity_DoesNotDependOnActivityListLimit(t *testing.T) {
+	repo := NewInMemoryRepository()
+	svc := NewService(repo, nil, nil)
+	pf, err := repo.EnsureDefaultPortfolio(context.Background(), "u1")
+	require.NoError(t, err)
+	base := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	instrumentID := "44444444-4444-4444-4444-444444444444"
+
+	repo.mu.Lock()
+	activities := make([]Activity, 0, 100002)
+	activities = append(activities, Activity{
+		ID: "old-opening", Type: ActivityOpeningBalance, Symbol: "OLD",
+		InstrumentID: instrumentID, Quantity: testQuantityPtr("17"), OccurredAt: base,
+	})
+	for i := 0; i < 100001; i++ {
+		activities = append(activities, Activity{
+			ID: "noise-" + strconv.Itoa(i), Type: ActivityDeposit, Symbol: "",
+			OccurredAt: base.Add(time.Duration(i+1) * time.Second),
+		})
+	}
+	repo.aggregates[pf.ID].activities = activities
+	repo.mu.Unlock()
+
+	got, err := svc.EligibleQuantity(
+		context.Background(), "u1", instrumentID, "NEW", base.AddDate(1, 0, 0),
+	)
+	require.NoError(t, err)
+	assertQuantityEqual(t, "17", got)
 }
 
 func TestIncomeDiscovery_PreservesRecentProviderAliasesForStableInstrument(t *testing.T) {

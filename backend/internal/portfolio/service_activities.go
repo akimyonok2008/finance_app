@@ -181,23 +181,19 @@ func (s *Service) ApplyIncomeEvent(ctx context.Context, userID, requestID string
 // This is portfolio tracking, not a tax lot engine: it assumes a single default
 // portfolio per user and per-symbol netting.
 func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error) {
-	// A high explicit limit: the Postgres reader caps a non-positive limit at 100,
-	// but eligibility must consider the full history.
-	activities, err := s.repo.ListActivities(ctx, userID, 100000)
-	if err != nil {
-		return money.ZeroQuantity(), err
+	if instrumentID == "" {
+		// No resolved identity for this income event's instrument: eligible-
+		// quantity calculation falls back to symbol-string matching.
+		telemetry.IncLegacySymbolFallback()
 	}
+	return s.repo.EligibleQuantity(ctx, userID, instrumentID, symbol, asOf)
+}
+
+func eligibleQuantityFromActivities(activities []Activity, instrumentID, symbol string, asOf time.Time) money.Quantity {
 	// Oldest-first so ratio adjustments apply to the quantity accumulated before
 	// the corporate action.
 	sortActivitiesOldestFirst(activities)
 	sym := normalizeSymbol(symbol)
-	if instrumentID == "" {
-		// No resolved identity for this income event's instrument: eligible-
-		// quantity reconstruction falls back to symbol-string matching over
-		// the activity ledger.
-		telemetry.IncLegacySymbolFallback()
-	}
-
 	// A corrected buy/sell posts a NEW activity carrying the corrected
 	// quantity/price rather than editing the original (see
 	// Service.CorrectActivity), so the original's own quantity effect must be
@@ -248,7 +244,7 @@ func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, sy
 	if qty.Sign() < 0 {
 		qty = money.ZeroQuantity()
 	}
-	return money.QuantizeQuantity(qty), nil
+	return money.QuantizeQuantity(qty)
 }
 
 // ratioFactor extracts the multiplicative factor a split / stock-dividend

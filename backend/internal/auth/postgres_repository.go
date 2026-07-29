@@ -84,6 +84,7 @@ func (r *PostgresUserRepository) CreateWithVerification(
 	user *User,
 	token LifecycleToken,
 	email EmailOutboxMessage,
+	initHooks ...TxInitHook,
 ) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -123,6 +124,11 @@ func (r *PostgresUserRepository) CreateWithVerification(
 	`, email.ID, email.UserID, email.Kind, normalizeEmail(email.Recipient),
 		email.VerificationURL, email.CreatedAt, email.AvailableAt); err != nil {
 		return fmt.Errorf("auth repository: enqueue registration email: %w", err)
+	}
+	for _, hook := range initHooks {
+		if err := hook(ctx, tx, user.ID); err != nil {
+			return fmt.Errorf("auth repository: registration init hook: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("auth repository: commit registration: %w", err)

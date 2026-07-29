@@ -20,27 +20,30 @@ type scoredCard struct {
 // Explore builds the discovery payload: featured cards, a paginated list of top
 // performers, and globally trending public holdings.
 //
-// Trending holdings are computed from the full public dataset (a global
-// discovery feature), independent of the q/symbol filters and pagination, while
-// featured/top_performers reflect the filtered + sorted set. Because those
-// rails are full-dataset aggregates, pagination alone can't bound this
-// request's cost the way it did for the leaderboard — instead, the two
-// per-profile costs that used to run unconditionally (a live portfolio
-// valuation, and an uncached full ledger scan) are eliminated/cached below:
-// ranking is resolved once via s.timeframeRanks' bulk projection lookup
-// (falling back to a single live valuation only when that lookup has no
-// entry — see resolveExploreRanking), and composition reads through the
-// existing short-TTL-cached SummaryProvider (see buildPublicProfile).
+// PostgreSQL production uses an atomically published public-card projection:
+// filtering, sorting, pagination and global trending aggregation stay in SQL,
+// and Go decodes only the requested page plus a bounded recommendation pool.
+// The live implementation below remains the cold-start and memory-repository
+// fallback so a missing projection never makes Explore unavailable.
 func (s *Service) Explore(ctx context.Context, callerID string, filter ExploreFilter) (ExploreResponse, error) {
+	blocked, err := s.blockedSet(ctx, callerID)
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+	if out, found, err := s.exploreFromProjection(ctx, callerID, filter, blocked); err != nil {
+		return ExploreResponse{}, err
+	} else if found {
+		return out, nil
+	}
+
+	// Cold start / memory-mode compatibility path. Production PostgreSQL
+	// requests leave this path as soon as the background worker publishes the
+	// first complete projection generation.
 	profiles, err := s.repo.ListPublicProfiles(ctx)
 	if err != nil {
 		return ExploreResponse{}, err
 	}
 	ranks, fallback := s.exploreRankings(ctx, filter.Timeframe)
-	blocked, err := s.blockedSet(ctx, callerID)
-	if err != nil {
-		return ExploreResponse{}, err
-	}
 
 	summaries := s.exploreSummaryProvider()
 	all := make([]scoredCard, 0, len(profiles))
@@ -312,6 +315,10 @@ func compareRank(a, b PublicProfile) int {
 // Profiles with show_public_weights=false expose no public weights, so they are
 // naturally excluded from these counts.
 func buildTrendingHoldings(cards []PublicProfile) []TrendingHolding {
+	return buildTrendingHoldingsLimit(cards, maxTrendingHoldings)
+}
+
+func buildTrendingHoldingsLimit(cards []PublicProfile, limit int) []TrendingHolding {
 	type agg struct {
 		count       int
 		weightSum   float64
@@ -382,8 +389,8 @@ func buildTrendingHoldings(cards []PublicProfile) []TrendingHolding {
 		}
 		return out[i].Symbol < out[j].Symbol
 	})
-	if len(out) > maxTrendingHoldings {
-		out = out[:maxTrendingHoldings]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out
 }

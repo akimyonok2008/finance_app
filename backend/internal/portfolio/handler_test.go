@@ -40,6 +40,7 @@ func newTestEnv() *testEnv {
 		r.Get("/portfolio/positions", ph.ListPositions)
 		r.Put("/portfolio/positions/{positionId}", ph.UpdatePosition)
 		r.Delete("/portfolio/positions/{positionId}", ph.DeletePosition)
+		r.Post("/portfolio/positions/{positionId}/close", ph.ClosePosition)
 		r.Post("/portfolio/deposits", ph.DepositCash)
 		r.Post("/portfolio/buys", ph.BuyPosition)
 		r.Post("/portfolio/sells", ph.SellPosition)
@@ -106,9 +107,35 @@ func TestAddPosition_RequiresAuth(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestPositionMutations_RequireIdempotencyKey(t *testing.T) {
+	e := newTestEnv()
+	token := e.token(t, "user-1")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "add", method: http.MethodPost, path: "/portfolio/positions", body: aaplBody},
+		{name: "resize", method: http.MethodPut, path: "/portfolio/positions/position-1", body: `{"quantity":12}`},
+		{name: "close", method: http.MethodPost, path: "/portfolio/positions/position-1/close"},
+		{name: "delete", method: http.MethodDelete, path: "/portfolio/positions/position-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := e.do(t, tt.method, tt.path, tt.body, token)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "Idempotency-Key header is required")
+		})
+	}
+}
+
 func TestAddPosition_CreatesValidPosition(t *testing.T) {
 	e := newTestEnv()
-	rec := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"))
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"), "add-1")
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
 	var body map[string]any
@@ -125,14 +152,14 @@ func TestAddPosition_RejectsClientSuppliedPrice(t *testing.T) {
 	// average_buy_price is no longer part of the contract; strict decoding
 	// rejects it so clients cannot even attempt to set a historical price.
 	legacy := `{"symbol":"AAPL","asset_type":"stock","quantity":10,"average_buy_price":1}`
-	rec := e.do(t, http.MethodPost, "/portfolio/positions", legacy, e.token(t, "user-1"))
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/positions", legacy, e.token(t, "user-1"), "add-legacy")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAddPosition_RejectsInvalidPayload(t *testing.T) {
 	e := newTestEnv()
 	bad := `{"symbol":"AAPL","asset_type":"bond","quantity":10}`
-	rec := e.do(t, http.MethodPost, "/portfolio/positions", bad, e.token(t, "user-1"))
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/positions", bad, e.token(t, "user-1"), "add-invalid")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertError(t, rec.Body.Bytes())
@@ -140,7 +167,7 @@ func TestAddPosition_RejectsInvalidPayload(t *testing.T) {
 
 func TestAddPosition_RejectsMalformedJSON(t *testing.T) {
 	e := newTestEnv()
-	rec := e.do(t, http.MethodPost, "/portfolio/positions", `{bad`, e.token(t, "user-1"))
+	rec := e.doWithKey(t, http.MethodPost, "/portfolio/positions", `{bad`, e.token(t, "user-1"), "add-malformed")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -153,7 +180,7 @@ func TestListPositions_RequiresAuth(t *testing.T) {
 func TestListPositions_ReturnsUserPositions(t *testing.T) {
 	e := newTestEnv()
 	tok := e.token(t, "user-1")
-	e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, tok)
+	e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, tok, "add-list")
 
 	rec := e.do(t, http.MethodGet, "/portfolio/positions", "", tok)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -166,11 +193,11 @@ func TestListPositions_ReturnsUserPositions(t *testing.T) {
 func TestUpdatePosition_UpdatesOwn(t *testing.T) {
 	e := newTestEnv()
 	tok := e.token(t, "user-1")
-	created := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, tok)
+	created := e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, tok, "add-update")
 	id := decodeID(t, created)
 
 	upd := `{"quantity":12}`
-	rec := e.do(t, http.MethodPut, "/portfolio/positions/"+id, upd, tok)
+	rec := e.doWithKey(t, http.MethodPut, "/portfolio/positions/"+id, upd, tok, "resize-1")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var body map[string]any
@@ -182,40 +209,40 @@ func TestUpdatePosition_UpdatesOwn(t *testing.T) {
 
 func TestUpdatePosition_RejectsOtherUsersPosition(t *testing.T) {
 	e := newTestEnv()
-	created := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"))
+	created := e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"), "add-other-update")
 	id := decodeID(t, created)
 
-	rec := e.do(t, http.MethodPut, "/portfolio/positions/"+id, `{"quantity":5}`, e.token(t, "user-2"))
+	rec := e.doWithKey(t, http.MethodPut, "/portfolio/positions/"+id, `{"quantity":5}`, e.token(t, "user-2"), "resize-other")
 	assert.Equal(t, http.StatusNotFound, rec.Code, "another user's position must be invisible (404)")
 }
 
 func TestDeletePosition_DeletesOwn(t *testing.T) {
 	e := newTestEnv()
 	tok := e.token(t, "user-1")
-	created := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, tok)
+	created := e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, tok, "add-delete")
 	id := decodeID(t, created)
 
-	rec := e.do(t, http.MethodDelete, "/portfolio/positions/"+id, "", tok)
+	rec := e.doWithKey(t, http.MethodDelete, "/portfolio/positions/"+id, "", tok, "delete-1")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Deleting again is a 404.
-	rec = e.do(t, http.MethodDelete, "/portfolio/positions/"+id, "", tok)
+	rec = e.doWithKey(t, http.MethodDelete, "/portfolio/positions/"+id, "", tok, "delete-2")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestDeletePosition_RejectsOtherUsers(t *testing.T) {
 	e := newTestEnv()
-	created := e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"))
+	created := e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, e.token(t, "user-1"), "add-other-delete")
 	id := decodeID(t, created)
 
-	rec := e.do(t, http.MethodDelete, "/portfolio/positions/"+id, "", e.token(t, "user-2"))
+	rec := e.doWithKey(t, http.MethodDelete, "/portfolio/positions/"+id, "", e.token(t, "user-2"), "delete-other")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestSummary_ReturnsCalculatedSummary(t *testing.T) {
 	e := newTestEnv()
 	tok := e.token(t, "user-1")
-	e.do(t, http.MethodPost, "/portfolio/positions", aaplBody, tok)
+	e.doWithKey(t, http.MethodPost, "/portfolio/positions", aaplBody, tok, "add-summary")
 
 	rec := e.do(t, http.MethodGet, "/portfolio/summary", "", tok)
 	assert.Equal(t, http.StatusOK, rec.Code)

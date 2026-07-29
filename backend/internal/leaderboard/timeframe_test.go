@@ -291,7 +291,7 @@ func TestGetUserRank_PausedStateEvictsStaleCachedRank(t *testing.T) {
 	assert.Empty(t, top)
 }
 
-func TestGetUserRank_UsesDirectCacheRankBeyondTopHundred(t *testing.T) {
+func TestGetUserRank_ComputesCanonicalRankBeyondTopHundred(t *testing.T) {
 	users := make([]auth.User, 0, 101)
 	ranked := make(map[string]RankedPerformance, 101)
 	cache := newTestCache(t)
@@ -307,6 +307,36 @@ func TestGetUserRank_UsesDirectCacheRankBeyondTopHundred(t *testing.T) {
 	rank, err := svc.GetUserRank(context.Background(), "u101")
 	require.NoError(t, err)
 	assert.Equal(t, 101, rank)
+}
+
+func TestGetUserRank_IgnoresRedisTieOrder(t *testing.T) {
+	// Redis breaks equal-score ties by member bytes in descending order, while
+	// the application contract uses display name ascending, then user id.
+	// "u-zulu" is therefore first in Redis but must be second canonically.
+	users := fakeUsers{users: []auth.User{
+		user("u-zulu", "Zulu"),
+		user("u-alpha", "Alpha"),
+	}}
+	ranked := fakeRanked{byUser: map[string]RankedPerformance{
+		"u-zulu":  summary("10", "110"),
+		"u-alpha": summary("10", "110"),
+	}}
+	cache := newTestCache(t)
+	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u-zulu", testRatio("10")))
+	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u-alpha", testRatio("10")))
+
+	svc := NewService(users, ranked)
+	svc.SetCache(cache)
+
+	board, err := svc.Build(context.Background())
+	require.NoError(t, err)
+	require.Len(t, board, 2)
+	assert.Equal(t, "Alpha", board[0].DisplayName)
+	assert.Equal(t, "Zulu", board[1].DisplayName)
+
+	rank, err := svc.GetUserRank(context.Background(), "u-zulu")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rank, "personal rank must use the same canonical tie-break as the board")
 }
 
 func TestRefreshCache_DoesNotWriteIndependentSnapshotHistory(t *testing.T) {

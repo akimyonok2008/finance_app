@@ -157,4 +157,11 @@ type AggregateStore interface {
 	MarkOutboxProcessed(ctx context.Context, id string) error
 	// MarkOutboxFailed records a failed attempt for retry.
 	MarkOutboxFailed(ctx context.Context, id string, cause string) error
+	// FindAuditByRequestID is a cheap, lock-free idempotency preflight: it lets
+	// Apply short-circuit a replay or conflict BEFORE paying for FX/pricing I/O.
+	// The authoritative check still runs again inside the lock (applyLocked),
+	// since a concurrent retry can commit between this call and the lock being
+	// acquired; this is purely an optimization to avoid upstream provider calls
+	// for requests that are already known to be duplicates.
+	FindAuditByRequestID(ctx context.Context, userID, requestID string) (MutationAudit, bool, error)
 }

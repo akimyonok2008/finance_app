@@ -90,30 +90,6 @@ func TestRedisCache_CompetitionScores(t *testing.T) {
 	assert.Equal(t, "u2", top[0].UserID)
 }
 
-func TestRedisCache_Ranks(t *testing.T) {
-	c := newTestCache(t)
-	ctx := context.Background()
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u1", testRatio("5")))
-	require.NoError(t, c.UpsertGlobalScore(ctx, "u2", testRatio("10")))
-	require.NoError(t, c.UpsertCompetitionScore(ctx, "comp", "u1", testRatio("3")))
-
-	rank, err := c.GetGlobalRank(ctx, "u2")
-	require.NoError(t, err)
-	assert.Equal(t, 1, rank)
-	rank, err = c.GetGlobalRank(ctx, "u1")
-	require.NoError(t, err)
-	assert.Equal(t, 2, rank)
-
-	// Unknown member ranks 0 (not ranked), not an error.
-	rank, err = c.GetGlobalRank(ctx, "ghost")
-	require.NoError(t, err)
-	assert.Equal(t, 0, rank)
-
-	rank, err = c.GetCompetitionRank(ctx, "comp", "u1")
-	require.NoError(t, err)
-	assert.Equal(t, 1, rank)
-}
-
 func TestNoopCache_AlwaysEmpty(t *testing.T) {
 	c := NoopLeaderboardCache{}
 	ctx := context.Background()
@@ -121,7 +97,4 @@ func TestNoopCache_AlwaysEmpty(t *testing.T) {
 	top, err := c.GetGlobalTop(ctx, 10)
 	require.NoError(t, err)
 	assert.Empty(t, top)
-	rank, err := c.GetGlobalRank(ctx, "u1")
-	require.NoError(t, err)
-	assert.Equal(t, 0, rank)
 }

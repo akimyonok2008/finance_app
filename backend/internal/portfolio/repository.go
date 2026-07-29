@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/google/uuid"
 )
 
@@ -68,6 +69,10 @@ type Repository interface {
 	RejectReconciliation(ctx context.Context, id, resolvedBy string) error
 	ListCashBalances(ctx context.Context, userID string) ([]CashBalance, error)
 	ListActivities(ctx context.Context, userID string, limit int) ([]Activity, error)
+	// EligibleQuantity returns the quantity held for one instrument at asOf.
+	// Implementations must inspect the complete relevant ledger; this financial
+	// calculation must never inherit presentation-list limits.
+	EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error)
 	// GetActivityByID returns a single activity scoped to userID, avoiding a
 	// full-ledger scan to find one row.
 	GetActivityByID(ctx context.Context, userID, activityID string) (Activity, bool, error)
@@ -616,6 +621,23 @@ func (r *InMemoryRepository) ListActivities(ctx context.Context, userID string, 
 		out = append(out, cloneActivity(items[i]))
 	}
 	return out, nil
+}
+
+func (r *InMemoryRepository) EligibleQuantity(ctx context.Context, userID, instrumentID, symbol string, asOf time.Time) (money.Quantity, error) {
+	if err := ctx.Err(); err != nil {
+		return money.ZeroQuantity(), err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.userPortfolio[userID]
+	if !ok {
+		return money.ZeroQuantity(), nil
+	}
+	activities := make([]Activity, len(r.aggregates[id].activities))
+	for i, activity := range r.aggregates[id].activities {
+		activities[i] = cloneActivity(activity)
+	}
+	return eligibleQuantityFromActivities(activities, instrumentID, symbol, asOf), nil
 }
 
 func (r *InMemoryRepository) GetActivityByID(ctx context.Context, userID, activityID string) (Activity, bool, error) {

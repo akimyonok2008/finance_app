@@ -24,9 +24,17 @@ func rankingTestPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	require.NoError(t, db.RunMigrations(context.Background(), pool))
 	// The suite shares one database across tests (no per-test transaction
-	// isolation); start every test from an empty projection so Count/TopPage
-	// assertions aren't polluted by rows other tests left behind.
+	// isolation); start every test from an empty projection, with no
+	// generation ever activated, so Count/TopPage/ActiveGenerationAge
+	// assertions aren't polluted by rows or promotions other tests left
+	// behind.
 	_, err = pool.Exec(context.Background(), `TRUNCATE leaderboard_rankings`)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), `
+		UPDATE leaderboard_ranking_state
+		SET active_generation = 0, building_generation = 1, cycle_started_at = now(), activated_at = NULL
+		WHERE id
+	`)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return pool
@@ -56,6 +64,7 @@ func TestPostgresRankingStore_TopPageRanksAndTieBreaks(t *testing.T) {
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, beta, testIndex("110"), testRatio("10"), epoch))
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, alpha, testIndex("110"), testRatio("10"), epoch))
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, gamma, testIndex("108"), testRatio("8"), epoch))
+	require.NoError(t, store.CompleteCycle(ctx))
 
 	rows, err := store.TopPage(ctx, TimeframeAll, 100)
 	require.NoError(t, err)
@@ -88,6 +97,9 @@ func TestPostgresRankingStore_TopPageRanksAndTieBreaks(t *testing.T) {
 	assert.False(t, found, "an unknown user must report found=false, not an error")
 }
 
+// TestPostgresRankingStore_DeleteRemovesRow proves Delete removes a user from
+// the NEXT generation to be promoted, not the one currently being read —
+// exclusion, like inclusion, only takes effect once a full cycle completes.
 func TestPostgresRankingStore_DeleteRemovesRow(t *testing.T) {
 	pool := rankingTestPool(t)
 	store := NewPostgresRankingStore(pool)
@@ -95,29 +107,37 @@ func TestPostgresRankingStore_DeleteRemovesRow(t *testing.T) {
 	user := seedRankingUser(t, pool, "Solo")
 
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, user, testIndex("120"), testRatio("20"), time.Now().UTC()))
+	require.NoError(t, store.CompleteCycle(ctx))
 	n, err := store.Count(ctx, TimeframeAll)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 
 	require.NoError(t, store.Delete(ctx, TimeframeAll, user))
+	require.NoError(t, store.CompleteCycle(ctx))
 	n, err = store.Count(ctx, TimeframeAll)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 }
 
-func TestPostgresRankingStore_OldestComputedAtReportsFreshness(t *testing.T) {
+func TestPostgresRankingStore_ActiveGenerationAgeReportsFreshness(t *testing.T) {
 	pool := rankingTestPool(t)
 	store := NewPostgresRankingStore(pool)
 	ctx := context.Background()
 
-	_, found, err := store.OldestComputedAt(ctx, TimeframeAll)
+	_, found, err := store.ActiveGenerationAge(ctx)
 	require.NoError(t, err)
-	assert.False(t, found, "an empty projection must report not-found, not a zero time")
+	assert.False(t, found, "before any cycle completes, freshness must report not-found, not a zero time")
 
 	user := seedRankingUser(t, pool, "Fresh")
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, user, testIndex("100"), testRatio("0"), time.Now().UTC()))
+	// Upsert alone must not activate anything — it only writes the building
+	// generation, which stays invisible until CompleteCycle promotes it.
+	_, found, err = store.ActiveGenerationAge(ctx)
+	require.NoError(t, err)
+	assert.False(t, found, "an unpromoted (building) generation must not count as fresh")
 
-	at, found, err := store.OldestComputedAt(ctx, TimeframeAll)
+	require.NoError(t, store.CompleteCycle(ctx))
+	at, found, err := store.ActiveGenerationAge(ctx)
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.WithinDuration(t, time.Now().UTC(), at, 5*time.Second)
@@ -132,6 +152,7 @@ func TestPostgresRankingStore_UpsertOverwritesPreviousValue(t *testing.T) {
 	epoch := time.Now().UTC()
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, user, testIndex("100"), testRatio("0"), epoch))
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, user, testIndex("115"), testRatio("15"), epoch))
+	require.NoError(t, store.CompleteCycle(ctx))
 
 	rank, idx, retPct, found, err := store.RankOf(ctx, TimeframeAll, user)
 	require.NoError(t, err)
@@ -148,6 +169,7 @@ func TestPostgresRankingStore_DeletedUserCascadesOut(t *testing.T) {
 	user := seedRankingUser(t, pool, "Gone")
 
 	require.NoError(t, store.Upsert(ctx, TimeframeAll, user, testIndex("100"), testRatio("0"), time.Now().UTC()))
+	require.NoError(t, store.CompleteCycle(ctx))
 	_, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user)
 	require.NoError(t, err)
 

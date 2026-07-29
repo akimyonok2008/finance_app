@@ -2,7 +2,6 @@ package leaderboard
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
@@ -105,24 +104,4 @@ func (c *RedisLeaderboardCache) top(ctx context.Context, key string, limit int) 
 		out = append(out, CachedLeaderboardScore{UserID: member, Score: z.Score})
 	}
 	return out, nil
-}
-
-func (c *RedisLeaderboardCache) GetGlobalRank(ctx context.Context, userID string) (int, error) {
-	return c.rank(ctx, globalKey, userID)
-}
-
-func (c *RedisLeaderboardCache) GetCompetitionRank(ctx context.Context, competitionID, userID string) (int, error) {
-	return c.rank(ctx, competitionKey(competitionID), userID)
-}
-
-// rank returns the 1-based descending rank, or 0 when the member is absent.
-func (c *RedisLeaderboardCache) rank(ctx context.Context, key, userID string) (int, error) {
-	r, err := c.client.ZRevRank(ctx, key, userID).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("leaderboard cache: rank %s: %w", key, err)
-	}
-	return int(r) + 1, nil
 }

@@ -74,6 +74,7 @@ export function updatePosition(
   return apiRequest<Position>(`/portfolio/positions/${id}`, {
     method: "PUT",
     body: input,
+    idempotencyKey: crypto.randomUUID(),
   });
 }
 
@@ -122,7 +123,10 @@ export function withdrawCash(input: CashFlowInput): Promise<ActivityMutationResp
 }
 
 export function deletePosition(id: string): Promise<void> {
-  return apiRequest<void>(`/portfolio/positions/${id}`, { method: "DELETE" });
+  return apiRequest<void>(`/portfolio/positions/${id}`, {
+    method: "DELETE",
+    idempotencyKey: crypto.randomUUID(),
+  });
 }
 
 // --- income, fees, corporate actions (user-reported tracking only) -----------

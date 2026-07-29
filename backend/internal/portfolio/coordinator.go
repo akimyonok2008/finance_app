@@ -173,6 +173,40 @@ func (c *MutationCoordinator) Apply(ctx context.Context, req MutationRequest) (M
 		return MutationResult{}, err
 	}
 
+	// 1b. Idempotency preflight, before any FX/pricing I/O: a retry of an
+	// already-committed request (or a conflicting reuse of its key) must not
+	// depend on the price provider being reachable. This is only an
+	// optimization — applyLocked repeats the identical check under the lock,
+	// since a concurrent in-flight request could still commit between this
+	// read and the lock being acquired, and that locked check remains the
+	// authoritative one preventing a race between two retries.
+	if req.RequestID != "" {
+		if audit, found, err := c.store.FindAuditByRequestID(ctx, req.UserID, req.RequestID); err != nil {
+			return MutationResult{}, err
+		} else if found {
+			if err := checkIdempotencyAudit(audit, req); err != nil {
+				return MutationResult{}, err
+			}
+			// Confirmed duplicate: replay under the lock without ever pricing
+			// anything. If the audit row is gone by the time we lock (it can't
+			// be — audits are never deleted — but applyLocked re-checks
+			// regardless), the locked path falls through to a normal apply.
+			var result MutationResult
+			err := c.store.WithLockedPortfolio(ctx, req.UserID, func(ctx context.Context, tx AggregateTx) error {
+				res, _, err := c.applyLocked(ctx, tx, req, nil)
+				if err != nil {
+					return err
+				}
+				result = res
+				return nil
+			})
+			if err != nil {
+				return MutationResult{}, err
+			}
+			return result, nil
+		}
+	}
+
 	// 2. Pin one market observation per symbol/currency, outside the lock.
 	valuation := newValuation(c.now())
 	for _, currency := range []string{"USD", "TRY", "EUR", "GBP"} {
@@ -356,17 +390,8 @@ func (c *MutationCoordinator) applyLocked(ctx context.Context, tx AggregateTx, r
 		if audit, found, err := tx.FindAuditByRequestID(ctx, req.RequestID); err != nil {
 			return MutationResult{}, nil, err
 		} else if found {
-			fingerprint, err := mutationFingerprint(req)
-			if err != nil {
+			if err := checkIdempotencyAudit(audit, req); err != nil {
 				return MutationResult{}, nil, err
-			}
-			if audit.RequestFingerprint != "" && audit.RequestFingerprint != fingerprint {
-				return MutationResult{}, nil, ErrIdempotencyConflict
-			}
-			// Records written before fingerprints were introduced can only be
-			// safely replayed when the operation itself still matches.
-			if audit.RequestFingerprint == "" && audit.MutationType != string(req.Kind) {
-				return MutationResult{}, nil, ErrIdempotencyConflict
 			}
 			return c.replay(ctx, tx, audit), nil, nil
 		}
@@ -617,6 +642,28 @@ func mutationFingerprint(req MutationRequest) (string, error) {
 	}
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// checkIdempotencyAudit validates a committed audit row against an incoming
+// request bearing the same RequestID, returning ErrIdempotencyConflict when
+// the key was reused for a different mutation. A nil error means the request
+// is a genuine retry and safe to replay. Shared by the lock-free preflight in
+// Apply and the authoritative check in applyLocked, so both apply the exact
+// same rule.
+func checkIdempotencyAudit(audit MutationAudit, req MutationRequest) error {
+	fingerprint, err := mutationFingerprint(req)
+	if err != nil {
+		return err
+	}
+	if audit.RequestFingerprint != "" && audit.RequestFingerprint != fingerprint {
+		return ErrIdempotencyConflict
+	}
+	// Records written before fingerprints were introduced can only be safely
+	// replayed when the operation itself still matches.
+	if audit.RequestFingerprint == "" && audit.MutationType != string(req.Kind) {
+		return ErrIdempotencyConflict
+	}
+	return nil
 }
 
 func mustMutationFingerprint(req MutationRequest) string {
@@ -1537,10 +1584,11 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			return mutationPlan{}, ErrInvalidWeights
 		}
 		replacements := make([]*Position, 0, len(req.Weights))
-		targetCashBase := 0.0
+		targetCashBase := money.ZeroAmount()
 		for _, w := range req.Weights {
+			weightRatio := money.RatioFromFloat64(w.WeightPercentage / 100)
 			if w.AssetType == AssetTypeCash {
-				targetCashBase += totalValue.Float64() * (w.WeightPercentage / 100)
+				targetCashBase = targetCashBase.Add(totalValue.MulRatio(weightRatio))
 				continue
 			}
 			quote, ok := val.Quote(w.Symbol)
@@ -1551,8 +1599,10 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			if !ok {
 				return mutationPlan{}, ErrUnsupportedCurrency
 			}
-			quantity := totalValue.Float64() * (w.WeightPercentage / 100) / (quote.Price.Float64() * rate.Float64())
-			if !finitePositive(quantity) {
+			targetValue := totalValue.MulRatio(weightRatio)
+			priceInBase := quote.Price.Convert(rate)
+			quantity, err := targetValue.DivByPrice(priceInBase, money.ScaleQuantity)
+			if err != nil || !finitePositive(quantity.Float64()) {
 				return mutationPlan{}, ErrInvalidWeights
 			}
 			replacements = append(replacements, &Position{
@@ -1561,7 +1611,7 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 				PortfolioID:     pf.ID,
 				Symbol:          w.Symbol,
 				AssetType:       w.AssetType,
-				Quantity:        money.QuantizeQuantity(money.QuantityFromFloat64(quantity)),
+				Quantity:        money.QuantizeQuantity(quantity),
 				AverageBuyPrice: quote.Price,
 				Currency:        quote.Currency,
 				Status:          PositionStatusOpen,
@@ -1574,11 +1624,11 @@ func (c *MutationCoordinator) plan(req MutationRequest, pf *Portfolio, all []*Po
 			nextCash[i].Amount = money.ZeroAmount()
 			nextCash[i].UpdatedAt = now
 		}
-		if targetCashBase > 0 {
+		if targetCashBase.Cmp(money.ZeroAmount()) > 0 {
 			usd, _ := cashBalance(nextCash, fx.BaseCurrency)
 			usd.PortfolioID = pf.ID
 			usd.Currency = fx.BaseCurrency
-			usd.Amount = money.AmountFromFloat64(targetCashBase)
+			usd.Amount = targetCashBase
 			usd.UpdatedAt = now
 			if usd.CreatedAt.IsZero() {
 				usd.CreatedAt = now
