@@ -300,6 +300,24 @@ func TestIdempotency_RetriedAddAppliesOnce(t *testing.T) {
 	assert.Len(t, repo.OutboxEvents(), 1, "a retry must not emit a second event")
 }
 
+func TestIdempotency_KeyReuseWithDifferentRequestIsRejected(t *testing.T) {
+	svc, repo, _, _ := newTxTestService()
+	first := MutationRequest{
+		Kind: MutationDeposit, UserID: "u1", RequestID: "same-key",
+		CashFlow: CashFlowInput{Currency: "USD", Amount: testAmount("1000")},
+	}
+	_, err := svc.Mutate(ctx(), first)
+	require.NoError(t, err)
+
+	conflicting := MutationRequest{
+		Kind: MutationWithdrawal, UserID: "u1", RequestID: "same-key",
+		CashFlow: CashFlowInput{Currency: "USD", Amount: testAmount("500")},
+	}
+	_, err = svc.Mutate(ctx(), conflicting)
+	require.ErrorIs(t, err, ErrIdempotencyConflict)
+	assert.Len(t, repo.OutboxEvents(), 1, "the conflicting request must not mutate or emit work")
+}
+
 func TestIdempotency_RetriedCloseAndReplaceApplyOnce(t *testing.T) {
 	svc, repo, _, _ := newTxTestService()
 	pos, err := svc.AddPosition(ctx(), "u1", PositionInput{Symbol: "AAPL", AssetType: "stock", Quantity: testQuantity("2")})

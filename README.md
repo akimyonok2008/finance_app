@@ -13,11 +13,11 @@ broker or place trades.
 
 [![CI](https://github.com/akimyonok2008/finance_app/actions/workflows/ci.yml/badge.svg)](https://github.com/akimyonok2008/finance_app/actions/workflows/ci.yml)
 
-Pull requests to `main` and pushes to `main` run four required gates: backend
+Pull requests to `main` and pushes to `main` run five required gates: backend
 format/test/race/vet, frontend locked install/lint/test/build, PostgreSQL
-migration and startup integration, and production-image Docker smoke tests. CI
-uses mock providers in explicit demo mode and never contacts live
-financial-data services.
+migration and startup integration, production-image Docker smoke tests, and
+the release-critical Playwright browser journey. CI uses mock providers in
+explicit demo mode and never contacts live financial-data services.
 
 Repository administrators must apply the required branch rules and production
 environment approval described in
@@ -156,6 +156,8 @@ own dedicated, more constrained correction paths.
   profile
 - Public strategy profiles and percentage-based allocation views, Explore
   discovery, following, mutual-follower friendships, and one-to-one messages
+- Blocking, user/message reporting, notification read state, and a role-gated
+  moderator queue with audited resolution actions
 - Compare and copy-weight templates that never execute trades
 - In-memory or PostgreSQL storage, optional Redis leaderboard caching, mock
   prices by default, and optional Twelve Data quotes
@@ -370,11 +372,13 @@ portfolio mutation, and the live database calculation remains the fallback.
   deposits/withdrawals, dividends/distributions, fees, and corporate actions
   (splits, symbol changes, write-offs) are tracked; there are no tax lots or
   tax-basis accounting.
-- Money and quantity fields are `float64` end-to-end in the Go backend, even
-  though the underlying PostgreSQL columns are `NUMERIC`. This is a real
-  precision-loss risk versus a fully decimal-safe implementation and was
-  deliberately deferred as a separate, larger effort rather than bundled into
-  this pass.
+- Authoritative money, quantity, price, FX, ratio, weight, and ranked-index
+  values use exact decimal domain types and PostgreSQL `NUMERIC`; financial JSON
+  is parsed from token text and emitted as canonical decimal strings. Binary
+  floating point remains only at documented external or presentation
+  boundaries, such as provider SDK responses, chart percentages, and the
+  legacy Redis score boundary. Those values must be converted immediately and
+  must not become an authoritative accounting or ranking source.
 - Buy/sell activities cannot be corrected after the fact (only deposits and
   withdrawals can); record an offsetting buy/sell instead.
 - Window leaderboards and achievements require epoch-safe trusted snapshots
@@ -422,8 +426,10 @@ portfolio mutation, and the live database calculation remains the fallback.
   Apple frontend flow exists.
 - There is no refresh-token or device-management UI. Auth-version revocation
   invalidates JWTs globally rather than maintaining a per-device session list.
-- No WebSockets, unread counts, notifications,
-  moderation, message editing/deletion, or public unauthenticated social pages.
+- No WebSockets, attachments, reactions, group messages, user-facing message
+  editing/deletion, or public unauthenticated social pages. Direct-message
+  unread counts, notifications, blocking/reporting, and moderator workflows are
+  implemented.
 - This repository is a personal-use prototype, not production or regulatory
   readiness.
 
@@ -450,10 +456,20 @@ go test ./...
 go vet ./...
 
 cd ../frontend
-npm install
+npm ci
+npm test
 npm run lint
 npm run build
+
+cd ..
+scripts/ci/docker-smoke.sh
+scripts/ci/browser-e2e.sh
 ```
+
+The Docker smoke uses the release frontend contract (`VITE_API_BASE_URL=/api`)
+and verifies the nginx-to-API proxy. The browser script runs the Playwright
+release-critical journey against its containerized PostgreSQL/Redis/API/frontend
+stack.
 
 See [backend/README.md](backend/README.md) for API and calculation details and
 [frontend/README.md](frontend/README.md) for routes and UI integration.

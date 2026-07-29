@@ -12,6 +12,7 @@ import (
 
 func TestRecordDailySnapshot_SkipsWithoutPositions(t *testing.T) {
 	svc, _ := newTestService()
+	require.NoError(t, svc.OnAccountCreated(ctx(), "user-1"))
 	wrote, err := svc.RecordDailySnapshot(ctx(), "user-1")
 	require.NoError(t, err)
 	assert.False(t, wrote, "no positions ⇒ no snapshot")

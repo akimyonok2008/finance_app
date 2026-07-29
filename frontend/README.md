@@ -69,8 +69,15 @@ mutations (now including `corporateActions`).
 - Tailwind CSS 3, Radix primitives, Vaul, Framer Motion
 - Recharts, React Hook Form, Zod, Lucide, and Sonner
 
-There is no frontend automated test suite or `test` script. Validation currently
-consists of linting and a production build.
+Automated coverage has two layers:
+
+- `npm test` runs the Vitest/jsdom component, hook, schema, API-contract, and
+  routing suite.
+- `npm run test:e2e` runs Playwright. CI uses it for the release-critical
+  browser journey against production backend/frontend images.
+
+The frontend CI job runs lint, unit/component tests, and the production build;
+the separate browser job installs Chromium and runs the Playwright journey.
 
 ## Run
 
@@ -315,8 +322,11 @@ Explore is the active combined workspace:
 - Messages lists one-to-one mutual-follower conversations, polls every 30
   seconds, and uses distinct sent/received states.
 
-The UI has no WebSockets, unread counts, notifications, attachments, reactions,
-blocking, moderation, or group chat.
+The UI supports direct-message unread counts, blocking/unblocking, user and
+message reporting, notifications with unread/read state, and a role-gated
+moderator report queue with resolution actions. Messages still poll rather than
+using WebSockets. Attachments, reactions, group chat, and user-facing message
+editing/deletion are not implemented.
 
 ## Privacy and API integration
 
@@ -385,9 +395,13 @@ npm install
 npm run lint
 npm run build
 npm test
+npm run test:e2e
 ```
 
-`npm test` runs Vitest (jsdom + Testing Library). `src/pages/PortfolioPage.test.tsx`
-covers the `/portfolio` tab routing contract, the `/activity` and `/performance`
-compatibility redirects, browser back/forward, and per-tab data-fetching
-independence.
+`npm test` runs Vitest (jsdom + Testing Library). Coverage includes API schemas,
+decimal formatting, portfolio tab routing, authentication/settings behavior,
+social-safety controls, moderator workflows, and query invalidation.
+
+`npm run test:e2e` runs Playwright. For the same release topology used by CI,
+run `scripts/ci/browser-e2e.sh` from the repository root; failure diagnostics
+are written under `frontend/playwright-report` and `frontend/test-results`.

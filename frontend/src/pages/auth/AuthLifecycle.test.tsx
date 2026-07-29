@@ -44,6 +44,7 @@ describe("authentication lifecycle pages", () => {
       },
     };
     vi.stubGlobal("fetch", vi.fn(() => jsonResponse(session)));
+    window.history.replaceState({}, "", "/verify-email?token=one-time-token&source=email#status");
 
     render(
       <MemoryRouter initialEntries={["/verify-email?token=one-time-token"]}>
@@ -51,6 +52,8 @@ describe("authentication lifecycle pages", () => {
       </MemoryRouter>,
     );
 
+    expect(window.location.pathname + window.location.search + window.location.hash)
+      .toBe("/verify-email?source=email#status");
     expect(await screen.findByText("Email verified")).toBeTruthy();
     expect(acceptSession).toHaveBeenCalledWith(session);
     expect(fetch).toHaveBeenCalledWith(

@@ -14,6 +14,7 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/performance"
 	"github.com/ardakimyonok/finance_app/internal/prices"
+	"github.com/ardakimyonok/finance_app/internal/telemetry"
 )
 
 // Service holds the portfolio business logic: queries, private monetary
@@ -30,6 +31,15 @@ type Service struct {
 	coordinator *MutationCoordinator
 	ranked      RankedPerformanceProvider
 	identity    *instrument.Resolver
+	// priceProviderName scopes provider-specific ticker aliases when
+	// resolving what symbol to query the price provider with (see
+	// priceLookupSymbol). Empty means "no provider-specific alias
+	// preference", which still resolves the current generic ticker alias.
+	priceProviderName string
+	// resolutionRequired mirrors config.InstrumentResolutionRequired: when
+	// true, BuyPosition rejects an unresolved instrument identity instead of
+	// saving a ticker-only position. See SetInstrumentResolutionRequired.
+	resolutionRequired bool
 }
 
 type RankedPerformanceProvider interface {
@@ -62,6 +72,19 @@ func (s *Service) SetInstrumentResolver(resolver *instrument.Resolver) {
 	s.identity = resolver
 }
 
+// SetPriceProviderName records which market-data provider s.provider talks
+// to (e.g. "yahoo", "mock"), so priceLookupSymbol can prefer a
+// provider-specific alias over the generic ticker alias when one exists.
+func (s *Service) SetPriceProviderName(name string) {
+	s.priceProviderName = name
+}
+
+// SetInstrumentResolutionRequired wires config.InstrumentResolutionRequired
+// into the buy path (see resolveBuyIdentity/BuyPosition).
+func (s *Service) SetInstrumentResolutionRequired(required bool) {
+	s.resolutionRequired = required
+}
+
 func (s *Service) resolveBuyIdentity(ctx context.Context, input *BuyInput) (instrument.IdentityQuality, error) {
 	if s.identity == nil {
 		return "", nil
@@ -77,18 +100,53 @@ func (s *Service) resolveBuyIdentity(ctx context.Context, input *BuyInput) (inst
 		input.InstrumentID = resolution.Instrument.ID
 	}
 	input.IdentityQuality = string(resolution.Quality)
+	switch resolution.Quality {
+	case instrument.QualityAmbiguous:
+		telemetry.IncInstrumentResolutionAmbiguous()
+	case instrument.QualityUnresolved:
+		telemetry.IncInstrumentResolutionUnresolved()
+	}
 	return resolution.Quality, nil
+}
+
+// priceLookupSymbol returns the ticker the price provider should be queried
+// with for a holding: the current alias resolved via instrumentID when
+// identity is available, falling back to the stored symbol otherwise (an
+// unresolved legacy position, or an environment with no identity resolver
+// wired). This is what keeps a renamed or reused ticker pricing correctly
+// instead of trusting a stored symbol that may have gone stale since the
+// position was opened.
+func (s *Service) priceLookupSymbol(ctx context.Context, symbol, instrumentID string) string {
+	if s.identity == nil || instrumentID == "" {
+		return symbol
+	}
+	resolved, err := s.identity.ResolveProviderSymbol(ctx, instrumentID, s.priceProviderName, time.Now().UTC())
+	if err != nil || resolved == "" {
+		telemetry.IncProviderMappingMissing()
+		return symbol
+	}
+	return resolved
 }
 
 // Coordinator exposes the mutation boundary (used by the outbox processor and
 // tests). It is nil only for a repository that is not an AggregateStore.
 func (s *Service) Coordinator() *MutationCoordinator { return s.coordinator }
 
-// GetOrCreateDefaultPortfolio returns the user's portfolio, creating the default
-// one on first access. Creation is race-safe: concurrent first requests converge
-// on one portfolio (UNIQUE (user_id) in Postgres, user index in memory).
+// GetOrCreateDefaultPortfolio is the idempotent initialization/command helper.
+// Read paths must use GetPortfolio instead.
 func (s *Service) GetOrCreateDefaultPortfolio(ctx context.Context, userID string) (*Portfolio, error) {
 	return s.repo.EnsureDefaultPortfolio(ctx, userID)
+}
+
+// OnAccountCreated eagerly initializes the user's required aggregate.
+func (s *Service) OnAccountCreated(ctx context.Context, userID string) error {
+	_, err := s.repo.EnsureDefaultPortfolio(ctx, userID)
+	return err
+}
+
+// GetPortfolio performs a side-effect-free portfolio lookup.
+func (s *Service) GetPortfolio(ctx context.Context, userID string) (*Portfolio, error) {
+	return s.repo.GetPortfolioByUser(ctx, userID)
 }
 
 // SetAutoFundPurchases toggles the portfolio-level preference that lets a buy
@@ -154,24 +212,18 @@ func (s *Service) WithdrawCash(ctx context.Context, userID, requestID string, in
 //
 // Every other activity type is rejected with ErrCorrectionNotSupported.
 func (s *Service) CorrectActivity(ctx context.Context, userID, requestID string, input ActivityCorrectionInput) (MutationResult, error) {
-	activities, err := s.repo.ListActivities(ctx, userID, 100000)
+	found, ok, err := s.repo.GetActivityByID(ctx, userID, input.ActivityID)
 	if err != nil {
 		return MutationResult{}, err
 	}
-	var original *Activity
-	for i := range activities {
-		if activities[i].ID == input.ActivityID {
-			original = &activities[i]
-			break
-		}
-	}
-	if original == nil {
+	if !ok {
 		return MutationResult{}, ErrActivityNotFound
 	}
-	for _, a := range activities {
-		if correctionOf, _ := a.Metadata["correction_of_activity_id"].(string); correctionOf == original.ID {
-			return MutationResult{}, ErrActivityAlreadyCorrected
-		}
+	original := &found
+	if _, corrected, err := s.repo.FindCorrectionForActivity(ctx, userID, original.ID); err != nil {
+		return MutationResult{}, err
+	} else if corrected {
+		return MutationResult{}, ErrActivityAlreadyCorrected
 	}
 
 	switch original.Type {
@@ -245,6 +297,9 @@ func (s *Service) BuyPosition(ctx context.Context, userID, requestID string, inp
 	if quality == instrument.QualityAmbiguous {
 		return MutationResult{}, ErrInstrumentIdentityAmbiguous
 	}
+	if s.resolutionRequired && (quality == instrument.QualityUnresolved || quality == "") {
+		return MutationResult{}, ErrInstrumentIdentityUnresolved
+	}
 	return s.Mutate(ctx, MutationRequest{
 		Kind: MutationBuy, UserID: userID, RequestID: requestID, Buy: input,
 	})
@@ -309,49 +364,37 @@ func (s *Service) ActivityList(ctx context.Context, userID, category, symbol str
 	if offset < 0 {
 		offset = 0
 	}
-	activities, err := s.repo.ListActivities(ctx, userID, 100000)
+	category = strings.ToLower(strings.TrimSpace(category))
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	var types []ActivityType
+	if category != "" && category != "all" {
+		types = activityTypesForCategory(category)
+	}
+	activities, total, err := s.repo.ListActivitiesFiltered(ctx, userID, types, symbol, limit, offset)
 	if err != nil {
 		return ActivityListResponse{}, err
 	}
-	category = strings.ToLower(strings.TrimSpace(category))
-	symbol = strings.ToUpper(strings.TrimSpace(symbol))
-	filtered := make([]ActivityView, 0, len(activities))
+	items := make([]ActivityView, 0, len(activities))
 	for _, activity := range activities {
-		if symbol != "" && normalizeSymbol(activity.Symbol) != symbol {
-			continue
-		}
-		if category != "" && category != "all" && activityCategory(activity.Type) != category {
-			continue
-		}
-		filtered = append(filtered, activityView(activity))
-	}
-	total := len(filtered)
-	if offset > total {
-		offset = total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
+		items = append(items, activityView(activity))
 	}
 	var next *int
-	if end < total {
-		value := end
+	if offset+len(items) < total {
+		value := offset + len(items)
 		next = &value
 	}
-	return ActivityListResponse{Items: filtered[offset:end], NextOffset: next, Total: total}, nil
+	return ActivityListResponse{Items: items, NextOffset: next, Total: total}, nil
 }
 
 func (s *Service) ActivityDetail(ctx context.Context, userID, activityID string) (ActivityView, error) {
-	activities, err := s.repo.ListActivities(ctx, userID, 100000)
+	activity, ok, err := s.repo.GetActivityByID(ctx, userID, activityID)
 	if err != nil {
 		return ActivityView{}, err
 	}
-	for _, activity := range activities {
-		if activity.ID == activityID {
-			return activityView(activity), nil
-		}
+	if !ok {
+		return ActivityView{}, ErrPositionNotFound
 	}
-	return ActivityView{}, ErrPositionNotFound
+	return activityView(activity), nil
 }
 
 func activityView(activity Activity) ActivityView {
@@ -414,6 +457,27 @@ func activityOrigin(activity Activity) string {
 	}
 }
 
+// activityTypesForCategory is the inverse of activityCategory, used to push
+// the category filter down into the repository query instead of scanning the
+// whole ledger in Go.
+func activityTypesForCategory(category string) []ActivityType {
+	switch category {
+	case "cash_flows":
+		return []ActivityType{ActivityDeposit, ActivityWithdrawal, ActivityOpeningBalance}
+	case "trades":
+		return []ActivityType{ActivityBuy, ActivitySell}
+	case "income":
+		return []ActivityType{ActivityCashDividend, ActivityETFDistribution, ActivityInterestIncome,
+			ActivityReinvestedDividend, ActivityReturnOfCapital, ActivityStockDividend}
+	case "fees":
+		return []ActivityType{ActivityBuyFee, ActivitySellFee, ActivityManagementFee, ActivityCustodyFee, ActivityOtherFee}
+	case "automatic_adjustments":
+		return []ActivityType{ActivityStockSplit, ActivityReverseSplit, ActivitySymbolChange, ActivityWriteOff}
+	default:
+		return nil
+	}
+}
+
 func activityCategory(kind ActivityType) string {
 	switch kind {
 	case ActivityDeposit, ActivityWithdrawal, ActivityOpeningBalance:
@@ -458,7 +522,7 @@ func (s *Service) PreviewBuy(ctx context.Context, userID string, input BuyInput)
 		return BuyPreview{}, err
 	}
 
-	quote, quoteErr := s.provider.GetLatestPrice(ctx, clean.Symbol)
+	quote, quoteErr := s.provider.GetLatestPrice(ctx, s.priceLookupSymbol(ctx, clean.Symbol, input.InstrumentID))
 	if quoteErr != nil || quote == nil {
 		return BuyPreview{}, ErrPriceProvider
 	}
@@ -625,7 +689,7 @@ func (s *Service) PreviewSell(ctx context.Context, userID string, input SellInpu
 	price := input.ExecutionPrice
 	priceSource := PriceSourceUserRecorded
 	if price.IsZero() {
-		quote, quoteErr := s.provider.GetLatestPrice(ctx, position.Symbol)
+		quote, quoteErr := s.provider.GetLatestPrice(ctx, s.priceLookupSymbol(ctx, position.Symbol, position.InstrumentID))
 		if quoteErr != nil || quote == nil {
 			return SellPreview{}, ErrPriceProvider
 		}
@@ -725,7 +789,7 @@ func (s *Service) WriteOffUnpriceablePosition(ctx context.Context, userID, reque
 	if positionStatus(position) != PositionStatusOpen {
 		return MutationResult{}, ErrPositionClosed
 	}
-	if _, priceErr := s.provider.GetLatestPrice(ctx, position.Symbol); priceErr == nil {
+	if _, priceErr := s.provider.GetLatestPrice(ctx, s.priceLookupSymbol(ctx, position.Symbol, position.InstrumentID)); priceErr == nil {
 		return MutationResult{}, ErrPositionIsPriceable
 	}
 	return s.Mutate(ctx, MutationRequest{
@@ -789,7 +853,7 @@ func (s *Service) ListClosedPositions(ctx context.Context, userID string) ([]Clo
 // request, so skipping it here removes an O(users) full-ledger-scan fan-out
 // from a hot, frequently-polled path.
 func (s *Service) PublicWeightsSummary(ctx context.Context, userID string) (*PortfolioSummary, error) {
-	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
+	pf, err := s.repo.GetPortfolioByUser(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -807,7 +871,7 @@ func (s *Service) PublicWeightsSummary(ctx context.Context, userID string) (*Por
 		if positionStatus(pos) != PositionStatusOpen {
 			continue
 		}
-		price, err := s.provider.GetLatestPrice(ctx, pos.Symbol)
+		price, err := s.provider.GetLatestPrice(ctx, s.priceLookupSymbol(ctx, pos.Symbol, pos.InstrumentID))
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
 		}
@@ -844,7 +908,7 @@ func (s *Service) convertAmount(ctx context.Context, amount money.Amount, from, 
 }
 
 func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary, error) {
-	pf, err := s.GetOrCreateDefaultPortfolio(ctx, userID)
+	pf, err := s.repo.GetPortfolioByUser(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -869,7 +933,7 @@ func (s *Service) Summary(ctx context.Context, userID string) (*PortfolioSummary
 			closedSummaries = append(closedSummaries, closed)
 			continue
 		}
-		price, err := s.provider.GetLatestPrice(ctx, pos.Symbol)
+		price, err := s.provider.GetLatestPrice(ctx, s.priceLookupSymbol(ctx, pos.Symbol, pos.InstrumentID))
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, pos.Symbol, err)
 		}

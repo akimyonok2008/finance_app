@@ -17,9 +17,11 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
-type stubUsers struct{ users []auth.User }
+type stubUsers struct{ users []auth.RankableUser }
 
-func (s stubUsers) ListUsers(_ context.Context) ([]auth.User, error) { return s.users, nil }
+func (s stubUsers) ListRankableUsers(_ context.Context) ([]auth.RankableUser, error) {
+	return s.users, nil
+}
 
 type stubSummaries struct {
 	byUser map[string]leaderboard.RankedPerformance
@@ -31,9 +33,9 @@ func (s stubSummaries) CurrentRankedPerformance(_ context.Context, userID string
 
 func newEnv() (http.Handler, *auth.TokenManager) {
 	tm := auth.NewTokenManager("test-secret", time.Hour)
-	users := stubUsers{users: []auth.User{
-		{ID: "u1", Email: "alpha@example.com", DisplayName: "AlphaWolf_91", AvatarKey: "fox", PasswordHash: "hash1"},
-		{ID: "u2", Email: "bull@example.com", DisplayName: "SilentBull_77", AvatarKey: "bull", PasswordHash: "hash2"},
+	users := stubUsers{users: []auth.RankableUser{
+		{ID: "u1", DisplayName: "AlphaWolf_91", AvatarKey: "fox"},
+		{ID: "u2", DisplayName: "SilentBull_77", AvatarKey: "bull"},
 	}}
 	sums := stubSummaries{byUser: map[string]leaderboard.RankedPerformance{
 		"u1": {RankedReturnPercentage: money.MustRatio("12.4"), RankedIndex: money.MustIndexValue("112.4")},

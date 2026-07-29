@@ -42,6 +42,16 @@ type Repository interface {
 	// FindActiveAlias returns the active alias row itself (needed by ticker
 	// changes, which must close a specific row).
 	FindActiveAlias(ctx context.Context, instrumentID string, aliasType AliasType) (*InstrumentAlias, error)
+
+	// FindVenueByMIC returns the venue for an exact MIC match, or nil if none
+	// is registered yet.
+	FindVenueByMIC(ctx context.Context, mic string) (*Venue, error)
+	CreateVenue(ctx context.Context, v Venue) (Venue, error)
+	// FindIssuerByCIK returns the issuer for an exact CIK match, or nil if
+	// none is registered yet.
+	FindIssuerByCIK(ctx context.Context, cik string) (*Issuer, error)
+	CreateIssuer(ctx context.Context, iss Issuer) (Issuer, error)
+	SetInstrumentVenueAndIssuer(ctx context.Context, instrumentID, venueID, issuerID string) error
 }
 
 // normalizeAliasValue upper-cases and trims identifier values so lookups are

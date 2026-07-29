@@ -10,7 +10,6 @@ import {
 import { useAuth } from "@/auth/useAuth";
 
 export function useChangePassword() {
-  const { replaceToken } = useAuth();
   return useMutation({
     mutationFn: ({
       currentPassword,
@@ -19,8 +18,7 @@ export function useChangePassword() {
       currentPassword: string;
       newPassword: string;
     }) => changePasswordRequest(currentPassword, newPassword),
-    onSuccess: ({ token }) => {
-      replaceToken(token);
+    onSuccess: () => {
       toast.success("Password updated");
     },
   });
@@ -48,8 +46,8 @@ export function useSetFirstPassword() {
       reauthenticationToken: string;
       newPassword: string;
     }) => setFirstPasswordRequest(reauthenticationToken, newPassword),
-    onSuccess: ({ token }) => {
-      replaceToken(token, { has_password: true });
+    onSuccess: () => {
+      replaceToken("cookie-session", { has_password: true });
       toast.success("Password created");
     },
   });

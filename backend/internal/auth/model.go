@@ -87,6 +87,16 @@ func (u *User) Public() PublicUser {
 	}
 }
 
+// RankableUser is the narrow, purpose-specific projection of User exposed to
+// the leaderboard module. It carries only what ranking display needs — never
+// the password hash, email, or moderation state — so a consumer of
+// UserProvider cannot leak sensitive fields by forgetting to project them.
+type RankableUser struct {
+	ID          string
+	DisplayName string
+	AvatarKey   string
+}
+
 // RegisterInput holds the validated-on-entry fields for registration.
 type RegisterInput struct {
 	Email       string

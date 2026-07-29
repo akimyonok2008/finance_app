@@ -59,7 +59,7 @@ func (h *Handler) GetIncomeEvent(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	pf, err := h.svc.GetOrCreateDefaultPortfolio(r.Context(), uid)
+	pf, err := h.svc.GetPortfolio(r.Context(), uid)
 	if err != nil {
 		writeServiceError(w, err)
 		return

@@ -19,6 +19,7 @@ Create a branch ruleset targeting `main` and enable:
   - `Frontend / lint, test, build`
   - `PostgreSQL / migrations and startup`
   - `Docker / production smoke`
+- `Browser / release-critical journey` (isolated Chromium release scenarios plus Firefox, WebKit, mobile, accessibility, resilience, concurrency, idempotency, and scale contracts)
 
 The checks above are emitted by `.github/workflows/ci.yml` on pull requests and
 on pushes to `main`. After the first workflow run, select the checks by their

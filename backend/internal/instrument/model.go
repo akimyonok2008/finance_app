@@ -78,6 +78,8 @@ type Instrument struct {
 	AssetType        string
 	ExchangeCode     string
 	MIC              string
+	VenueID          string
+	IssuerID         string
 	Currency         string
 	Country          string
 	Status           string
@@ -98,11 +100,38 @@ type InstrumentAlias struct {
 	AliasValue      string
 	ExchangeCode    string
 	MIC             string
+	VenueID         string
 	ValidFrom       time.Time
 	ValidTo         *time.Time
 	Provider        string
 	ProviderEventID string
 	CreatedAt       time.Time
+}
+
+// Venue is a first-class exchange/listing entity, identified by MIC. It is
+// the authoritative counterpart to the exchange_code/mic snapshot columns
+// carried on Instrument and InstrumentAlias for cheap reads.
+type Venue struct {
+	ID           string
+	MIC          string
+	ExchangeCode string
+	Name         string
+	Country      string
+	Currency     string
+	CreatedAt    time.Time
+}
+
+// Issuer is a first-class company/entity that may have multiple listed
+// instruments (share classes, dual listings). Linked from Instrument via
+// IssuerID; resolved opportunistically from CIK when available.
+type Issuer struct {
+	ID        string
+	Name      string
+	CIK       string
+	LEI       string
+	Country   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Active reports whether the alias is currently in force.

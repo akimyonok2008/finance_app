@@ -83,6 +83,7 @@ func (s *InMemoryStore) UpsertEvent(_ context.Context, ev CorporateAction) (bool
 		// whose terms changed is flagged superseded for the correction workflow.
 		ev.CreatedAt = existing.CreatedAt
 		ev.UpdatedAt = s.now()
+		ev.Revision = existing.Revision + 1
 		if existing.Status == StatusApplied {
 			ev.Status = StatusSuperseded
 		}

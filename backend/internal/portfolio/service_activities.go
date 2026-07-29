@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/money"
+	"github.com/ardakimyonok/finance_app/internal/telemetry"
 )
 
 // SymbolHolder identifies a portfolio holding a symbol and when it was acquired
@@ -17,12 +18,53 @@ type SymbolHolder struct {
 	PortfolioID string
 	AssetType   string
 	AcquiredAt  time.Time
+	// Symbol is the position's actual stored symbol, which may differ from
+	// whatever symbol/instrument a caller queried by (see HoldersOfInstrument).
+	Symbol string
 }
 
 type IncomeDiscoveryInstrument struct {
 	InstrumentID string
 	Symbol       string
 	AssetType    string
+}
+
+// ActiveInstrument is a distinct (instrument_id, symbol) pair currently held
+// in an open, identity-resolved position. See Service.ActiveInstruments.
+type ActiveInstrument struct {
+	InstrumentID string
+	Symbol       string
+}
+
+// Reconciliation confidence/status values (mirrors migration 0037's CHECK
+// constraints on identity_reconciliation_queue).
+const (
+	ReconciliationConfidenceHigh   = "high"
+	ReconciliationConfidenceMedium = "medium"
+	ReconciliationConfidenceLow    = "low"
+
+	ReconciliationStatusPending  = "pending"
+	ReconciliationStatusResolved = "resolved"
+	ReconciliationStatusRejected = "rejected"
+)
+
+// ReconciliationItem is a legacy position or activity row the backfill job
+// could not resolve to a stable instrument identity unambiguously — either
+// because more than one local instrument shares the ticker, or none does.
+// It is never guessed at; an administrator reviews and assigns (or rejects)
+// it via the identity-reconciliation endpoints.
+type ReconciliationItem struct {
+	ID                    string
+	TableName             string // "positions" | "portfolio_activities"
+	RecordID              string
+	Symbol                string
+	CandidateInstrumentID string // best guess, if any; empty when zero candidates
+	Evidence              string
+	Confidence            string
+	Status                string
+	CreatedAt             time.Time
+	ResolvedAt            *time.Time
+	ResolvedBy            string
 }
 
 func (s *Service) IncomeDiscoveryInstruments(ctx context.Context, since time.Time) ([]IncomeDiscoveryInstrument, error) {
@@ -38,6 +80,13 @@ func (s *Service) ActiveSymbols(ctx context.Context) ([]string, error) {
 	return s.repo.ListActiveSymbols(ctx)
 }
 
+// ActiveInstruments returns every currently-held (instrument_id, symbol) pair
+// that has a resolved identity, so the corporate-action pipeline can fetch
+// provider events by stable identity for the share of holdings that have one.
+func (s *Service) ActiveInstruments(ctx context.Context) ([]ActiveInstrument, error) {
+	return s.repo.ListActiveInstruments(ctx)
+}
+
 // HoldersOfSymbol returns the portfolios that currently hold symbol, each with
 // its earliest acquisition time.
 func (s *Service) HoldersOfSymbol(ctx context.Context, symbol string) ([]SymbolHolder, error) {
@@ -51,6 +100,32 @@ func (s *Service) HoldersOfSymbol(ctx context.Context, symbol string) ([]SymbolH
 		if !ok || p.CreatedAt.Before(h.AcquiredAt) {
 			byPortfolio[p.PortfolioID] = SymbolHolder{
 				UserID: p.UserID, PortfolioID: p.PortfolioID, AssetType: p.AssetType, AcquiredAt: p.CreatedAt,
+				Symbol: p.Symbol,
+			}
+		}
+	}
+	out := make([]SymbolHolder, 0, len(byPortfolio))
+	for _, h := range byPortfolio {
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+// HoldersOfInstrument is the identity-based counterpart of HoldersOfSymbol,
+// used when a corporate-action event resolved to a stable instrument
+// identity rather than being matched only by ticker.
+func (s *Service) HoldersOfInstrument(ctx context.Context, instrumentID string) ([]SymbolHolder, error) {
+	positions, err := s.repo.ListOpenPositionsByInstrumentID(ctx, instrumentID)
+	if err != nil {
+		return nil, err
+	}
+	byPortfolio := map[string]SymbolHolder{}
+	for _, p := range positions {
+		h, ok := byPortfolio[p.PortfolioID]
+		if !ok || p.CreatedAt.Before(h.AcquiredAt) {
+			byPortfolio[p.PortfolioID] = SymbolHolder{
+				UserID: p.UserID, PortfolioID: p.PortfolioID, AssetType: p.AssetType, AcquiredAt: p.CreatedAt,
+				Symbol: p.Symbol,
 			}
 		}
 	}
@@ -116,6 +191,12 @@ func (s *Service) EligibleQuantity(ctx context.Context, userID, instrumentID, sy
 	// the corporate action.
 	sortActivitiesOldestFirst(activities)
 	sym := normalizeSymbol(symbol)
+	if instrumentID == "" {
+		// No resolved identity for this income event's instrument: eligible-
+		// quantity reconstruction falls back to symbol-string matching over
+		// the activity ledger.
+		telemetry.IncLegacySymbolFallback()
+	}
 
 	// A corrected buy/sell posts a NEW activity carrying the corrected
 	// quantity/price rather than editing the original (see

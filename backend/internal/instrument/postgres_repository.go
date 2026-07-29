@@ -29,7 +29,8 @@ var _ Repository = (*PostgresRepository)(nil)
 const instrumentColumns = `id, COALESCE(figi,''), COALESCE(composite_figi,''), COALESCE(share_class_figi,''),
 	COALESCE(isin,''), COALESCE(cusip,''), COALESCE(cik,''), COALESCE(current_symbol,''),
 	COALESCE(name,''), COALESCE(security_type,''), COALESCE(asset_type,''),
-	COALESCE(exchange_code,''), COALESCE(mic,''), COALESCE(currency,''), COALESCE(country,''),
+	COALESCE(exchange_code,''), COALESCE(mic,''), COALESCE(venue_id::text,''), COALESCE(issuer_id::text,''),
+	COALESCE(currency,''), COALESCE(country,''),
 	status, listed_at, delisted_at, identity_quality, COALESCE(identity_provider,''),
 	created_at, updated_at`
 
@@ -37,7 +38,8 @@ func scanInstrument(row pgx.Row) (Instrument, error) {
 	var in Instrument
 	err := row.Scan(&in.ID, &in.FIGI, &in.CompositeFIGI, &in.ShareClassFIGI,
 		&in.ISIN, &in.CUSIP, &in.CIK, &in.CurrentSymbol, &in.Name, &in.SecurityType,
-		&in.AssetType, &in.ExchangeCode, &in.MIC, &in.Currency, &in.Country,
+		&in.AssetType, &in.ExchangeCode, &in.MIC, &in.VenueID, &in.IssuerID,
+		&in.Currency, &in.Country,
 		&in.Status, &in.ListedAt, &in.DelistedAt, &in.IdentityQuality,
 		&in.IdentityProvider, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
@@ -52,6 +54,15 @@ func scanInstrument(row pgx.Row) (Instrument, error) {
 // nullable turns "" into a SQL NULL so the partial unique index on figi treats
 // unresolved instruments as unconstrained rather than colliding on the empty string.
 func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullableUUID turns an empty string into a SQL NULL for a UUID column;
+// passing "" straight to pgx for a uuid column would fail to parse.
+func nullableUUID(s string) any {
 	if s == "" {
 		return nil
 	}
@@ -87,14 +98,16 @@ func (r *PostgresRepository) CreateInstrument(ctx context.Context, in Instrument
 		`INSERT INTO instrument_master (
 			id, figi, composite_figi, share_class_figi, isin, cusip, cik,
 			current_symbol, name, security_type, asset_type, exchange_code, mic,
+			venue_id, issuer_id,
 			currency, country, status, listed_at, delisted_at, identity_quality,
 			identity_provider, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 		 RETURNING `+instrumentColumns,
 		in.ID, nullable(in.FIGI), nullable(in.CompositeFIGI), nullable(in.ShareClassFIGI),
 		nullable(in.ISIN), nullable(in.CUSIP), nullable(in.CIK), nullable(in.CurrentSymbol),
 		nullable(in.Name), nullable(in.SecurityType), nullable(in.AssetType),
-		nullable(in.ExchangeCode), nullable(in.MIC), nullable(in.Currency),
+		nullable(in.ExchangeCode), nullable(in.MIC), nullableUUID(in.VenueID), nullableUUID(in.IssuerID),
+		nullable(in.Currency),
 		nullable(in.Country), in.Status, in.ListedAt, in.DelistedAt,
 		string(in.IdentityQuality), nullable(in.IdentityProvider), in.CreatedAt, in.UpdatedAt,
 	)
@@ -135,12 +148,12 @@ func (r *PostgresRepository) UpdateInstrumentSymbol(ctx context.Context, id, cur
 }
 
 const aliasColumns = `id, instrument_id, alias_type, alias_value, exchange_code, mic,
-	valid_from, valid_to, provider, provider_event_id, created_at`
+	COALESCE(venue_id::text,''), valid_from, valid_to, provider, provider_event_id, created_at`
 
 func scanAlias(row pgx.Row) (InstrumentAlias, error) {
 	var a InstrumentAlias
 	err := row.Scan(&a.ID, &a.InstrumentID, &a.AliasType, &a.AliasValue,
-		&a.ExchangeCode, &a.MIC, &a.ValidFrom, &a.ValidTo, &a.Provider,
+		&a.ExchangeCode, &a.MIC, &a.VenueID, &a.ValidFrom, &a.ValidTo, &a.Provider,
 		&a.ProviderEventID, &a.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -165,13 +178,13 @@ func (r *PostgresRepository) CreateAlias(ctx context.Context, alias InstrumentAl
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO instrument_aliases (
-			id, instrument_id, alias_type, alias_value, exchange_code, mic,
+			id, instrument_id, alias_type, alias_value, exchange_code, mic, venue_id,
 			valid_from, valid_to, provider, provider_event_id, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		 RETURNING `+aliasColumns,
 		alias.ID, alias.InstrumentID, string(alias.AliasType),
 		normalizeAliasValue(alias.AliasValue), normalizeScope(alias.ExchangeCode),
-		normalizeScope(alias.MIC), alias.ValidFrom.UTC(), alias.ValidTo,
+		normalizeScope(alias.MIC), nullableUUID(alias.VenueID), alias.ValidFrom.UTC(), alias.ValidTo,
 		alias.Provider, alias.ProviderEventID, now,
 	)
 	out, err := scanAlias(row)
@@ -322,4 +335,118 @@ func (r *PostgresRepository) findByAlias(ctx context.Context, aliasType AliasTyp
 		return &in, nil
 	}
 	return nil, ErrAliasConflict
+}
+
+const venueColumns = `id, mic, COALESCE(exchange_code,''), COALESCE(name,''), COALESCE(country,''), COALESCE(currency,''), created_at`
+
+func scanVenue(row pgx.Row) (Venue, error) {
+	var v Venue
+	err := row.Scan(&v.ID, &v.MIC, &v.ExchangeCode, &v.Name, &v.Country, &v.Currency, &v.CreatedAt)
+	if err != nil {
+		return Venue{}, fmt.Errorf("instrument: scan venue: %w", err)
+	}
+	return v, nil
+}
+
+func (r *PostgresRepository) FindVenueByMIC(ctx context.Context, mic string) (*Venue, error) {
+	mic = normalizeScope(mic)
+	if mic == "" {
+		return nil, nil
+	}
+	v, err := scanVenue(r.pool.QueryRow(ctx, `SELECT `+venueColumns+` FROM venues WHERE mic = $1`, mic))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (r *PostgresRepository) CreateVenue(ctx context.Context, v Venue) (Venue, error) {
+	if v.ID == "" {
+		v.ID = uuid.NewString()
+	}
+	if v.CreatedAt.IsZero() {
+		v.CreatedAt = time.Now().UTC()
+	}
+	row := r.pool.QueryRow(ctx,
+		`INSERT INTO venues (id, mic, exchange_code, name, country, currency, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)
+		 ON CONFLICT (mic) WHERE mic <> '' DO UPDATE SET mic = EXCLUDED.mic
+		 RETURNING `+venueColumns,
+		v.ID, normalizeScope(v.MIC), nullable(v.ExchangeCode), nullable(v.Name),
+		nullable(v.Country), nullable(v.Currency), v.CreatedAt,
+	)
+	out, err := scanVenue(row)
+	if err != nil {
+		return Venue{}, fmt.Errorf("instrument: create venue: %w", err)
+	}
+	return out, nil
+}
+
+const issuerColumns = `id, name, COALESCE(cik,''), COALESCE(lei,''), COALESCE(country,''), created_at, updated_at`
+
+func scanIssuer(row pgx.Row) (Issuer, error) {
+	var iss Issuer
+	err := row.Scan(&iss.ID, &iss.Name, &iss.CIK, &iss.LEI, &iss.Country, &iss.CreatedAt, &iss.UpdatedAt)
+	if err != nil {
+		return Issuer{}, fmt.Errorf("instrument: scan issuer: %w", err)
+	}
+	return iss, nil
+}
+
+func (r *PostgresRepository) FindIssuerByCIK(ctx context.Context, cik string) (*Issuer, error) {
+	cik = normalizeAliasValue(cik)
+	if cik == "" {
+		return nil, nil
+	}
+	iss, err := scanIssuer(r.pool.QueryRow(ctx, `SELECT `+issuerColumns+` FROM issuers WHERE cik = $1`, cik))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &iss, nil
+}
+
+func (r *PostgresRepository) CreateIssuer(ctx context.Context, iss Issuer) (Issuer, error) {
+	if iss.ID == "" {
+		iss.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	if iss.CreatedAt.IsZero() {
+		iss.CreatedAt = now
+	}
+	iss.UpdatedAt = now
+	row := r.pool.QueryRow(ctx,
+		`INSERT INTO issuers (id, name, cik, lei, country, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)
+		 ON CONFLICT (cik) WHERE cik IS NOT NULL AND cik <> '' DO UPDATE SET name = EXCLUDED.name
+		 RETURNING `+issuerColumns,
+		iss.ID, iss.Name, nullable(iss.CIK), nullable(iss.LEI), nullable(iss.Country),
+		iss.CreatedAt, iss.UpdatedAt,
+	)
+	out, err := scanIssuer(row)
+	if err != nil {
+		return Issuer{}, fmt.Errorf("instrument: create issuer: %w", err)
+	}
+	return out, nil
+}
+
+func (r *PostgresRepository) SetInstrumentVenueAndIssuer(ctx context.Context, instrumentID, venueID, issuerID string) error {
+	if _, err := uuid.Parse(instrumentID); err != nil {
+		return ErrInstrumentNotFound
+	}
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE instrument_master SET venue_id = $2, issuer_id = $3, updated_at = $4 WHERE id = $1`,
+		instrumentID, nullableUUID(venueID), nullableUUID(issuerID), time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("instrument: set venue/issuer: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInstrumentNotFound
+	}
+	return nil
 }

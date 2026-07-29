@@ -288,11 +288,14 @@ func (t *postgresTx) AppendOutbox(ctx context.Context, ev OutboxEvent) error {
 		INSERT INTO portfolio_outbox (
 			id, event_type, aggregate_type, aggregate_id, aggregate_version,
 			user_id, ranked_index, ranking_status, tracking_started_at,
-			valuation_as_of, data_quality_status, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			valuation_as_of, data_quality_status, created_at,
+			instrument_id, display_symbol_at_event_time, provider_reference_at_event_time
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		ev.ID, string(ev.EventType), ev.AggregateType, ev.AggregateID,
 		ev.AggregateVersion, ev.UserID, ev.RankedIndex, ev.RankingStatus,
-		ev.TrackingStartedAt, ev.ValuationAsOf, ev.DataQualityStatus, ev.CreatedAt)
+		ev.TrackingStartedAt, ev.ValuationAsOf, ev.DataQualityStatus, ev.CreatedAt,
+		nullIfEmpty(ev.InstrumentID), nullIfEmpty(ev.DisplaySymbolAtEventTime),
+		nullIfEmpty(ev.ProviderReferenceAtEventTime))
 	if err != nil {
 		return fmt.Errorf("portfolio: append outbox: %w", err)
 	}
@@ -304,12 +307,13 @@ func (t *postgresTx) RecordAudit(ctx context.Context, a MutationAudit) error {
 	// transaction rather than applying the mutation twice.
 	_, err := t.tx.Exec(ctx, `
 		INSERT INTO portfolio_mutation_audit (
-			id, request_id, portfolio_id, user_id, mutation_type,
+			id, request_id, portfolio_id, user_id, mutation_type, request_fingerprint,
 			portfolio_version_before, portfolio_version_after,
 			performance_version_before, performance_version_after,
 			ranked_index_before, ranked_index_after, result_position_id, occurred_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		a.ID, nullIfEmpty(a.RequestID), a.PortfolioID, a.UserID, a.MutationType,
+		nullIfEmpty(a.RequestFingerprint),
 		a.PortfolioVersionBefore, a.PortfolioVersionAfter,
 		a.PerformanceVersionBefore, a.PerformanceVersionAfter,
 		a.RankedIndexBefore, a.RankedIndexAfter, nullIfEmpty(a.ResultPositionID),
@@ -322,17 +326,18 @@ func (t *postgresTx) RecordAudit(ctx context.Context, a MutationAudit) error {
 
 func (t *postgresTx) FindAuditByRequestID(ctx context.Context, requestID string) (MutationAudit, bool, error) {
 	var (
-		a        MutationAudit
-		resultID *string
+		a           MutationAudit
+		resultID    *string
+		fingerprint *string
 	)
 	err := t.tx.QueryRow(ctx, `
 		SELECT id, request_id, portfolio_id, user_id, mutation_type,
-		       portfolio_version_before, portfolio_version_after,
+		       request_fingerprint, portfolio_version_before, portfolio_version_after,
 		       performance_version_before, performance_version_after,
 		       ranked_index_before, ranked_index_after, result_position_id, occurred_at
 		FROM portfolio_mutation_audit WHERE portfolio_id=$1 AND request_id=$2`,
 		t.portfolio.ID, requestID).Scan(
-		&a.ID, &a.RequestID, &a.PortfolioID, &a.UserID, &a.MutationType,
+		&a.ID, &a.RequestID, &a.PortfolioID, &a.UserID, &a.MutationType, &fingerprint,
 		&a.PortfolioVersionBefore, &a.PortfolioVersionAfter,
 		&a.PerformanceVersionBefore, &a.PerformanceVersionAfter,
 		&a.RankedIndexBefore, &a.RankedIndexAfter, &resultID, &a.OccurredAt)
@@ -344,6 +349,9 @@ func (t *postgresTx) FindAuditByRequestID(ctx context.Context, requestID string)
 	}
 	if resultID != nil {
 		a.ResultPositionID = *resultID
+	}
+	if fingerprint != nil {
+		a.RequestFingerprint = *fingerprint
 	}
 	return a, true, nil
 }

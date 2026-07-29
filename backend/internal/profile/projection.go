@@ -12,7 +12,32 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
+// publicProjection is the single-profile path (GET /profiles/{handle} and the
+// owner's own preview): it always values the portfolio live via s.ranked and
+// reads through the uncached s.summaries, because both callers must reflect
+// the caller's own just-made changes immediately.
 func (s *Service) publicProjection(ctx context.Context, p Profile) (PublicProfile, error) {
+	if s.ranked == nil {
+		return PublicProfile{}, ErrRankedDataUnavailable
+	}
+	ranked, err := s.ranked.CurrentRankedPerformance(ctx, p.UserID)
+	if err != nil {
+		return PublicProfile{}, ErrRankedDataUnavailable
+	}
+	return s.buildPublicProfile(ctx, p, s.summaries, round2(ranked.RankedIndex), round2(ranked.RankedReturnPercentage)), nil
+}
+
+// buildPublicProfile is publicProjection's core, parameterized over the
+// summary provider and the already-resolved ranked index/return percentage.
+// This lets Explore (i) supply values it already fetched in bulk from the
+// ranking projection instead of valuing every public profile's portfolio
+// live, and (ii) supply the shared, short-TTL-cached SummaryProvider used
+// elsewhere for Explore (SetExploreSummaryProvider) instead of the uncached
+// one — safe here because Explore cards are read-only discovery data, unlike
+// publicProjection's other two callers. Every remaining enrichment below is
+// already best-effort (a provider error just leaves the zero value), so this
+// has no fallible operation of its own.
+func (s *Service) buildPublicProfile(ctx context.Context, p Profile, summaries SummaryProvider, index, returnPct float64) PublicProfile {
 	out := PublicProfile{
 		Handle:                p.Handle,
 		DisplayName:           p.DisplayName,
@@ -27,17 +52,9 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) (PublicProfil
 		AssetTypeExposure:     []Exposure{},
 		CurrencyExposure:      []Exposure{},
 		Insights:              s.buildProfileInsights(ctx, nil, p.ShowPublicWeights),
+		PortfolioIndex:        index,
+		ReturnPercentage:      returnPct,
 	}
-
-	if s.ranked == nil {
-		return PublicProfile{}, ErrRankedDataUnavailable
-	}
-	ranked, err := s.ranked.CurrentRankedPerformance(ctx, p.UserID)
-	if err != nil {
-		return PublicProfile{}, ErrRankedDataUnavailable
-	}
-	out.PortfolioIndex = round2(ranked.RankedIndex)
-	out.ReturnPercentage = round2(ranked.RankedReturnPercentage)
 
 	hasSummary := false
 
@@ -45,7 +62,7 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) (PublicProfil
 	// of ranked performance), never the mutable current-basket figure. Public
 	// composition (weights/exposure) still reflects the live portfolio where the
 	// user opted in.
-	if summary, err := s.summaries.GetSummary(ctx, p.UserID); err == nil && summary != nil {
+	if summary, err := summaries.GetSummary(ctx, p.UserID); err == nil && summary != nil {
 		hasSummary = true
 		out.PublicWeights, out.AssetTypeExposure, out.CurrencyExposure, out.Concentration = buildComposition(summary)
 		out.Insights = s.buildProfileInsights(ctx, summary, p.ShowPublicWeights)
@@ -94,7 +111,7 @@ func (s *Service) publicProjection(ctx context.Context, p Profile) (PublicProfil
 			out.GlobalRank = &rank
 		}
 	}
-	return out, nil
+	return out
 }
 
 type contributionSignal struct {

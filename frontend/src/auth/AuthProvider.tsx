@@ -53,6 +53,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [persist]);
 
   const logout = useCallback(() => {
+    void fetch(`${import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8080"}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
     clearStorage();
     setToken(null);
     setUser(null);

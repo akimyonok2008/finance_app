@@ -58,7 +58,7 @@ func (r *InMemoryRepository) ListPublicProfiles(_ context.Context) ([]Profile, e
 	defer r.mu.RUnlock()
 	out := make([]Profile, 0)
 	for _, p := range r.byUserID {
-		if p.IsPublic {
+		if p.IsPublic && p.ShowPublicWeights {
 			out = append(out, p)
 		}
 	}

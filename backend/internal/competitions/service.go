@@ -365,7 +365,10 @@ func (s *Service) rankedEntries(ctx context.Context, competitionID string) ([]ra
 		if comparison := rows[i].returnPct.Cmp(rows[j].returnPct); comparison != 0 {
 			return comparison > 0
 		}
-		return rows[i].displayName < rows[j].displayName
+		if rows[i].displayName != rows[j].displayName {
+			return rows[i].displayName < rows[j].displayName
+		}
+		return rows[i].userID < rows[j].userID
 	})
 	for i := range rows {
 		rows[i].rank = i + 1

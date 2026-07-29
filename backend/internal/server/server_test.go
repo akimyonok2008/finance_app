@@ -135,6 +135,7 @@ func newFullServerWithHistory(
 	priceProvider := prices.NewMockPriceProvider()
 	portfolioRepo := portfolio.NewInMemoryRepository()
 	portfolioSvc := portfolio.NewService(portfolioRepo, priceProvider, fxp)
+	authSvc.RegisterCreationHook(portfolioSvc)
 	performanceSvc := performance.NewService(portfolioRepo)
 	performanceSvc.SetValuator(portfolioSvc)
 	historySvc := performancehistory.NewService(
@@ -217,10 +218,10 @@ func TestCORSPreflight_AllowsIdempotencyKey(t *testing.T) {
 }
 
 func TestReady_OKWhenAllChecksPass(t *testing.T) {
-	h := newFullServer(t, []server.ReadinessCheck{
+	h := server.NewOperations(server.Deps{ReadinessChecks: []server.ReadinessCheck{
 		{Name: "postgres", Check: func(context.Context) error { return nil }},
 		{Name: "redis", Check: func(context.Context) error { return nil }},
-	})
+	}, Info: map[string]string{"storage_provider": "memory"}})
 	rec := doReq(t, h, http.MethodGet, "/ready", "", "")
 	assert.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
@@ -231,10 +232,10 @@ func TestReady_OKWhenAllChecksPass(t *testing.T) {
 }
 
 func TestReady_503WhenADependencyFails(t *testing.T) {
-	h := newFullServer(t, []server.ReadinessCheck{
+	h := server.NewOperations(server.Deps{ReadinessChecks: []server.ReadinessCheck{
 		{Name: "postgres", Check: func(context.Context) error { return nil }},
 		{Name: "redis", Check: func(context.Context) error { return errors.New("connection refused") }},
-	})
+	}})
 	rec := doReq(t, h, http.MethodGet, "/ready", "", "")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	body := rec.Body.String()
@@ -243,9 +244,17 @@ func TestReady_503WhenADependencyFails(t *testing.T) {
 }
 
 func TestReady_OKWithNoChecks(t *testing.T) {
-	h := newFullServer(t, nil)
+	h := server.NewOperations(server.Deps{})
 	rec := doReq(t, h, http.MethodGet, "/ready", "", "")
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestPublicRouterDoesNotExposeOperationalEndpoints(t *testing.T) {
+	h := server.New(server.Deps{AppEnv: "development"})
+	for _, path := range []string{"/ready", "/metrics"} {
+		rec := doReq(t, h, http.MethodGet, path, "", "")
+		assert.Equal(t, http.StatusNotFound, rec.Code, path)
+	}
 }
 
 // --- end-to-end privacy regression (Phase 3, Goal 8) -----------------------------
@@ -274,7 +283,7 @@ func TestPrivacy_PublicEndpointsExposeNoSensitiveFields(t *testing.T) {
 	require.Equal(t, http.StatusCreated, reg.Code)
 	login := doReq(t, h, http.MethodPost, "/auth/login", `{"email":"alpha@example.com","password":"StrongPassword123"}`, "")
 	require.Equal(t, http.StatusOK, login.Code)
-	token := extractToken(t, login.Body.String())
+	token := extractToken(t, login)
 
 	rec := doIdempotentReq(t, h, "/portfolio/deposits", `{"currency":"USD","amount":5000}`, token, "privacy-deposit")
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -304,13 +313,11 @@ func TestPrivacy_PublicEndpointsExposeNoSensitiveFields(t *testing.T) {
 	}
 }
 
-func extractToken(t *testing.T, body string) string {
+func extractToken(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
-	const marker = `"token":"`
-	i := strings.Index(body, marker)
-	require.GreaterOrEqual(t, i, 0, "authentication response must contain a token")
-	rest := body[i+len(marker):]
-	return rest[:strings.Index(rest, `"`)]
+	cookies := rec.Result().Cookies()
+	require.NotEmpty(t, cookies, "authentication response must set a session cookie")
+	return cookies[0].Value
 }
 
 func extractFirstID(t *testing.T, body string) string {

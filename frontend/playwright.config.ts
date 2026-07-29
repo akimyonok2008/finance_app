@@ -2,8 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: false,
-  workers: 1,
+  fullyParallel: true,
+  workers: process.env.CI ? 2 : undefined,
   retries: process.env.CI ? 1 : 0,
   timeout: 180_000,
   expect: { timeout: 15_000 },
@@ -16,8 +16,23 @@ export default defineConfig({
   },
   projects: [
     {
-      name: "chromium",
+      name: "chromium-release",
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "firefox-contract",
+      grep: /@browser-contract/,
+      use: { ...devices["Desktop Firefox"] },
+    },
+    {
+      name: "webkit-contract",
+      grep: /@browser-contract/,
+      use: { ...devices["Desktop Safari"] },
+    },
+    {
+      name: "mobile-chromium",
+      grep: /@browser-contract|@mobile/,
+      use: { ...devices["Pixel 7"] },
     },
   ],
 });

@@ -12,7 +12,7 @@ import (
 )
 
 func TestMetrics_EndpointServesPrometheusFormat(t *testing.T) {
-	handler := server.New(server.Deps{AppEnv: "development"})
+	handler := server.NewOperations(server.Deps{})
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -24,14 +24,15 @@ func TestMetrics_EndpointServesPrometheusFormat(t *testing.T) {
 }
 
 func TestMetrics_RecordsRequestCountAndRoutePattern(t *testing.T) {
-	handler := server.New(server.Deps{AppEnv: "development"})
+	publicHandler := server.New(server.Deps{AppEnv: "development"})
+	handler := server.NewOperations(server.Deps{})
 
 	// Hit a route a few times, then confirm it shows up in /metrics labeled
 	// by its ROUTE PATTERN, not the raw path (bounded cardinality).
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		publicHandler.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
 	}
 

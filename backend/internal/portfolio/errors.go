@@ -65,8 +65,8 @@ var (
 	// position must be sold normally — write-off is not a general-purpose way
 	// to erase a losing position from realized results.
 	ErrPositionIsPriceable = errors.New("this position still has an available market price; sell it instead of writing it off")
-	// ErrPortfolioNotFound is an internal repository signal that a user has no
-	// portfolio yet; the service responds by creating the default portfolio.
+	// ErrPortfolioNotFound signals a broken or incomplete account aggregate.
+	// Read paths return it without creating data.
 	ErrPortfolioNotFound = errors.New("portfolio not found")
 
 	// ErrPriceProvider wraps any failure from the price provider so the handler
@@ -77,6 +77,9 @@ var (
 	// because the portfolio kept changing underneath it (the bounded rebuild
 	// budget was exhausted). Maps to HTTP 409 Conflict; the client may retry.
 	ErrMutationConflict = errors.New("portfolio changed concurrently; retry the mutation")
+	// ErrIdempotencyConflict means a key was reused for a different operation
+	// or normalized request payload. The original mutation remains committed.
+	ErrIdempotencyConflict = errors.New("Idempotency-Key was already used for a different request")
 	// ErrRankedInvariant is returned when a computed checkpoint would generate a
 	// ranked return from the mutation itself. It aborts the transaction rather
 	// than committing corrupted ranked history, and always indicates a bug.
@@ -101,6 +104,14 @@ var (
 
 	ErrInstrumentIdentityAmbiguous          = errors.New("instrument identity is ambiguous; provide exchange or MIC")
 	ErrInstrumentIdentityUnresolvedConflict = errors.New("an unresolved open position already uses this symbol; resolve the instrument before adding another listing")
+	// ErrInstrumentIdentityUnresolved is returned instead of saving a
+	// ticker-only position when the service is configured with
+	// InstrumentResolutionRequired (see config.InstrumentResolutionRequired,
+	// forced true under APP_ENV=production).
+	ErrInstrumentIdentityUnresolved = errors.New("instrument identity could not be resolved for this ticker; provide exchange/MIC or verify the symbol")
+	// ErrReconciliationItemNotFound is returned when resolving/rejecting a
+	// reconciliation-queue item that doesn't exist or is no longer pending.
+	ErrReconciliationItemNotFound = errors.New("identity reconciliation item not found or already resolved")
 
 	// ErrUnsupportedMutation guards the mutation-kind switch.
 	ErrUnsupportedMutation = errors.New("unsupported portfolio mutation")

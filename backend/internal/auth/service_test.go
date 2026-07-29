@@ -22,6 +22,13 @@ func newTestService() *Service {
 
 type autoVerifySender struct{ repo UserRepository }
 
+type recordingCreationHook struct{ userID string }
+
+func (h *recordingCreationHook) OnAccountCreated(_ context.Context, userID string) error {
+	h.userID = userID
+	return nil
+}
+
 func (s autoVerifySender) SendVerification(ctx context.Context, _ string, verificationURL string) error {
 	token := verificationURL[strings.LastIndex(verificationURL, "=")+1:]
 	_, err := s.repo.VerifyEmailToken(ctx, hashLifecycleToken(token), time.Now().UTC())
@@ -48,6 +55,17 @@ func TestRegister_ValidUserCreatesUnverifiedUserWithoutToken(t *testing.T) {
 	assert.NotEmpty(t, user.ID)
 	assert.Equal(t, "AlphaWolf_91", user.DisplayName)
 	assert.Empty(t, token, "registration must not create an authenticated session")
+}
+
+func TestRegisterInitializesRequiredAccountAggregates(t *testing.T) {
+	svc := newTestService()
+	hook := &recordingCreationHook{}
+	svc.RegisterCreationHook(hook)
+
+	user, _, err := svc.Register(validInput())
+
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, hook.userID)
 }
 
 func TestRegister_DuplicateEmailFails(t *testing.T) {

@@ -13,6 +13,25 @@ import (
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
+// countingRanked counts CurrentRankedPerformance calls so tests can prove
+// Explore does (or does not) fall back to a live per-profile valuation.
+type countingRanked struct {
+	calls *int
+	data  map[string]RankedPerformance
+	err   error
+}
+
+func (r countingRanked) CurrentRankedPerformance(_ context.Context, userID string) (RankedPerformance, error) {
+	*r.calls++
+	if r.err != nil {
+		return RankedPerformance{}, r.err
+	}
+	if rp, ok := r.data[userID]; ok {
+		return rp, nil
+	}
+	return RankedPerformance{RankedIndex: 100}, nil
+}
+
 type fakeGlobalRanks map[string]int
 
 func (f fakeGlobalRanks) GetUserRank(_ context.Context, userID string) (int, error) {
@@ -322,6 +341,93 @@ func TestExploreEmptyData(t *testing.T) {
 	assert.Empty(t, out.TrendingHoldings)
 	assert.Equal(t, 0, out.Pagination.Total)
 	assert.False(t, out.Pagination.HasMore)
+}
+
+// TestExplore_UsesBulkRankingInsteadOfPerProfileValuation locks in the N+1
+// fix: when the timeframe-ranking provider already covers every included
+// profile, Explore must not additionally value each profile's portfolio live
+// — that would be the same expensive per-user work the leaderboard used to
+// do, paid again here on every request.
+func TestExplore_UsesBulkRankingInsteadOfPerProfileValuation(t *testing.T) {
+	svc := exploreTestService(t)
+	calls := 0
+	svc.SetRankedPerformanceProvider(countingRanked{calls: &calls, data: map[string]RankedPerformance{
+		"u1": {RankedIndex: 124.6, RankedReturnPercentage: 24.6},
+		"u2": {RankedIndex: 110, RankedReturnPercentage: 10},
+	}})
+	svc.SetTimeframeRankProvider(fakeTimeframeRanks{
+		TimeframeAll: {
+			{UserID: "u1", Rank: 2, RankedReturnPercentage: 24.6, RankedIndex: 124.6},
+			{UserID: "u2", Rank: 1, RankedReturnPercentage: 10, RankedIndex: 110},
+		},
+	})
+
+	out, err := svc.Explore(context.Background(), "", defaultFilter())
+	require.NoError(t, err)
+	require.Len(t, out.TopPerformers, 2, "result correctness must be unchanged by the optimization")
+	assert.Equal(t, "beta_bear", out.TopPerformers[0].Handle)
+	assert.Equal(t, "alpha_wolf", out.TopPerformers[1].Handle)
+	assert.Equal(t, 0, calls, "every included profile was covered by the bulk ranking lookup; no live valuation should have run")
+}
+
+// TestExplore_FallsBackToLiveValuationWhenNoTimeframeProvider documents the
+// still-supported fallback: without a TimeframeRankProvider, Explore must
+// keep valuing each profile live (exactly as before this change) so results
+// stay correct in that configuration.
+func TestExplore_FallsBackToLiveValuationWhenNoTimeframeProvider(t *testing.T) {
+	svc := exploreTestService(t)
+	calls := 0
+	svc.SetRankedPerformanceProvider(countingRanked{calls: &calls, data: map[string]RankedPerformance{
+		"u1": {RankedIndex: 124.6, RankedReturnPercentage: 24.6},
+		"u2": {RankedIndex: 110, RankedReturnPercentage: 10},
+	}})
+
+	out, err := svc.Explore(context.Background(), "", defaultFilter())
+	require.NoError(t, err)
+	require.Len(t, out.TopPerformers, 2)
+	assert.Equal(t, 2, calls, "u1 and u2 are the only included profiles; each must still be valued live in this fallback configuration")
+}
+
+// TestExplore_SkipsProfileOnLiveValuationFailureInsteadOfAborting locks in a
+// correctness fix alongside the perf one: previously a single profile's
+// valuation failure aborted the ENTIRE Explore response (an error for every
+// caller). Now only that profile is skipped.
+func TestExplore_SkipsProfileOnLiveValuationFailureInsteadOfAborting(t *testing.T) {
+	svc := exploreTestService(t)
+	calls := 0
+	svc.SetRankedPerformanceProvider(countingRanked{calls: &calls, err: assert.AnError})
+
+	out, err := svc.Explore(context.Background(), "", defaultFilter())
+	require.NoError(t, err, "one profile's valuation failure must not fail the whole discovery response")
+	assert.Empty(t, out.TopPerformers)
+}
+
+// TestExplore_UsesConfiguredExploreSummaryProviderNotUncachedOne proves
+// Explore's per-profile composition read goes through whatever
+// SetExploreSummaryProvider configured (production wires a short-TTL cache
+// there) rather than the plain, uncached provider used by single-profile
+// views.
+func TestExplore_UsesConfiguredExploreSummaryProviderNotUncachedOne(t *testing.T) {
+	svc := exploreTestService(t)
+	calls := 0
+	distinctSummary := &portfolio.PortfolioSummary{
+		CurrentValue: money.AmountFromFloat64(100),
+		Positions: []portfolio.PositionSummary{
+			{PositionID: "d1", Symbol: "TSLA", AssetType: "stock", CurrentValueBase: money.AmountFromFloat64(100), CurrentPriceCurrency: "USD"},
+		},
+	}
+	svc.SetExploreSummaryProvider(countingSummaries{calls: &calls, data: map[string]*portfolio.PortfolioSummary{
+		"u1": distinctSummary, "u2": distinctSummary,
+	}})
+
+	out, err := svc.Explore(context.Background(), "", defaultFilter())
+	require.NoError(t, err)
+	require.Len(t, out.TopPerformers, 2)
+	assert.True(t, calls > 0, "the configured explore summary provider must actually be used")
+	for _, card := range out.TopPerformers {
+		require.Len(t, card.PublicWeights, 1)
+		assert.Equal(t, "TSLA", card.PublicWeights[0].Symbol, "card composition must come from the configured explore summary provider, not the plain uncached one")
+	}
 }
 
 // --- helpers ---

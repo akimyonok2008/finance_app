@@ -20,8 +20,15 @@ type fakeUsers struct {
 	err   error
 }
 
-func (f fakeUsers) ListUsers(_ context.Context) ([]auth.User, error) {
-	return f.users, f.err
+func (f fakeUsers) ListRankableUsers(_ context.Context) ([]auth.RankableUser, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]auth.RankableUser, 0, len(f.users))
+	for _, u := range f.users {
+		out = append(out, auth.RankableUser{ID: u.ID, DisplayName: u.DisplayName, AvatarKey: u.AvatarKey})
+	}
+	return out, nil
 }
 
 // fakeRanked stands in for the ranked-performance provider.
@@ -171,8 +178,9 @@ func cacheUsers() fakeUsers {
 	return fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
 }
 
-func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
-	// Summaries deliberately disagree with the cache so we can tell which path ran.
+func TestBuild_CacheMembershipUsesCanonicalPersistentRanking(t *testing.T) {
+	// Redis deliberately disagrees with the persistent projection. It may select
+	// members, but its float scores must not determine values or ordering.
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary("1.0", "101"), "u2": summary("2.0", "102"),
 	}}
@@ -187,10 +195,9 @@ func TestBuild_UsesCacheWhenPopulated(t *testing.T) {
 	board, err := svc.Build(ctx)
 	require.NoError(t, err)
 	require.Len(t, board, 2)
-	// Cached scores (50 > 25) win, not the live summaries (2 > 1).
-	assert.Equal(t, "Alpha", board[0].DisplayName)
-	assert.Equal(t, 50.0, board[0].GainLossPercentage.Float64())
-	assert.Equal(t, 150.0, board[0].PortfolioIndex.Float64(), "index derives from cached score")
+	assert.Equal(t, "Beta", board[0].DisplayName)
+	assert.Equal(t, 2.0, board[0].GainLossPercentage.Float64())
+	assert.Equal(t, 102.0, board[0].PortfolioIndex.Float64())
 	assert.Equal(t, 1, board[0].Rank)
 }
 

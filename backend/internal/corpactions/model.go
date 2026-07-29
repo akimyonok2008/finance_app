@@ -130,6 +130,13 @@ type CorporateAction struct {
 	Status  Status
 	Quality Quality
 
+	// Revision counts how many times UpsertEvent has seen this
+	// (provider, provider_event_id) with materially different terms
+	// (fingerprint mismatch) — an audit trail for provider corrections. The
+	// row itself stays keyed by (provider, provider_event_id) as before;
+	// this does not change identity, only visibility into corrections.
+	Revision int
+
 	SourceURL      string
 	RawFingerprint string
 	RetrievedAt    time.Time

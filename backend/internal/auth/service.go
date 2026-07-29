@@ -28,6 +28,7 @@ type Service struct {
 	googleVerifier  ProviderVerifier
 	appleVerifier   ProviderVerifier
 	deletionHooks   []AccountDeletionHook
+	creationHooks   []AccountCreationHook
 	emailSender     EmailSender
 	publicAppURL    string
 	verificationTTL time.Duration
@@ -41,6 +42,25 @@ type Service struct {
 // API never reports successful deletion while a required erasure is incomplete.
 type AccountDeletionHook interface {
 	OnAccountDeleted(ctx context.Context, userID string) error
+}
+
+// AccountCreationHook initializes required user-owned aggregates immediately
+// after account persistence, before any read endpoint can be reached.
+type AccountCreationHook interface {
+	OnAccountCreated(ctx context.Context, userID string) error
+}
+
+func (s *Service) RegisterCreationHook(h AccountCreationHook) {
+	s.creationHooks = append(s.creationHooks, h)
+}
+
+func (s *Service) initializeAccount(ctx context.Context, userID string) error {
+	for _, hook := range s.creationHooks {
+		if err := hook.OnAccountCreated(ctx, userID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RegisterDeletionHook attaches a required erasure step. May be called
@@ -177,6 +197,9 @@ func (s *Service) RegisterContext(ctx context.Context, in RegisterInput) (*User,
 	if err := s.repo.CreateWithVerification(ctx, user, record, message); err != nil {
 		return nil, "", err
 	}
+	if err := s.initializeAccount(ctx, user.ID); err != nil {
+		return nil, "", err
+	}
 	// Low-latency best effort after the atomic commit. Failure is deliberately
 	// not returned to the client: the durable outbox retains the message and
 	// the mandatory processor retries it, so registration cannot be stranded
@@ -269,7 +292,7 @@ func (s *Service) LoginWithGoogle(ctx context.Context, credential string) (*User
 		return nil, "", err
 	}
 	claims.Provider = ProviderGoogle
-	return s.loginWithProviderClaims(claims)
+	return s.loginWithProviderClaims(ctx, claims)
 }
 
 func (s *Service) LoginWithApple(ctx context.Context, identityToken string, fallback ProviderClaims) (*User, string, error) {
@@ -291,10 +314,10 @@ func (s *Service) LoginWithApple(ctx context.Context, identityToken string, fall
 	if claims.DisplayName == "" {
 		claims.DisplayName = fallback.DisplayName
 	}
-	return s.loginWithProviderClaims(claims)
+	return s.loginWithProviderClaims(ctx, claims)
 }
 
-func (s *Service) loginWithProviderClaims(claims ProviderClaims) (*User, string, error) {
+func (s *Service) loginWithProviderClaims(ctx context.Context, claims ProviderClaims) (*User, string, error) {
 	if claims.Subject == "" {
 		return nil, "", ErrInvalidProviderToken
 	}
@@ -318,7 +341,7 @@ func (s *Service) loginWithProviderClaims(claims ProviderClaims) (*User, string,
 
 	user, err := s.repo.FindByEmail(email)
 	if errors.Is(err, ErrUserNotFound) {
-		user, err = s.createProviderUser(email, claims.DisplayName, claims.AvatarKey)
+		user, err = s.createProviderUser(ctx, email, claims.DisplayName, claims.AvatarKey)
 	}
 	if err != nil {
 		return nil, "", err
@@ -333,7 +356,7 @@ func (s *Service) loginWithProviderClaims(claims ProviderClaims) (*User, string,
 	return s.issue(user)
 }
 
-func (s *Service) createProviderUser(email, displayName, avatarKey string) (*User, error) {
+func (s *Service) createProviderUser(ctx context.Context, email, displayName, avatarKey string) (*User, error) {
 	displayName = strings.TrimSpace(displayName)
 	if displayName == "" {
 		displayName = strings.Split(email, "@")[0]
@@ -351,6 +374,9 @@ func (s *Service) createProviderUser(email, displayName, avatarKey string) (*Use
 		AuthVersion: 1,
 	}
 	if err := s.repo.Create(user); err != nil {
+		return nil, err
+	}
+	if err := s.initializeAccount(ctx, user.ID); err != nil {
 		return nil, err
 	}
 	return user, nil
@@ -585,10 +611,27 @@ func (s *Service) Ban(ctx context.Context, userID string, reason string) error {
 	return err
 }
 
-// ListUsers returns all users. It is consumed by the leaderboard module via the
-// UserProvider interface. Callers receive full User values (including the
-// password hash) and are responsible for projecting to a safe response shape —
-// the hash must never be serialized to clients.
+// ListUsers returns all users, including sensitive internal fields like the
+// password hash. It exists for callers that genuinely need full account state
+// (e.g. batch worker adapters that only read IDs but sit inside the auth
+// module's own trust boundary). Modules outside that boundary — like the
+// leaderboard — must use ListRankableUsers instead.
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 	return s.repo.ListUsers(ctx)
+}
+
+// ListRankableUsers returns the narrow, safe-to-share projection of every
+// user for ranking display. It is the only user enumeration the leaderboard
+// module (or any other module outside auth) should depend on — the password
+// hash and other sensitive fields never leave this boundary.
+func (s *Service) ListRankableUsers(ctx context.Context) ([]RankableUser, error) {
+	users, err := s.repo.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RankableUser, 0, len(users))
+	for _, u := range users {
+		out = append(out, RankableUser{ID: u.ID, DisplayName: u.DisplayName, AvatarKey: u.AvatarKey})
+	}
+	return out, nil
 }

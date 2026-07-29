@@ -410,9 +410,11 @@ See `.env.example` for every setting. Important groups:
 | --- | --- | --- |
 | `APP_ENV` | `development` | `production` enables fail-closed startup validation |
 | `PORT` | `8080` | HTTP port |
+| `OPERATIONS_ADDR` | `127.0.0.1:9090` | Private listener for `/ready` and `/metrics`; expose only to health checks and monitoring |
 | `JWT_SECRET` | development secret | HS256 signing key; production requires a unique value of at least 32 characters |
 | `CORS_ALLOWED_ORIGINS` | empty | Explicit comma-separated HTTPS origins; required in production, wildcard forbidden |
-| `JWT_EXPIRY_HOURS` | `24` | App-token lifetime; no refresh token exists |
+| `TRUSTED_PROXY_CIDRS` | empty | Ingress/load-balancer CIDRs allowed to supply client-IP forwarding headers; trusts none by default |
+| `JWT_EXPIRY_HOURS` | `4` | HttpOnly browser-session JWT lifetime; no refresh token exists |
 | `PASSWORD_REGISTRATION_ENABLED` | `true` | Enables password registration and production email-delivery requirement |
 | `PUBLIC_APP_URL` | `http://localhost:5173` | Base URL used in verification/reset links |
 | `EMAIL_SENDER` | `development` | `development` logs lifecycle URLs; production password registration requires `smtp` |
@@ -423,6 +425,12 @@ See `.env.example` for every setting. Important groups:
 | `STORAGE_PROVIDER` | `memory` | `memory` or `postgres` |
 | `DATABASE_URL` | local URL | Required by PostgreSQL mode |
 | `REDIS_URL` | empty | Optional leaderboard cache |
+
+`TRUSTED_PROXY_CIDRS` must contain only the ingress or load-balancer networks
+that actually connect to the API. The API ignores client-IP forwarding headers
+from every other peer. Production ingress should strip client-supplied
+forwarding headers before adding its own and enforce login/registration limits
+at the edge or WAF as an independent first layer.
 | `PRICE_PROVIDER` | `mock` | `mock`, `twelvedata`, or prototype `yahoo` |
 | `DEMO_MODE_ENABLED` | `false` | Explicitly allows mock prices in production only with demo awards |
 | `ENABLE_REAL_MARKET_DATA` | `false` | Must also be true for Twelve Data |
@@ -450,13 +458,17 @@ rejected.
 
 ## HTTP contract
 
+Request bodies are capped at 1 MiB globally. Authentication requests are
+limited to 32 KiB, direct-message/report bodies to 16 KiB, and profile or
+moderation updates to 64 KiB. JSON handlers reject unknown fields and any
+second JSON value after the first object.
+
 Public:
 
 | Method | Route | Purpose |
 | --- | --- | --- |
 | GET | `/` | Minimal local development page |
 | GET | `/health` | Process health |
-| GET | `/ready` | Dependency readiness and provider metadata |
 | POST | `/auth/register` | Email/password registration |
 | POST | `/auth/login` | Email/password login |
 | POST | `/auth/verify-email` | Consume one-time verification token and issue the first JWT |
@@ -466,6 +478,13 @@ Public:
 | POST | `/auth/google` | Optional Google credential exchange |
 
 All routes below require `Authorization: Bearer <jwt>`.
+
+Operational endpoints are served on the separate `OPERATIONS_ADDR` listener:
+`GET /ready` exposes dependency readiness and provider metadata, while
+`GET /metrics` exposes Prometheus metrics. The default binds only to loopback;
+if a container orchestrator requires a pod-network binding, protect that port
+with an ingress rule or network policy. Neither route exists on the public
+listener.
 
 | Area | Routes |
 | --- | --- |
@@ -538,7 +557,10 @@ matching explicit erasure hooks. No financial portfolio is retained.
 
 ## Portfolio model
 
-Each user has one lazily created USD-default portfolio. A position accepts:
+Each account receives one USD-default portfolio during account initialization;
+portfolio GET and summary endpoints never create or modify it. Achievement
+evaluation is driven by committed ranked snapshots and background projection
+processing, not summary reads. A position accepts:
 
 ```json
 {"symbol":"AAPL","asset_type":"stock","quantity":"2"}
@@ -977,9 +999,13 @@ Conversation creation and sending require friendship; participants may still
 read existing history after an unfollow, but cannot send until friendship is
 restored. Messages are trimmed and limited to 1,000 Unicode code points.
 
-The API has no WebSockets, unread counts, notifications, blocking/reporting,
-group messages, attachments, or message edit/delete endpoints. Database columns
-for edited/deleted messages are not active behavior.
+The API supports direct-message unread counts, blocking/unblocking, user and
+message reports, recipient notifications with unread/read state, and
+moderator/admin report review and resolution. Moderation actions are audited
+and can warn, suspend, ban, or remove reported message content according to the
+selected resolution. There are no WebSockets, group messages, attachments,
+reactions, or user-facing message edit/delete endpoints; database columns for
+edited/deleted messages are not active user behavior.
 
 ## Market data
 
@@ -1023,12 +1049,13 @@ Configuration is `OPENFIGI_ENABLED`, `OPENFIGI_API_KEY` (optional — OpenFIGI
 allows unauthenticated low-volume use; never logged), `OPENFIGI_BASE_URL` and
 `OPENFIGI_REQUEST_TIMEOUT`.
 
-**Integration status: standalone.** Nothing consumes this layer yet. Positions
-and activities carry a nullable `instrument_id` column that is never populated;
-the buy path, entitlement discovery and the income/corporate-action pipelines
-still key on the ticker string, and legacy rows are not backfilled. OpenFIGI's
-`/v3/search` and `/v3/filter` endpoints are not implemented. All of that is
-future work.
+**Integration status: active.** Portfolio buys resolve and persist
+`instrument_id`; activities inherit it; entitlement discovery and corporate
+actions resolve stable identifiers before falling back to ticker-plus-venue.
+The migration/backfill path links unambiguous legacy rows without making
+external OpenFIGI calls, and quarantines ambiguous evidence for review.
+OpenFIGI's `/v3/search` and `/v3/filter` endpoints are intentionally not used;
+the integration relies on `/v3/mapping`.
 
 ## Current, legacy, and not implemented
 

@@ -114,7 +114,11 @@ func TestHandlerLogin_Returns200ForValidCredentials(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp authResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp.Token)
+	cookies := rec.Result().Cookies()
+	require.Len(t, cookies, 1)
+	assert.True(t, cookies[0].HttpOnly)
+	assert.Equal(t, http.SameSiteStrictMode, cookies[0].SameSite)
+	assert.NotContains(t, rec.Body.String(), `"token"`)
 }
 
 func TestHandlerLogin_Returns401ForWrongPassword(t *testing.T) {
@@ -126,6 +130,27 @@ func TestHandlerLogin_Returns401ForWrongPassword(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assertHasError(t, rec.Body.Bytes())
+}
+
+func TestHandlerLoginRejectsTrailingJSONValue(t *testing.T) {
+	_, _, router := newTestHandler()
+	rec := doJSON(t, router, http.MethodPost, "/auth/login",
+		`{"email":"user@example.com","password":"StrongPassword123"} {}`, "")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestProductionSessionCookieIsHostBoundAndSecure(t *testing.T) {
+	rec := httptest.NewRecorder()
+	(&Handler{secureCookie: true}).setSessionCookie(rec, "signed-token")
+
+	cookies := rec.Result().Cookies()
+	require.Len(t, cookies, 1)
+	assert.Equal(t, SessionCookieName, cookies[0].Name)
+	assert.True(t, cookies[0].Secure)
+	assert.True(t, cookies[0].HttpOnly)
+	assert.Equal(t, "/", cookies[0].Path)
+	assert.Equal(t, http.SameSiteStrictMode, cookies[0].SameSite)
 }
 
 func TestHandlerLogin_Returns401ForUnknownEmail(t *testing.T) {
@@ -216,7 +241,8 @@ func TestHandlerGoogle_ReturnsJWTForVerifiedCredential(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp authResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp.Token)
+	assert.NotEmpty(t, rec.Header().Get("Set-Cookie"))
+	assert.NotContains(t, rec.Body.String(), `"token"`)
 	assert.Equal(t, "googleuser@example.com", resp.User.Email)
 	assert.Equal(t, "Google User", resp.User.DisplayName)
 	assertNoPasswordLeak(t, rec.Body.String())
@@ -316,16 +342,15 @@ func TestSecurity_MeResponseNeverExposesPassword(t *testing.T) {
 	assertNoPasswordLeak(t, rec.Body.String())
 }
 
-func TestHandlerChangePassword_ReturnsReplacementTokenAndRotatesCredential(t *testing.T) {
+func TestHandlerChangePassword_RotatesCookieAndCredential(t *testing.T) {
 	_, _, router := newTestHandler()
 	reg := registerAndLogin(t, router)
 
 	rec := doJSON(t, router, http.MethodPost, "/auth/change-password",
 		`{"current_password":"StrongPassword123","new_password":"EvenStrongerPassword456"}`, reg.Token)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var replacement map[string]string
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &replacement))
-	assert.NotEmpty(t, replacement["token"])
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotEmpty(t, rec.Header().Get("Set-Cookie"))
+	assert.Empty(t, rec.Body.String())
 
 	oldLogin := doJSON(t, router, http.MethodPost, "/auth/login",
 		`{"email":"user@example.com","password":"StrongPassword123"}`, "")
@@ -394,6 +419,8 @@ func registerAndLogin(t *testing.T, router http.Handler) authResponse {
 	require.Equal(t, http.StatusOK, login.Code)
 	var session authResponse
 	require.NoError(t, json.Unmarshal(login.Body.Bytes(), &session))
+	require.NotEmpty(t, login.Result().Cookies())
+	session.Token = login.Result().Cookies()[0].Value
 	return session
 }
 

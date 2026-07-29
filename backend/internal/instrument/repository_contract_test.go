@@ -327,6 +327,66 @@ func TestRepository_FindActiveAliasAndUpdateSymbol(t *testing.T) {
 	})
 }
 
+func TestRepository_VenueAndIssuerFindOrCreate(t *testing.T) {
+	forEachRepo(t, func(t *testing.T, repo Repository) {
+		ctx := context.Background()
+		mic := uniq("MIC")
+
+		v1, err := repo.CreateVenue(ctx, Venue{MIC: mic, ExchangeCode: "UN", Name: "Test Exchange"})
+		require.NoError(t, err)
+		require.NotEmpty(t, v1.ID)
+
+		found, err := repo.FindVenueByMIC(ctx, mic)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, v1.ID, found.ID)
+
+		missing, err := repo.FindVenueByMIC(ctx, uniq("NOPE"))
+		require.NoError(t, err)
+		assert.Nil(t, missing)
+
+		cik := uniq("CIK")
+		iss1, err := repo.CreateIssuer(ctx, Issuer{CIK: cik, Name: "Test Issuer Inc"})
+		require.NoError(t, err)
+		require.NotEmpty(t, iss1.ID)
+
+		foundIss, err := repo.FindIssuerByCIK(ctx, cik)
+		require.NoError(t, err)
+		require.NotNil(t, foundIss)
+		assert.Equal(t, iss1.ID, foundIss.ID)
+
+		in := seedInstrument(t, repo, uniq("VEN"), uniq("BBG000V9XR"))
+		require.NoError(t, repo.SetInstrumentVenueAndIssuer(ctx, in.ID, v1.ID, iss1.ID))
+		got, err := repo.GetInstrumentByID(ctx, in.ID)
+		require.NoError(t, err)
+		assert.Equal(t, v1.ID, got.VenueID)
+		assert.Equal(t, iss1.ID, got.IssuerID)
+
+		assert.ErrorIs(t, repo.SetInstrumentVenueAndIssuer(ctx, uuid.NewString(), v1.ID, iss1.ID), ErrInstrumentNotFound)
+	})
+}
+
+func TestResolver_FindOrCreateVenueIsIdempotent(t *testing.T) {
+	forEachRepo(t, func(t *testing.T, repo Repository) {
+		ctx := context.Background()
+		r := NewResolver(repo, nil)
+		mic := uniq("IDM")
+
+		v1, err := r.FindOrCreateVenue(ctx, mic, "UN")
+		require.NoError(t, err)
+		require.NotNil(t, v1)
+
+		v2, err := r.FindOrCreateVenue(ctx, mic, "UN")
+		require.NoError(t, err)
+		require.NotNil(t, v2)
+		assert.Equal(t, v1.ID, v2.ID, "resolving the same MIC twice must not create a duplicate venue")
+
+		nilVenue, err := r.FindOrCreateVenue(ctx, "", "")
+		require.NoError(t, err)
+		assert.Nil(t, nilVenue)
+	})
+}
+
 func lower(s string) string {
 	out := []rune(s)
 	for i, r := range out {

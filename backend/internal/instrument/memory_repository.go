@@ -17,6 +17,8 @@ type InMemoryRepository struct {
 	mu          sync.RWMutex
 	instruments map[string]Instrument
 	aliases     map[string]InstrumentAlias
+	venues      map[string]Venue
+	issuers     map[string]Issuer
 }
 
 // NewInMemoryRepository returns an empty in-memory identity register.
@@ -24,6 +26,8 @@ func NewInMemoryRepository() *InMemoryRepository {
 	return &InMemoryRepository{
 		instruments: make(map[string]Instrument),
 		aliases:     make(map[string]InstrumentAlias),
+		venues:      make(map[string]Venue),
+		issuers:     make(map[string]Issuer),
 	}
 }
 
@@ -254,4 +258,105 @@ func (r *InMemoryRepository) findByAlias(ctx context.Context, aliasType AliasTyp
 	// Several distinct instruments share the identifier under this scope: the
 	// caller must narrow with an exchange or MIC rather than get a coin flip.
 	return nil, ErrAliasConflict
+}
+
+func (r *InMemoryRepository) FindVenueByMIC(ctx context.Context, mic string) (*Venue, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	mic = normalizeScope(mic)
+	if mic == "" {
+		return nil, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, v := range r.venues {
+		if v.MIC == mic {
+			found := v
+			return &found, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *InMemoryRepository) CreateVenue(ctx context.Context, v Venue) (Venue, error) {
+	if err := ctx.Err(); err != nil {
+		return Venue{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v.MIC = normalizeScope(v.MIC)
+	for _, existing := range r.venues {
+		if v.MIC != "" && existing.MIC == v.MIC {
+			return existing, nil
+		}
+	}
+	if v.ID == "" {
+		v.ID = uuid.NewString()
+	}
+	if v.CreatedAt.IsZero() {
+		v.CreatedAt = time.Now().UTC()
+	}
+	r.venues[v.ID] = v
+	return v, nil
+}
+
+func (r *InMemoryRepository) FindIssuerByCIK(ctx context.Context, cik string) (*Issuer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cik = normalizeAliasValue(cik)
+	if cik == "" {
+		return nil, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, iss := range r.issuers {
+		if iss.CIK == cik {
+			found := iss
+			return &found, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *InMemoryRepository) CreateIssuer(ctx context.Context, iss Issuer) (Issuer, error) {
+	if err := ctx.Err(); err != nil {
+		return Issuer{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	iss.CIK = normalizeAliasValue(iss.CIK)
+	for _, existing := range r.issuers {
+		if iss.CIK != "" && existing.CIK == iss.CIK {
+			return existing, nil
+		}
+	}
+	if iss.ID == "" {
+		iss.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	if iss.CreatedAt.IsZero() {
+		iss.CreatedAt = now
+	}
+	iss.UpdatedAt = now
+	r.issuers[iss.ID] = iss
+	return iss, nil
+}
+
+func (r *InMemoryRepository) SetInstrumentVenueAndIssuer(ctx context.Context, instrumentID, venueID, issuerID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	in, ok := r.instruments[instrumentID]
+	if !ok {
+		return ErrInstrumentNotFound
+	}
+	in.VenueID = venueID
+	in.IssuerID = issuerID
+	in.UpdatedAt = time.Now().UTC()
+	r.instruments[instrumentID] = in
+	return nil
 }

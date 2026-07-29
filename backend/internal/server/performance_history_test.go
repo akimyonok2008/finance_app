@@ -43,7 +43,7 @@ func TestPerformanceHistory_ReadsCanonicalRankedSnapshots(t *testing.T) {
 	login := doReq(t, h, http.MethodPost, "/auth/login",
 		`{"email":"ranked@example.com","password":"StrongPassword123"}`, "")
 	require.Equal(t, http.StatusOK, login.Code)
-	token := extractToken(t, login.Body.String())
+	token := extractToken(t, login)
 
 	require.Equal(t, http.StatusCreated,
 		doIdempotentReq(t, h, "/portfolio/deposits", `{"currency":"USD","amount":5000}`, token, "rh-deposit").Code)

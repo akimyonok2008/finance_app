@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -19,8 +20,8 @@ import (
 // ranked-performance state can only change together inside one transaction.
 // Removing the standalone mutation methods removes the bypass.
 type Repository interface {
-	// EnsureDefaultPortfolio returns the user's single default portfolio,
-	// creating it if absent. It must be race-safe: two concurrent first requests
+	// EnsureDefaultPortfolio initializes the user's single default portfolio
+	// if absent. It must be race-safe: two concurrent commands
 	// yield the SAME portfolio (enforced by UNIQUE (user_id) in Postgres and the
 	// user index in memory).
 	EnsureDefaultPortfolio(ctx context.Context, userID string) (*Portfolio, error)
@@ -33,14 +34,51 @@ type Repository interface {
 	GetPosition(ctx context.Context, id string) (*Position, error)
 	ListPositionsByUser(ctx context.Context, userID string) ([]*Position, error)
 	ListActiveSymbols(ctx context.Context) ([]string, error)
+	// ListActiveInstruments returns the distinct (instrument_id, symbol) pairs
+	// held in an open position, for the resolved rows only (instrument_id IS
+	// NOT NULL). The automatic corporate-action pipeline uses it to fetch
+	// provider events by stable identity instead of ticker string, for the
+	// share of holdings that have one.
+	ListActiveInstruments(ctx context.Context) ([]ActiveInstrument, error)
 	ListIncomeDiscoveryInstruments(ctx context.Context, since time.Time) ([]IncomeDiscoveryInstrument, error)
 	ListIncomeHistoricalHolders(ctx context.Context, instrumentID, symbol string) ([]SymbolHolder, error)
 	// ListOpenPositionsBySymbol returns every user's OPEN position in a symbol.
 	// The automatic corporate-action pipeline uses it to discover which
 	// portfolios an issuer/exchange event affects.
 	ListOpenPositionsBySymbol(ctx context.Context, symbol string) ([]*Position, error)
+	// ListOpenPositionsByInstrumentID is the identity-based counterpart of
+	// ListOpenPositionsBySymbol, used when the corporate-action event
+	// resolved to a stable instrument identity.
+	ListOpenPositionsByInstrumentID(ctx context.Context, instrumentID string) ([]*Position, error)
+
+	// --- Legacy identity backfill (see BackfillJob) ---
+	ListPositionsMissingInstrumentID(ctx context.Context, limit int) ([]*Position, error)
+	ListActivitiesMissingInstrumentID(ctx context.Context, limit int) ([]Activity, error)
+	SetPositionInstrumentID(ctx context.Context, id, instrumentID string) error
+	SetActivityInstrumentID(ctx context.Context, id, instrumentID string) error
+	// EnqueueIdentityReconciliation records a legacy row the backfill job
+	// could not resolve unambiguously. Re-running the job against the same
+	// unresolved row must not pile up duplicate pending entries (idempotent
+	// on (table_name, record_id) while status='pending').
+	EnqueueIdentityReconciliation(ctx context.Context, item ReconciliationItem) error
+	ListPendingReconciliation(ctx context.Context, limit int) ([]ReconciliationItem, error)
+	// ResolveReconciliation assigns an instrument identity chosen by an
+	// administrator and applies it to the underlying row.
+	ResolveReconciliation(ctx context.Context, id, instrumentID, resolvedBy string) error
+	RejectReconciliation(ctx context.Context, id, resolvedBy string) error
 	ListCashBalances(ctx context.Context, userID string) ([]CashBalance, error)
 	ListActivities(ctx context.Context, userID string, limit int) ([]Activity, error)
+	// GetActivityByID returns a single activity scoped to userID, avoiding a
+	// full-ledger scan to find one row.
+	GetActivityByID(ctx context.Context, userID, activityID string) (Activity, bool, error)
+	// ListActivitiesFiltered returns a page of activities matching the given
+	// activity types (nil/empty = all) and symbol (empty = all), newest first,
+	// paginated at the database level. total is the count of all matching rows
+	// (ignoring limit/offset).
+	ListActivitiesFiltered(ctx context.Context, userID string, types []ActivityType, symbol string, limit, offset int) (items []Activity, total int, err error)
+	// FindCorrectionForActivity returns the activity (if any) whose metadata
+	// marks it as a correction of activityID.
+	FindCorrectionForActivity(ctx context.Context, userID, activityID string) (Activity, bool, error)
 	// ListActivitiesByPositionEpisode returns every activity sharing the given
 	// position episode id (all partial sales, the final sale/write-off, and the
 	// opening buy), scoped to userID for ownership. It is the canonical source
@@ -83,19 +121,22 @@ type InMemoryRepository struct {
 	audits   map[string]MutationAudit // by request id (idempotency)
 	auditLog []MutationAudit
 
+	reconciliation map[string]ReconciliationItem
+
 	faults Faults
 }
 
 // NewInMemoryRepository returns an empty in-memory store.
 func NewInMemoryRepository() *InMemoryRepository {
 	return &InMemoryRepository{
-		aggregates:    make(map[string]*aggregateState),
-		userPortfolio: make(map[string]string),
-		locks:         make(map[string]*sync.Mutex),
-		archives:      make([]*PortfolioArchiveSnapshot, 0),
-		archiveDays:   make(map[string]bool),
-		claimed:       make(map[string]bool),
-		audits:        make(map[string]MutationAudit),
+		aggregates:     make(map[string]*aggregateState),
+		userPortfolio:  make(map[string]string),
+		locks:          make(map[string]*sync.Mutex),
+		archives:       make([]*PortfolioArchiveSnapshot, 0),
+		archiveDays:    make(map[string]bool),
+		claimed:        make(map[string]bool),
+		audits:         make(map[string]MutationAudit),
+		reconciliation: make(map[string]ReconciliationItem),
 	}
 }
 
@@ -331,6 +372,212 @@ func (r *InMemoryRepository) ListOpenPositionsBySymbol(ctx context.Context, symb
 	return out, nil
 }
 
+func (r *InMemoryRepository) ListOpenPositionsByInstrumentID(ctx context.Context, instrumentID string) ([]*Position, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if instrumentID == "" {
+		return []*Position{}, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*Position, 0)
+	for _, agg := range r.aggregates {
+		for _, p := range agg.positions {
+			if positionStatus(p) == PositionStatusOpen && p.InstrumentID == instrumentID {
+				clone := *p
+				out = append(out, &clone)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (r *InMemoryRepository) ListActiveInstruments(ctx context.Context) ([]ActiveInstrument, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	out := make([]ActiveInstrument, 0)
+	for _, agg := range r.aggregates {
+		for _, p := range agg.positions {
+			if positionStatus(p) == PositionStatusOpen && p.InstrumentID != "" && !seen[p.InstrumentID] {
+				seen[p.InstrumentID] = true
+				out = append(out, ActiveInstrument{InstrumentID: p.InstrumentID, Symbol: p.Symbol})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Symbol < out[j].Symbol })
+	return out, nil
+}
+
+func (r *InMemoryRepository) ListPositionsMissingInstrumentID(ctx context.Context, limit int) ([]*Position, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*Position, 0)
+	for _, agg := range r.aggregates {
+		for _, p := range agg.positions {
+			if p.InstrumentID == "" {
+				out = append(out, &Position{ID: p.ID, Symbol: p.Symbol, CreatedAt: p.CreatedAt})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *InMemoryRepository) ListActivitiesMissingInstrumentID(ctx context.Context, limit int) ([]Activity, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Activity, 0)
+	for _, agg := range r.aggregates {
+		for _, a := range agg.activities {
+			if a.InstrumentID == "" && a.Symbol != "" {
+				out = append(out, Activity{ID: a.ID, Symbol: a.Symbol, OccurredAt: a.OccurredAt})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OccurredAt.Before(out[j].OccurredAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *InMemoryRepository) SetPositionInstrumentID(ctx context.Context, id, instrumentID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, agg := range r.aggregates {
+		if p, ok := agg.positions[id]; ok {
+			if p.InstrumentID == "" {
+				p.InstrumentID = instrumentID
+			}
+			return nil
+		}
+	}
+	return ErrPositionNotFound
+}
+
+func (r *InMemoryRepository) SetActivityInstrumentID(ctx context.Context, id, instrumentID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, agg := range r.aggregates {
+		for i := range agg.activities {
+			if agg.activities[i].ID == id && agg.activities[i].InstrumentID == "" {
+				agg.activities[i].InstrumentID = instrumentID
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+func (r *InMemoryRepository) EnqueueIdentityReconciliation(ctx context.Context, item ReconciliationItem) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.reconciliation {
+		if existing.Status == ReconciliationStatusPending && existing.TableName == item.TableName && existing.RecordID == item.RecordID {
+			return nil // already queued, matches the Postgres ON CONFLICT DO NOTHING
+		}
+	}
+	if item.ID == "" {
+		item.ID = uuid.NewString()
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+	item.Status = ReconciliationStatusPending
+	r.reconciliation[item.ID] = item
+	return nil
+}
+
+func (r *InMemoryRepository) ListPendingReconciliation(ctx context.Context, limit int) ([]ReconciliationItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]ReconciliationItem, 0)
+	for _, item := range r.reconciliation {
+		if item.Status == ReconciliationStatusPending {
+			out = append(out, item)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *InMemoryRepository) ResolveReconciliation(ctx context.Context, id, instrumentID, resolvedBy string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	item, ok := r.reconciliation[id]
+	if !ok || item.Status != ReconciliationStatusPending {
+		r.mu.Unlock()
+		return ErrReconciliationItemNotFound
+	}
+	tableName, recordID := item.TableName, item.RecordID
+	now := time.Now().UTC()
+	item.Status = ReconciliationStatusResolved
+	item.CandidateInstrumentID = instrumentID
+	item.ResolvedAt = &now
+	item.ResolvedBy = resolvedBy
+	r.reconciliation[id] = item
+	r.mu.Unlock()
+
+	switch tableName {
+	case "positions":
+		if err := r.SetPositionInstrumentID(ctx, recordID, instrumentID); err != nil && !errors.Is(err, ErrPositionNotFound) {
+			return err
+		}
+	case "portfolio_activities":
+		return r.SetActivityInstrumentID(ctx, recordID, instrumentID)
+	}
+	return nil
+}
+
+func (r *InMemoryRepository) RejectReconciliation(ctx context.Context, id, resolvedBy string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	item, ok := r.reconciliation[id]
+	if !ok || item.Status != ReconciliationStatusPending {
+		return ErrReconciliationItemNotFound
+	}
+	now := time.Now().UTC()
+	item.Status = ReconciliationStatusRejected
+	item.ResolvedAt = &now
+	item.ResolvedBy = resolvedBy
+	r.reconciliation[id] = item
+	return nil
+}
+
 func (r *InMemoryRepository) ListCashBalances(ctx context.Context, userID string) ([]CashBalance, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -369,6 +616,82 @@ func (r *InMemoryRepository) ListActivities(ctx context.Context, userID string, 
 		out = append(out, cloneActivity(items[i]))
 	}
 	return out, nil
+}
+
+func (r *InMemoryRepository) GetActivityByID(ctx context.Context, userID, activityID string) (Activity, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Activity{}, false, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.userPortfolio[userID]
+	if !ok {
+		return Activity{}, false, nil
+	}
+	for _, a := range r.aggregates[id].activities {
+		if a.ID == activityID {
+			return cloneActivity(a), true, nil
+		}
+	}
+	return Activity{}, false, nil
+}
+
+func (r *InMemoryRepository) FindCorrectionForActivity(ctx context.Context, userID, activityID string) (Activity, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Activity{}, false, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.userPortfolio[userID]
+	if !ok {
+		return Activity{}, false, nil
+	}
+	for _, a := range r.aggregates[id].activities {
+		if correctionOf, _ := a.Metadata["correction_of_activity_id"].(string); correctionOf == activityID {
+			return cloneActivity(a), true, nil
+		}
+	}
+	return Activity{}, false, nil
+}
+
+func (r *InMemoryRepository) ListActivitiesFiltered(ctx context.Context, userID string, types []ActivityType, symbol string, limit, offset int) ([]Activity, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.userPortfolio[userID]
+	if !ok {
+		return []Activity{}, 0, nil
+	}
+	typeSet := make(map[ActivityType]bool, len(types))
+	for _, t := range types {
+		typeSet[t] = true
+	}
+	items := r.aggregates[id].activities
+	matched := make([]Activity, 0, len(items))
+	for i := len(items) - 1; i >= 0; i-- {
+		a := items[i]
+		if symbol != "" && normalizeSymbol(a.Symbol) != symbol {
+			continue
+		}
+		if len(typeSet) > 0 && !typeSet[a.Type] {
+			continue
+		}
+		matched = append(matched, cloneActivity(a))
+	}
+	total := len(matched)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if limit <= 0 || end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
 }
 
 // ListActivitiesByPositionEpisode returns every activity for the given episode

@@ -27,7 +27,19 @@ func (g corpActionGateway) HoldersOfSymbol(ctx context.Context, symbol string) (
 	}
 	out := make([]corpactions.Holder, 0, len(holders))
 	for _, h := range holders {
-		out = append(out, corpactions.Holder{UserID: h.UserID, PortfolioID: h.PortfolioID, AcquiredAt: h.AcquiredAt})
+		out = append(out, corpactions.Holder{UserID: h.UserID, PortfolioID: h.PortfolioID, AcquiredAt: h.AcquiredAt, Symbol: h.Symbol})
+	}
+	return out, nil
+}
+
+func (g corpActionGateway) HoldersOfInstrument(ctx context.Context, instrumentID string) ([]corpactions.Holder, error) {
+	holders, err := g.svc.HoldersOfInstrument(ctx, instrumentID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]corpactions.Holder, 0, len(holders))
+	for _, h := range holders {
+		out = append(out, corpactions.Holder{UserID: h.UserID, PortfolioID: h.PortfolioID, AcquiredAt: h.AcquiredAt, Symbol: h.Symbol})
 	}
 	return out, nil
 }
