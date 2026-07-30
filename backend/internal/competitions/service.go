@@ -39,6 +39,32 @@ type Service struct {
 	fx        fx.FXProvider
 	clock     clock.Clock
 	cache     leaderboard.LeaderboardCache // optional sprint ranking cache
+
+	// Engine dependencies (see eligibility.go). snapshots is the narrow
+	// read-only portfolio boundary; universes resolves named instrument
+	// universes. Both optional: without snapshots, eligibility previews are
+	// unavailable rather than degraded.
+	snapshots SnapshotProvider
+	universes UniverseResolver
+	// baselineWindow bounds how long after starts_at baseline retries keep
+	// running before an entry is explicitly failed (see RunCompetitionBaselines).
+	baselineWindow time.Duration
+	// rankingBatchSize bounds how many entries RefreshCompetitionRankings
+	// claims per competition per call (see ranking.go). <= 0 uses the default.
+	rankingBatchSize int
+	// finalizationWindow bounds how long past ends_at the finalizer retries
+	// entries with failed end-time valuation before disqualifying them and
+	// finalizing without them (see finalize.go).
+	finalizationWindow time.Duration
+	// achievements is the optional idempotent trophy hook fired after each
+	// finalized result (see finalize.go).
+	achievements FinalizationAchievementTrigger
+}
+
+// SetAchievementTrigger attaches the optional idempotent achievement hook
+// fired for each user after competition finalization.
+func (s *Service) SetAchievementTrigger(t FinalizationAchievementTrigger) {
+	s.achievements = t
 }
 
 // NewService wires a competitions Service.
@@ -119,6 +145,15 @@ func (s *Service) ensureCurrentSprint(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// GetCompetition fetches one competition with its status freshly derived
+// from the clock. Exported for handlers that need to branch on
+// Competition.IsLegacy() before choosing a read path (e.g. the leaderboard
+// and status endpoints, which serve legacy sprints and engine editions
+// differently).
+func (s *Service) GetCompetition(ctx context.Context, competitionID string) (*Competition, error) {
+	return s.loadCompetition(ctx, competitionID)
 }
 
 // loadCompetition fetches a competition with its status freshly derived from the

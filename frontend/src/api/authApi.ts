@@ -132,8 +132,10 @@ async function publicJSON<T>(path: string, body: unknown): Promise<T> {
   return data as T;
 }
 
-export function verifyEmailRequest(token: string): Promise<AuthSession> {
-  return publicJSON<AuthSession>("/auth/verify-email", { token });
+export async function verifyEmailRequest(token: string): Promise<AuthSession> {
+  const data = await publicJSON<Record<string, unknown>>("/auth/verify-email", { token });
+  const userRaw = (data.user as Record<string, unknown>) ?? data;
+  return { token: "cookie-session", user: normalizeUser(userRaw) };
 }
 
 export function resendVerificationRequest(email: string): Promise<{ message: string }> {

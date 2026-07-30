@@ -3,6 +3,7 @@ package competitions
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // CompetitionRepository is the persistence boundary for competitions and their
@@ -17,6 +18,24 @@ type CompetitionRepository interface {
 	ListEntries(ctx context.Context, competitionID string) ([]CompetitionEntry, error)
 }
 
+// EditionRepository is the engine-side persistence boundary for competition
+// editions: rows created with a stored lifecycle and an immutable rules
+// snapshot, as opposed to the legacy CreateCompetition path. Implemented by
+// PostgresCompetitionRepository (same table, additive columns).
+type EditionRepository interface {
+	// CreateEdition inserts a new edition (normally in LifecycleDraft). The
+	// rules snapshot must already be stamped — an edition without one cannot
+	// be interpreted. Fails with ErrEditionExists on a duplicate id.
+	CreateEdition(ctx context.Context, edition Competition) error
+	// TransitionLifecycle applies a validated lifecycle transition with an
+	// optimistic guard: the UPDATE only lands if the edition is still in
+	// `from`. ErrLifecycleConflict means someone else transitioned it first;
+	// ErrInvalidLifecycleTransition means from→to is not in the state
+	// machine. Timestamp columns (published_at/finalized_at/cancelled_at)
+	// are stamped by the transition that reaches them.
+	TransitionLifecycle(ctx context.Context, competitionID, from, to string, now time.Time) error
+}
+
 // InMemoryCompetitionRepository is a goroutine-safe, process-local store.
 type InMemoryCompetitionRepository struct {
 	mu           sync.RWMutex
@@ -24,6 +43,12 @@ type InMemoryCompetitionRepository struct {
 	compOrder    []string
 	// entries keyed by competitionID -> userID -> entry
 	entries map[string]map[string]CompetitionEntry
+	// rankingStates and displayNames back the RankingRepository implementation
+	// (see ranking.go). displayNames lets tests seed the tie-break lookup that
+	// Postgres does via a join to the users table.
+	rankingStates map[string]*memoryRankingState
+	displayNames  map[string]string
+	resultStore   *memoryResults
 }
 
 // NewInMemoryCompetitionRepository returns an empty repository.

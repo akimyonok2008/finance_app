@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
 )
 
@@ -39,24 +38,6 @@ func CheckProjectorReadiness(ctx context.Context, running bool, backlog BacklogS
 	return nil
 }
 
-// RankedCache is the leaderboard cache surface the processor keeps in sync.
-type RankedCache interface {
-	UpsertGlobalScore(ctx context.Context, userID string, score money.Ratio) error
-	RemoveGlobalScore(ctx context.Context, userID string) error
-}
-
-type RankedCacheState struct {
-	Active bool
-	Score  money.Ratio
-}
-
-// RankedCacheStateProvider rereads the current database-backed ranking state.
-// Outbox delivery order is deliberately not authoritative: an old pause event
-// processed after a newer resume must still project the current active state.
-type RankedCacheStateProvider interface {
-	CurrentRankedCacheState(ctx context.Context, userID string) (RankedCacheState, bool, error)
-}
-
 // SnapshotRecorder records the derived daily archive snapshot. Insertion is
 // idempotent per portfolio per UTC day (database-enforced), so replaying an
 // event is harmless.
@@ -75,7 +56,10 @@ type AchievementEvaluator interface {
 }
 
 // OutboxProcessor performs the DERIVED work of a committed portfolio mutation:
-// leaderboard cache sync, lifecycle snapshots, and private daily archives.
+// lifecycle snapshots and private daily archives. (It used to also sync a
+// Redis leaderboard score per mutation; that tier is gone — global ranking is
+// served solely from the generation-based Postgres projection, which the
+// periodic refresh worker rebuilds.)
 //
 // This work is deliberately outside the mutation transaction — a failing
 // projection must never fail or roll back a portfolio mutation — but it is not
@@ -83,8 +67,6 @@ type AchievementEvaluator interface {
 // failure, and safe to reprocess.
 type OutboxProcessor struct {
 	source          EventSource
-	cache           RankedCache // optional (Redis only)
-	cacheState      RankedCacheStateProvider
 	snapshots       SnapshotRecorder       // optional
 	rankedSnapshots RankedSnapshotRecorder // optional
 	achievements    AchievementEvaluator   // optional
@@ -101,9 +83,6 @@ func NewOutboxProcessor(source EventSource, interval time.Duration) *OutboxProce
 	return &OutboxProcessor{source: source, batchSize: 100, interval: interval}
 }
 
-func (p *OutboxProcessor) SetCache(c RankedCache, state RankedCacheStateProvider) {
-	p.cache, p.cacheState = c, state
-}
 func (p *OutboxProcessor) SetSnapshotRecorder(s SnapshotRecorder) { p.snapshots = s }
 func (p *OutboxProcessor) SetRankedSnapshotRecorder(s RankedSnapshotRecorder) {
 	p.rankedSnapshots = s
@@ -167,40 +146,8 @@ func (p *OutboxProcessor) handle(ctx context.Context, ev portfolio.OutboxEvent) 
 		return nil // unknown event types are settled, not retried forever
 	}
 
-	// 1. Leaderboard cache. A paused portfolio must be REMOVED, not merely left
-	//    stale, or an unrankable user stays visible on the board.
-	if p.cache != nil && p.cacheState != nil {
-		current, found, stateErr := p.cacheState.CurrentRankedCacheState(ctx, ev.UserID)
-		if stateErr != nil {
-			slog.Error("leaderboard_cache_update_failed",
-				"user_id", ev.UserID, "aggregate_version", ev.AggregateVersion, "error", stateErr)
-			return stateErr
-		}
-		var err error
-		if !found || !current.Active {
-			err = p.cache.RemoveGlobalScore(ctx, ev.UserID)
-			if err == nil {
-				slog.Info("leaderboard_cache_score_removed",
-					"user_id", ev.UserID, "aggregate_version", ev.AggregateVersion)
-			}
-		} else {
-			err = p.cache.UpsertGlobalScore(ctx, ev.UserID, current.Score)
-			if err == nil {
-				slog.Info("leaderboard_cache_score_upserted",
-					"user_id", ev.UserID, "aggregate_version", ev.AggregateVersion)
-			}
-		}
-		if err != nil {
-			// Redis is a cache, never a source of truth: the committed database
-			// state stands and the event is retried.
-			slog.Error("leaderboard_cache_update_failed",
-				"user_id", ev.UserID, "aggregate_version", ev.AggregateVersion, "error", err)
-			return err
-		}
-	}
-
-	// 2. Derived projections. Their failure is logged and retried via the event,
-	//    but it can never undo the committed mutation.
+	// Derived projections. Their failure is logged and retried via the event,
+	// but it can never undo the committed mutation.
 	if p.rankedSnapshots != nil {
 		if err := p.rankedSnapshots.RecordMutationSnapshot(ctx, ev); err != nil {
 			return err

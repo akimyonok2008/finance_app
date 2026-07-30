@@ -142,8 +142,14 @@ func TestBuild_PrefersFreshRankingProjectionOverLiveValues(t *testing.T) {
 	assert.Equal(t, 20.0, board[0].RankedReturnPercentage.Float64())
 }
 
-func TestBuild_FallsBackToLiveWhenRankingStale(t *testing.T) {
+// TestBuild_ServesProjectionEvenWhenStale locks in the degrade-don't-compute
+// contract: a promoted generation past its freshness window is still served
+// (warn-logged for alerting) rather than flipping every request onto the
+// O(population) live path. See useRanking's doc for why.
+func TestBuild_ServesProjectionEvenWhenStale(t *testing.T) {
 	users := []auth.User{user("u1", "Alpha"), user("u2", "Beta")}
+	// Live values would rank Beta first; the (stale) projection disagrees so
+	// the test proves which path served the read.
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary("8", "108"), "u2": summary("12", "112"),
 	}}
@@ -156,15 +162,15 @@ func TestBuild_FallsBackToLiveWhenRankingStale(t *testing.T) {
 	svc.now = func() time.Time { return epoch.Add(2 * time.Hour) }
 
 	ctx := context.Background()
-	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u1", testIndex("999"), testRatio("899"), time.Time{}))
-	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u2", testIndex("999"), testRatio("899"), time.Time{}))
+	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u1", testIndex("120"), testRatio("20"), time.Time{}))
+	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u2", testIndex("105"), testRatio("5"), time.Time{}))
 	require.NoError(t, ranking.CompleteCycle(ctx))
 
 	board, err := svc.Build(ctx)
 	require.NoError(t, err)
 	require.Len(t, board, 2)
-	assert.Equal(t, "Beta", board[0].DisplayName, "a stale projection must not be trusted")
-	assert.Equal(t, 12.0, board[0].RankedReturnPercentage.Float64())
+	assert.Equal(t, "Alpha", board[0].DisplayName, "the stale projection must still be served")
+	assert.Equal(t, 20.0, board[0].RankedReturnPercentage.Float64())
 }
 
 func TestGetUserRank_UsesRankingWhenFresh(t *testing.T) {
@@ -235,7 +241,10 @@ func TestUserRankings_PrefersRankingProjectionWhenFresh(t *testing.T) {
 	assert.Equal(t, 20.0, rows[0].RankedReturnPercentage.Float64())
 }
 
-func TestUserRankings_FallsBackToLiveWhenRankingStale(t *testing.T) {
+// TestUserRankings_ServesProjectionEvenWhenStale: same degrade-don't-compute
+// contract as Build — the Explore rebuild's input join keeps reading the last
+// promoted generation instead of triggering a full-population live valuation.
+func TestUserRankings_ServesProjectionEvenWhenStale(t *testing.T) {
 	users := []auth.User{user("u1", "Alpha"), user("u2", "Beta")}
 	sums := fakeRanked{byUser: map[string]RankedPerformance{
 		"u1": summary("8", "108"), "u2": summary("12", "112"),
@@ -247,14 +256,14 @@ func TestUserRankings_FallsBackToLiveWhenRankingStale(t *testing.T) {
 	svc.SetRankingStore(ranking)
 	svc.now = func() time.Time { return epoch.Add(2 * time.Hour) }
 	ctx := context.Background()
-	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u1", testIndex("999"), testRatio("899"), time.Time{}))
-	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u2", testIndex("999"), testRatio("899"), time.Time{}))
+	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u1", testIndex("120"), testRatio("20"), time.Time{}))
+	require.NoError(t, ranking.Upsert(ctx, TimeframeAll, "u2", testIndex("105"), testRatio("5"), time.Time{}))
 	require.NoError(t, ranking.CompleteCycle(ctx))
 
 	rows, err := svc.UserRankings(ctx, TimeframeAll)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
-	assert.Equal(t, "u2", rows[0].UserID, "a stale projection must not be trusted")
+	assert.Equal(t, "u1", rows[0].UserID, "the stale projection must still be served")
 }
 
 func TestUserStanding_UsesRankingWhenFresh(t *testing.T) {

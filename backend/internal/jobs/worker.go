@@ -25,12 +25,37 @@ type GlobalLeaderboardRefresher interface {
 	RefreshCache(ctx context.Context) (skipped int, err error)
 }
 
+// GenerationPromotionReporter is an optional capability of
+// GlobalLeaderboardRefresher (implemented by *leaderboard.Service): whether
+// the most recent RefreshCache call promoted a new ranking generation. The
+// worker uses it to rebuild the Explore projection — a full-public-population
+// job — only when the ranking data it derives from actually changed, i.e.
+// once per completed refresh cycle instead of on every tick. Refreshers that
+// don't implement it keep the original refresh-every-tick behavior.
+type GenerationPromotionReporter interface {
+	LastRefreshPromotedGeneration() bool
+}
+
 // SprintMaintainer ensures the current sprint exists and refreshes sprint
 // rankings. Implemented by *competitions.Service.
 type SprintMaintainer interface {
 	EnsureCurrentSprint(ctx context.Context) error
 	ListActiveCompetitionIDs(ctx context.Context) ([]string, error)
 	RefreshCache(ctx context.Context, competitionID string) (skipped int, err error)
+}
+
+// CompetitionEngineMaintainer is an optional capability of SprintMaintainer
+// (implemented by *competitions.Service): the generic competition engine's
+// scheduled work — advancing edition lifecycles as their timestamps arrive,
+// establishing common start-time baselines for admitted entries, refreshing
+// each active edition's ranking-generation projection, and finalizing
+// editions whose competition ended. All four are idempotent and guarded, so
+// leader-gated ticks are safe to repeat.
+type CompetitionEngineMaintainer interface {
+	AdvanceCompetitionLifecycles(ctx context.Context) error
+	RunCompetitionBaselines(ctx context.Context) (completed int, err error)
+	RefreshCompetitionRankings(ctx context.Context) error
+	FinalizeCompetitions(ctx context.Context) (finalized int, err error)
 }
 
 // PortfolioSnapshotter records daily portfolio archive snapshots for all users,
@@ -57,6 +82,17 @@ type Worker struct {
 	explore   ExploreProjectionRefresher // optional
 	interval  time.Duration
 	leader    Leader // optional; nil means "always leader"
+
+	// explorePending and exploreRanOnce gate the Explore rebuild when the
+	// global refresher reports generation promotions (see
+	// GenerationPromotionReporter). explorePending latches true on every
+	// promotion and only clears on a successful rebuild, so a failed rebuild
+	// retries on the next tick instead of waiting a full cycle. exploreRanOnce
+	// forces one rebuild on the first pass after startup, covering a restart
+	// where the previous process promoted a generation this one never saw.
+	// Both are touched only from the worker goroutine — no locking needed.
+	explorePending bool
+	exploreRanOnce bool
 }
 
 // NewWorker wires a Worker that runs every interval.
@@ -126,21 +162,72 @@ func (w *Worker) runIfLeader(ctx context.Context) {
 // trigger a full pass synchronously.
 func (w *Worker) RunOnce(ctx context.Context) {
 	w.ensureSprint(ctx)
+	w.maintainCompetitionEngine(ctx)
 	w.refreshGlobal(ctx)
 	w.refreshExplore(ctx)
 	w.refreshSprints(ctx)
 	w.recordSnapshots(ctx)
 }
 
+// maintainCompetitionEngine advances edition lifecycles and runs baseline
+// passes when the sprint maintainer implements the engine capability.
+func (w *Worker) maintainCompetitionEngine(ctx context.Context) {
+	engine, ok := w.sprints.(CompetitionEngineMaintainer)
+	if !ok {
+		return
+	}
+	if err := engine.AdvanceCompetitionLifecycles(ctx); err != nil {
+		slog.Error("job: competition lifecycle advance failed", "error", err)
+	}
+	completed, err := engine.RunCompetitionBaselines(ctx)
+	if err != nil {
+		slog.Error("job: competition baselines failed", "error", err)
+		return
+	}
+	if completed > 0 {
+		slog.Info("job: competition baselines completed", "entries", completed)
+	}
+
+	if err := engine.RefreshCompetitionRankings(ctx); err != nil {
+		slog.Error("job: competition ranking refresh failed", "error", err)
+	}
+
+	finalized, err := engine.FinalizeCompetitions(ctx)
+	if err != nil {
+		slog.Error("job: competition finalization failed", "error", err)
+		return
+	}
+	if finalized > 0 {
+		slog.Info("job: competitions finalized", "count", finalized)
+	}
+}
+
 func (w *Worker) refreshExplore(ctx context.Context) {
 	if w.explore == nil {
 		return
 	}
+	// Rebuilding the Explore projection walks the entire public population.
+	// When the global refresher can report promotions, run the rebuild only
+	// when a new ranking generation was actually published (or on the first
+	// pass, or while retrying an earlier failure) — its inputs are otherwise
+	// identical to the last rebuild, so running it every tick is pure load.
+	if reporter, ok := w.global.(GenerationPromotionReporter); ok {
+		if reporter.LastRefreshPromotedGeneration() {
+			w.explorePending = true
+		}
+		if !w.explorePending && w.exploreRanOnce {
+			slog.Debug("job: explore projection refresh skipped, no new ranking generation")
+			return
+		}
+	}
 	rows, err := w.explore.RefreshExploreProjection(ctx)
 	if err != nil {
+		w.explorePending = true
 		slog.Error("job: explore projection refresh failed", "error", err)
 		return
 	}
+	w.explorePending = false
+	w.exploreRanOnce = true
 	slog.Info("job: explore projection refreshed", "rows", rows)
 }
 

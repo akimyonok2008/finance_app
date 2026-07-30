@@ -24,6 +24,15 @@ test("registration, token scrubbing, login, and dashboard accessibility @browser
   await expect(page).toHaveURL(/\/verify-email$/);
   await expect(page.getByText("Email verified")).toBeVisible();
 
+  // The verify-email response carries the session only via HttpOnly
+  // cookie, never a token in the body — acceptSession must still treat
+  // this as authenticated. Follow the page's own "Open dashboard" link
+  // rather than navigating directly, so this exercises the same
+  // isAuthenticated check ProtectedRoute makes, not just the cookie.
+  await page.getByRole("link", { name: "Open dashboard" }).click();
+  await expect(page).toHaveURL(/\/dashboard/);
+  await expect(page.getByRole("main")).toBeVisible();
+
   await page.context().clearCookies();
   await loginInBrowser(page, email, password);
   await expect(page.getByRole("main")).toBeVisible();

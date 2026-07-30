@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import {
+  AuthApiError,
   loginWithEmailRequest,
   loginWithGoogleRequest,
   mockLogin,
@@ -16,7 +17,12 @@ import type {
   LoginFormValues,
 } from "@/types/auth";
 
-const MOCK_ENABLED = import.meta.env.VITE_ENABLE_MOCK_AUTH === "true";
+// import.meta.env.DEV is set by Vite itself based on the build mode (`vite
+// build` always produces DEV=false), not by any env var — so this can't be
+// flipped on in a production build just by passing a build ARG, unlike
+// VITE_ENABLE_MOCK_AUTH alone.
+const MOCK_ENABLED =
+  import.meta.env.DEV && import.meta.env.VITE_ENABLE_MOCK_AUTH === "true";
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Initialize synchronously from localStorage — no effect needed.
@@ -36,7 +42,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const session = await loginWithEmailRequest(values);
         persist(session.token, session.user);
       } catch (err) {
-        if (MOCK_ENABLED) {
+        // Only fall back when the backend itself couldn't be reached
+        // (AuthApiError means it WAS reached and rejected the request, e.g.
+        // wrong password) — otherwise a live backend's real 401 would be
+        // silently swallowed and replaced with a fake successful login,
+        // masking genuine auth bugs during dev/testing.
+        if (MOCK_ENABLED && !(err instanceof AuthApiError)) {
+          console.warn(
+            "[mock-auth] backend unreachable; signing in as a fake mock user because VITE_ENABLE_MOCK_AUTH=true",
+            err,
+          );
           const session = await mockLogin(values);
           persist(session.token, session.user);
           return;

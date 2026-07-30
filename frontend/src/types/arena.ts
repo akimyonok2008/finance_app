@@ -1,21 +1,79 @@
-// Arena deliberately shows rank and percentage performance only. The broader
-// product policy permits symbols on separately opted-in public profiles, but
-// this DTO must never render portfolio values, holdings, quantities, symbols,
-// average buy prices, email, user id, or portfolio id.
+// Arena deliberately shows rank and percentage performance only. Backend DTOs
+// never carry portfolio values, holdings, quantities, symbols, average
+// purchase prices, cash balances, email, user id, or portfolio id.
+//
+// Percentage/index fields are the backend's authoritative decimal-string
+// contract (see src/utils/decimal.ts) — they arrive as strings like
+// "12.34", never as JS numbers, and must only be converted at a formatting
+// boundary (formatPercent / decimalToChartNumber), never for arithmetic.
+import type { DecimalString } from "@/utils/decimal";
 
-export type ActiveSprint = {
+/** One catalogue card: a legacy weekly sprint OR an engine competition edition. */
+export type ArenaCompetitionCard = {
   id: string;
   name: string;
+  description?: string;
+  category?: string;
+  iconKey?: string;
+  /** Raw backend status: legacy derives upcoming/active/completed; engine editions report their stored lifecycle (draft/published/registration_open/registration_closed/active/finalizing/completed/cancelled). */
+  status: string;
+  startsAt: string;
   endsAt: string;
-  rules: string[];
-  isJoined: boolean;
+  joinOpensAt?: string;
+  joinClosesAt?: string;
+  scoringScope?: string;
+  participantCount: number;
+  joined: boolean;
+  entryStatus?: string;
 };
 
-export type CohortLeaderboardEntry = {
+export type EligibilityRuleResult = {
+  code: string;
+  label: string;
+  required: string;
+  actual: string;
+  passed: boolean;
+  reason?: string;
+};
+
+export type EligibilityPreview = {
+  eligible: boolean;
+  evaluatedAt: string;
+  rules: EligibilityRuleResult[];
+};
+
+export type CompetitionStatus = {
+  competitionId: string;
+  joined: boolean;
+  entryStatus?: string;
+  currentRank: number;
+  returnPercentage: DecimalString;
+  index: DecimalString;
+  valuedAt?: string;
+};
+
+export type LeaderboardRow = {
   rank: number;
-  username: string;
-  roi: number;
+  displayName: string;
+  avatarKey?: string;
+  returnPercentage: DecimalString;
+  index: DecimalString;
   isCurrentUser: boolean;
+};
+
+export type LeaderboardPage = {
+  entries: LeaderboardRow[];
+  nextCursor?: number;
+  valuedAt?: string;
+  /** No ranking generation has ever been promoted yet — a controlled "not ready", never a live scan. */
+  unavailable: boolean;
+};
+
+export type JoinResult = {
+  competitionId: string;
+  joined: boolean;
+  entryStatus: string;
+  eligibility: EligibilityRuleResult[];
 };
 
 export type Achievement = {
@@ -30,10 +88,4 @@ export type Achievement = {
   period?: string;
   inspiredBy?: string;
   edgePoints?: number;
-};
-
-export type JoinSprintResponse = {
-  success: boolean;
-  sprintId: string;
-  isJoined: boolean;
 };

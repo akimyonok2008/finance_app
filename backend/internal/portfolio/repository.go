@@ -119,8 +119,9 @@ type InMemoryRepository struct {
 	archives      []*PortfolioArchiveSnapshot
 	archiveDays   map[string]bool // "portfolioID|YYYY-MM-DD" uniqueness guard
 
-	outbox  []OutboxEvent
-	claimed map[string]bool
+	outbox      []OutboxEvent
+	claimed     map[string]bool
+	nextAttempt map[string]time.Time // outbox event id -> earliest retry time (backoff)
 
 	auditMu  sync.RWMutex
 	audits   map[string]MutationAudit // by request id (idempotency)
@@ -140,6 +141,7 @@ func NewInMemoryRepository() *InMemoryRepository {
 		archives:       make([]*PortfolioArchiveSnapshot, 0),
 		archiveDays:    make(map[string]bool),
 		claimed:        make(map[string]bool),
+		nextAttempt:    make(map[string]time.Time),
 		audits:         make(map[string]MutationAudit),
 		reconciliation: make(map[string]ReconciliationItem),
 	}

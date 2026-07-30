@@ -56,6 +56,40 @@ func TestPostgresUserRepository_CreateAndFind(t *testing.T) {
 	assert.Equal(t, u.Email, byID.Email)
 }
 
+// TestPostgresUserRepository_ListUsersPageWalksWholePopulation proves the
+// keyset page query behind ListRankableUsersPage: starting from the empty
+// cursor (mapped to the nil UUID), successive pages are strictly ascending by
+// id, terminate, and collectively cover every non-deleted user exactly once.
+func TestPostgresUserRepository_ListUsersPageWalksWholePopulation(t *testing.T) {
+	repo := NewPostgresUserRepository(testPool(t))
+	created := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		u := newPGUser("Paged")
+		require.NoError(t, repo.Create(u))
+		created[u.ID] = true
+	}
+
+	seen := map[string]int{}
+	cursor := ""
+	prev := ""
+	for {
+		page, err := repo.ListUsersPage(context.Background(), cursor, 3)
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		for _, u := range page {
+			require.Greater(t, u.ID, prev, "pages must be strictly ascending by id")
+			prev = u.ID
+			seen[u.ID]++
+		}
+		cursor = page[len(page)-1].ID
+	}
+	for id := range created {
+		assert.Equal(t, 1, seen[id], "every created user must appear exactly once")
+	}
+}
+
 func TestPostgresUserRepository_DuplicateEmailFails(t *testing.T) {
 	repo := NewPostgresUserRepository(testPool(t))
 	u := newPGUser("Alpha")

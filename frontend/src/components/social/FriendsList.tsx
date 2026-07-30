@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { useCreateConversation } from "@/hooks/useDM";
 import type { FriendItem } from "@/types/social";
+import { avatarInitials } from "@/utils/avatarInitials";
 
 type Props = {
   friends: FriendItem[];
@@ -34,8 +35,8 @@ export function FriendsList({ friends, empty, canMessage = false }: Props) {
           <div className="pointer-events-none absolute right-3 top-3 h-12 w-12 rounded-full bg-sky-400/[0.035] blur-xl" />
           <div className="flex items-start justify-between gap-3">
             <div className="relative flex min-w-0 items-center gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-violet-300/20 bg-gradient-to-br from-violet-400/[0.13] to-sky-400/[0.07] font-mono text-[10px] font-medium uppercase text-violet-50">
-                {friend.avatar_key || friend.handle.slice(0, 2)}
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-violet-300/20 bg-gradient-to-br from-violet-400/[0.13] to-sky-400/[0.07] font-mono text-[10px] font-medium uppercase text-violet-50">
+                {avatarInitials(friend.avatar_key, friend.handle)}
               </div>
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-zinc-100">{friend.display_name}</div>

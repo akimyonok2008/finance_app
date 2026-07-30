@@ -362,6 +362,89 @@ func TestPG_OutboxClaimingSkipsLockedRows(t *testing.T) {
 	}
 }
 
+// TestPG_OutboxDeadLettersAfterMaxAttempts proves a permanently failing event
+// (an unpriceable symbol, a provider outage) stops being retried forever: once
+// attempt_count reaches outboxMaxAttempts it is dead-lettered and excluded from
+// both future claims and the readiness backlog, so it can no longer keep
+// oldest_age growing without bound.
+func TestPG_OutboxDeadLettersAfterMaxAttempts(t *testing.T) {
+	pool := testPool(t)
+	repo := NewPostgresRepository(pool)
+	userID := seedUser(t, pool)
+	ctx := context.Background()
+	pf, err := repo.EnsureDefaultPortfolio(ctx, userID)
+	require.NoError(t, err)
+
+	eventID := uuid.NewString()
+	require.NoError(t, repo.WithLockedPortfolio(ctx, userID, func(ctx context.Context, tx AggregateTx) error {
+		return tx.AppendOutbox(ctx, OutboxEvent{
+			ID: eventID, EventType: EventPortfolioMutated,
+			AggregateType: "portfolio", AggregateID: pf.ID, AggregateVersion: 1,
+			UserID: userID, RankedIndex: testIndex("100"), RankingStatus: "active",
+			TrackingStartedAt: time.Now().UTC().Add(-time.Hour),
+			ValuationAsOf:     time.Now().UTC(),
+			DataQualityStatus: "complete",
+			CreatedAt:         time.Now().UTC(),
+		})
+	}))
+
+	// This test runs alongside other TestPG_* tests that append and intentionally
+	// abandon their own outbox rows in the same shared table (by design - see the
+	// package comment above). ClaimOutboxEvents and OutboxBacklog operate
+	// system-wide with no per-test scoping, so assertions here must find/exclude
+	// this test's own eventID specifically rather than assert on the total
+	// claimed count or the total backlog size.
+	for i := 0; i < outboxMaxAttempts; i++ {
+		// Bypass backoff so the loop doesn't have to sleep between claims.
+		_, err := pool.Exec(ctx, `UPDATE portfolio_outbox SET next_attempt_at = NULL WHERE id = $1`, eventID)
+		require.NoError(t, err)
+
+		// A large limit so other tests' abandoned rows (older by created_at,
+		// claimed first) can't push this event out of the claimed batch.
+		claimed, err := repo.ClaimOutboxEvents(ctx, 1000)
+		require.NoError(t, err)
+		require.True(t, containsOutboxEvent(claimed, eventID), "attempt %d: event should still be claimable", i+1)
+
+		require.NoError(t, repo.MarkOutboxFailed(ctx, eventID, "price provider error"))
+	}
+
+	// Attempts exhausted: the event is dead-lettered and no longer claimable.
+	_, err = pool.Exec(ctx, `UPDATE portfolio_outbox SET next_attempt_at = NULL WHERE id = $1`, eventID)
+	require.NoError(t, err)
+	claimed, err := repo.ClaimOutboxEvents(ctx, 1000)
+	require.NoError(t, err)
+	assert.False(t, containsOutboxEvent(claimed, eventID), "dead-lettered event must not be claimed again")
+
+	var deadLetteredAt *time.Time
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT dead_lettered_at FROM portfolio_outbox WHERE id = $1`, eventID).Scan(&deadLetteredAt))
+	require.NotNil(t, deadLetteredAt, "event should be marked dead-lettered")
+
+	// The readiness backlog must not see the dead-lettered event either -
+	// otherwise its ever-growing age would still fail readiness forever. Query
+	// with the same predicate OutboxBacklog uses, scoped to this event, since
+	// other tests' abandoned rows make the total backlog count non-zero.
+	var stillPending bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio_outbox
+			WHERE processed_at IS NULL AND dead_lettered_at IS NULL AND id = $1
+		)`, eventID).Scan(&stillPending))
+	assert.False(t, stillPending, "dead-lettered event must not count toward backlog")
+}
+
+// containsOutboxEvent reports whether id appears among claimed events. Used
+// instead of asserting on claimed's total length, since ClaimOutboxEvents
+// claims system-wide and other tests may have their own rows in flight.
+func containsOutboxEvent(claimed []OutboxEvent, id string) bool {
+	for _, ev := range claimed {
+		if ev.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPG_CancelledContextRollsBack(t *testing.T) {
 	pool := testPool(t)
 	repo := NewPostgresRepository(pool)

@@ -1,81 +1,85 @@
 import { motion } from "framer-motion";
-import { Users } from "lucide-react";
+import { Trophy } from "lucide-react";
 
-import {
-  formatSignedPercent,
-  getPercentClassName,
-} from "@/pages/arena/arenaUtils";
-import type { CohortLeaderboardEntry } from "@/types/arena";
+import { formatSignedPercent, getPercentClassName } from "@/pages/arena/arenaUtils";
+import type { LeaderboardRow } from "@/types/arena";
 import { cn } from "@/utils/cn";
 
-export function CohortLeaderboard({
-  entries,
+export function CompetitionLeaderboardTable({
+  title,
+  subtitle,
+  rows,
   isError,
+  isLoading,
+  emptyLabel = "No rankings yet",
+  emptyHint,
 }: {
-  entries: CohortLeaderboardEntry[] | undefined;
-  isLoading?: boolean;
+  title: string;
+  subtitle?: string;
+  rows: LeaderboardRow[] | undefined;
   isError?: boolean;
+  isLoading?: boolean;
+  emptyLabel?: string;
+  emptyHint?: string;
 }) {
   return (
     <section
-      aria-labelledby="cohort-heading"
+      aria-labelledby="competition-leaderboard-heading"
       className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 shadow-sm shadow-black/20"
     >
       <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
         <div className="flex items-center gap-2">
           <div className="grid h-9 w-9 place-items-center rounded-lg border border-zinc-800 bg-zinc-950/50 text-zinc-400">
-            <Users className="h-4 w-4" />
+            <Trophy className="h-4 w-4" />
           </div>
           <div>
-            <h2 id="cohort-heading" className="text-sm font-semibold text-zinc-100">
-              Cohort leaderboard
+            <h2 id="competition-leaderboard-heading" className="text-sm font-semibold text-zinc-100">
+              {title}
             </h2>
-            <p className="text-xs text-zinc-500">Percentage only</p>
+            {subtitle && <p className="text-xs text-zinc-500">{subtitle}</p>}
           </div>
         </div>
         <span className="font-mono text-xs tabular-nums text-zinc-500">
-          {entries?.length ?? 0} ranked
+          {rows?.length ?? 0} ranked
         </span>
       </div>
 
       {isError ? (
         <div className="px-5 py-12 text-center text-sm text-rose-300">
-          Cohort rankings are temporarily unavailable.
+          Rankings are temporarily unavailable.
         </div>
-      ) : !entries?.length ? (
+      ) : isLoading ? (
+        <div className="px-5 py-12 text-center text-sm text-zinc-500">Loading rankings…</div>
+      ) : !rows?.length ? (
         <div className="px-5 py-12 text-center">
-          <p className="text-sm font-medium text-zinc-300">
-            No cohort rankings yet
-          </p>
-          <p className="mt-1 text-xs text-zinc-500">
-            Join the sprint to appear here.
-          </p>
+          <p className="text-sm font-medium text-zinc-300">{emptyLabel}</p>
+          {emptyHint && <p className="mt-1 text-xs text-zinc-500">{emptyHint}</p>}
         </div>
       ) : (
         <div>
           <div className="grid grid-cols-[4rem_1fr_auto] border-b border-zinc-800 px-4 py-3 text-xs uppercase tracking-[0.18em] text-zinc-500">
             <span>Rank</span>
             <span>User</span>
-            <span>ROI</span>
+            <span>Return</span>
           </div>
-          {entries.map((entry, index) => (
+          {rows.map((row, index) => (
             <motion.div
-              key={`${entry.rank}-${entry.username}`}
+              key={`${row.rank}-${row.displayName}`}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.18, delay: Math.min(index * 0.03, 0.25) }}
+              transition={{ duration: 0.18, delay: Math.min(index * 0.02, 0.2) }}
               className={cn(
                 "grid grid-cols-[4rem_1fr_auto] items-center border-b border-zinc-800/70 px-4 py-3 transition last:border-0 hover:bg-white/[0.03]",
-                entry.isCurrentUser &&
+                row.isCurrentUser &&
                   "bg-violet-500/[0.035] ring-1 ring-inset ring-violet-500/20",
               )}
             >
               <span className="font-mono text-sm font-semibold tabular-nums text-zinc-400">
-                #{entry.rank}
+                #{row.rank}
               </span>
               <span className="truncate text-sm font-medium text-zinc-200">
-                {entry.username}
-                {entry.isCurrentUser && (
+                {row.displayName}
+                {row.isCurrentUser && (
                   <span className="ml-2 text-[10px] uppercase tracking-widest text-violet-300">
                     You
                   </span>
@@ -84,10 +88,10 @@ export function CohortLeaderboard({
               <span
                 className={cn(
                   "font-mono text-sm font-semibold tabular-nums",
-                  getPercentClassName(entry.roi),
+                  getPercentClassName(row.returnPercentage),
                 )}
               >
-                {formatSignedPercent(entry.roi)}
+                {formatSignedPercent(row.returnPercentage)}
               </span>
             </motion.div>
           ))}

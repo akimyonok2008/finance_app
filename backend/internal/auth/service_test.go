@@ -57,6 +57,22 @@ func TestRegister_ValidUserCreatesUnverifiedUserWithoutToken(t *testing.T) {
 	assert.Empty(t, token, "registration must not create an authenticated session")
 }
 
+// TestRegister_PublicResponseHasDefaultRole guards against the returned user
+// struct leaking role:"" into the register response DTO: the repository
+// backfills Role on its own stored copy (see InMemoryUserRepository.Create),
+// which never mutates the *User the caller (and thus the HTTP handler) holds.
+// Login doesn't have this gap because it always re-reads the user from the
+// repository, but Register returns the same struct it built.
+func TestRegister_PublicResponseHasDefaultRole(t *testing.T) {
+	svc := newTestService()
+
+	user, _, err := svc.Register(validInput())
+
+	require.NoError(t, err)
+	assert.Equal(t, RoleUser, user.Role)
+	assert.Equal(t, RoleUser, user.Public().Role)
+}
+
 func TestRegisterInitializesRequiredAccountAggregates(t *testing.T) {
 	svc := newTestService()
 	hook := &recordingCreationHook{}
@@ -279,6 +295,7 @@ func TestProviderLogin_NewGoogleIdentityCreatesUser(t *testing.T) {
 	assert.Equal(t, "new@example.com", user.Email)
 	assert.Equal(t, "New Investor", user.DisplayName)
 	assert.NotEmpty(t, token)
+	assert.Equal(t, RoleUser, user.Public().Role, "new provider signup must not leak role:\"\"")
 }
 
 func TestProviderLogin_ExistingIdentityLogsInUser(t *testing.T) {

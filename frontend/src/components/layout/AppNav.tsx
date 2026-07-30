@@ -5,6 +5,7 @@ import {
   LogOut,
   Medal,
   Settings,
+  Swords,
   Trophy,
   WalletCards,
 } from "lucide-react";
@@ -24,6 +25,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/portfolio", label: "Portfolio", icon: WalletCards },
   { to: "/leaderboard", label: "Leaderboard", icon: Medal },
+  { to: "/arena", label: "Arena", icon: Swords },
   { to: "/achievements", label: "Achievements", icon: Trophy },
   { to: "/explore", label: "Explore", icon: Compass },
   { to: "/profile", label: "Profile", icon: CircleUserRound },

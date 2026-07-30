@@ -15,12 +15,12 @@ export function ArenaEmptyState({
       <h2 className="mt-5 text-xl font-semibold tracking-tight">
         {error
           ? "Arena data is temporarily unavailable."
-          : "No active sprint right now"}
+          : "No competitions right now"}
       </h2>
       <p className="mt-2 max-w-md text-sm text-zinc-400">
         {error
           ? "Please try again in a moment."
-          : "The next sprint will appear here."}
+          : "New competitions will appear here as they open."}
       </p>
       {onRetry && (
         <button

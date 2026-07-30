@@ -2,39 +2,77 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useState } from "react";
 
 import { AppNav } from "@/components/layout/AppNav";
-import { useArena } from "@/hooks/useArena";
+import { useAchievements, useArenaCatalogue } from "@/hooks/useArena";
 import { ArenaEmptyState } from "@/pages/arena/ArenaEmptyState";
 import { ArenaSkeleton } from "@/pages/arena/ArenaSkeleton";
-import { CohortLeaderboard } from "@/pages/arena/CohortLeaderboard";
-import { SprintLobby } from "@/pages/arena/SprintLobby";
+import { CompetitionCard } from "@/pages/arena/CompetitionCard";
 import { TrophyCase } from "@/pages/arena/TrophyCase";
+import type { ArenaCompetitionCard } from "@/types/arena";
 import { cn } from "@/utils/cn";
 
-type MobileTab = "sprint" | "trophies";
+type MobileTab = "competitions" | "trophies";
+
+function CompetitionSection({
+  title,
+  subtitle,
+  competitions,
+}: {
+  title: string;
+  subtitle?: string;
+  competitions: ArenaCompetitionCard[];
+}) {
+  if (competitions.length === 0) return null;
+  return (
+    <section aria-label={title}>
+      <div className="mb-4 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-zinc-400">
+          {title}
+        </h2>
+        {subtitle && <span className="text-xs text-zinc-500">{subtitle}</span>}
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {competitions.map((competition, index) => (
+          <CompetitionCard key={competition.id} competition={competition} index={index} />
+        ))}
+      </div>
+    </section>
+  );
+}
 
 export function ArenaPage() {
-  const arena = useArena();
-  const [mobileTab, setMobileTab] = useState<MobileTab>("sprint");
+  const catalogueQuery = useArenaCatalogue();
+  const achievementsQuery = useAchievements();
+  const [mobileTab, setMobileTab] = useState<MobileTab>("competitions");
 
-  const liveSprint = (
-    <div className="space-y-8">
-      <SprintLobby
-        sprint={arena.sprint}
-        isError={Boolean(arena.errors.sprint)}
-        onJoin={arena.joinSprint}
-        isJoining={arena.isJoiningSprint}
-      />
-      <CohortLeaderboard
-        entries={arena.leaderboard}
-        isError={Boolean(arena.errors.leaderboard)}
-      />
+  const cards = catalogueQuery.data ?? [];
+  const live = cards.filter((c) => c.status === "active");
+  const upcoming = cards.filter(
+    (c) =>
+      c.status !== "active" &&
+      c.status !== "completed" &&
+      c.status !== "cancelled" &&
+      !c.joined,
+  );
+  const mine = cards.filter((c) => c.joined && c.status !== "completed");
+  const completed = cards.filter((c) => c.status === "completed");
+
+  const isLoading = catalogueQuery.isLoading || achievementsQuery.isLoading;
+  const isError = catalogueQuery.isError;
+
+  const competitionsView = (
+    <div className="space-y-10">
+      <CompetitionSection title="Live" competitions={live} />
+      <CompetitionSection title="My competitions" competitions={mine} />
+      <CompetitionSection title="Upcoming" competitions={upcoming} />
+      <CompetitionSection title="Completed" competitions={completed} />
+      {cards.length === 0 && !isError && <ArenaEmptyState />}
     </div>
   );
 
   const trophies = (
     <TrophyCase
-      achievements={arena.achievements}
-      isError={Boolean(arena.errors.achievements)}
+      achievements={achievementsQuery.data}
+      isError={Boolean(achievementsQuery.error)}
     />
   );
 
@@ -49,22 +87,20 @@ export function ArenaPage() {
           transition={{ duration: 0.35 }}
           className="mb-8"
         >
-          <h1 className="text-3xl font-medium tracking-tight">
-            Arena
-          </h1>
-          <p className="mt-2 text-sm text-zinc-400">Sprints, rankings, and trophies.</p>
+          <h1 className="text-3xl font-medium tracking-tight">Arena</h1>
+          <p className="mt-2 text-sm text-zinc-400">
+            Time-bound competitions, independent from the global leaderboard.
+          </p>
         </motion.header>
 
-        {arena.isLoading ? (
+        {isLoading ? (
           <ArenaSkeleton />
-        ) : arena.isError ? (
-          <ArenaEmptyState error onRetry={arena.refetch} />
+        ) : isError ? (
+          <ArenaEmptyState error onRetry={() => catalogueQuery.refetch()} />
         ) : (
           <>
             <div className="hidden lg:grid lg:grid-cols-3 lg:gap-8">
-              <section className="space-y-8 lg:col-span-2">
-                {liveSprint}
-              </section>
+              <div className="space-y-10 lg:col-span-2">{competitionsView}</div>
               <aside className="lg:col-span-1">{trophies}</aside>
             </div>
 
@@ -75,7 +111,7 @@ export function ArenaPage() {
                 className="mb-5 grid grid-cols-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-1"
               >
                 {[
-                  { label: "Live Sprint", value: "sprint" },
+                  { label: "Competitions", value: "competitions" },
                   { label: "My Trophies", value: "trophies" },
                 ].map((tab) => (
                   <button
@@ -103,7 +139,7 @@ export function ArenaPage() {
                   exit={{ opacity: 0, y: -8 }}
                   transition={{ duration: 0.18 }}
                 >
-                  {mobileTab === "sprint" ? liveSprint : trophies}
+                  {mobileTab === "competitions" ? competitionsView : trophies}
                 </motion.div>
               </AnimatePresence>
             </div>

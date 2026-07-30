@@ -54,6 +54,10 @@ type Deps struct {
 	ReadinessChecks []ReadinessCheck
 	// Info is static metadata echoed by GET /ready (storage_provider, ...).
 	Info map[string]string
+	// OutboxAdmin is optional; when set it backs the operations-only
+	// GET/POST /outbox/dead-letters endpoints for inspecting and requeuing
+	// outbox events that exhausted their retry budget.
+	OutboxAdmin OutboxAdmin
 
 	// AppEnv and CORSAllowedOrigins configure the CORS policy (see corsMiddleware
 	// in web.go): production requires an explicit allow-list rather than
@@ -124,8 +128,10 @@ func New(d Deps) http.Handler {
 	r.Use(trustedRealIPMiddleware(d.TrustedProxyCIDRs))
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(sentryMiddleware)
 	r.Use(maxBodyBytes(globalBodyLimit))
 	r.Use(metricsMiddleware)
+	r.Use(securityHeaders(d.AppEnv))
 	r.Use(corsMiddleware(d.AppEnv, d.CORSAllowedOrigins))
 
 	authHandler := auth.NewHandler(d.Auth, strings.EqualFold(d.AppEnv, "production"))
@@ -198,6 +204,19 @@ func New(d Deps) http.Handler {
 	reportLimiter := newRateLimiter(d.RateLimitRedis, "reports", 5, 15*time.Minute)
 	blockLimiter := newRateLimiter(d.RateLimitRedis, "blocks", 30, 5*time.Minute)
 	messageLimiter := newRateLimiter(d.RateLimitRedis, "messages", 30, time.Minute)
+	// quotesLimiter bounds how fast one caller can drive GET /quotes, which
+	// proxies a metered third-party market-data API paid for out of a shared
+	// daily request budget (TWELVE_DATA_DAILY_REQUEST_BUDGET). Without it any
+	// logged-in user can drain the whole day's budget for every user in
+	// seconds — quotes then fail closed, which cascades into whatever else
+	// depends on live pricing.
+	quotesLimiter := newRateLimiter(d.RateLimitRedis, "quotes", 30, time.Minute)
+	// leaderboardLimiter, exploreLimiter, and historyLimiter bound the other
+	// read endpoints called out as unbounded: each does nontrivial ranking/
+	// aggregation work per request and none is otherwise rate-limited.
+	leaderboardLimiter := newRateLimiter(d.RateLimitRedis, "leaderboard", 60, time.Minute)
+	exploreLimiter := newRateLimiter(d.RateLimitRedis, "profiles-explore", 60, time.Minute)
+	historyLimiter := newRateLimiter(d.RateLimitRedis, "performance-history", 60, time.Minute)
 
 	// Public auth routes.
 	r.Route("/auth", func(r chi.Router) {
@@ -229,7 +248,7 @@ func New(d Deps) http.Handler {
 
 		if marketDataHandler != nil {
 			r.Get("/instruments/search", marketDataHandler.SearchInstruments)
-			r.Get("/quotes", marketDataHandler.Quotes)
+			r.With(rateLimitMiddlewareByKey(quotesLimiter, authenticatedUserOrIPKey)).Get("/quotes", marketDataHandler.Quotes)
 		}
 		if socialHandler != nil {
 			r.Post("/social/follows/{handle}", socialHandler.Follow)
@@ -321,16 +340,21 @@ func New(d Deps) http.Handler {
 		// history and is distorted by deposits and withdrawals). The archive is
 		// still served separately at /portfolio/archives for the value chart.
 		if performanceHistoryHandler != nil {
-			r.Get("/performance/history", performanceHistoryHandler.History)
+			r.With(rateLimitMiddlewareByKey(historyLimiter, authenticatedUserOrIPKey)).Get("/performance/history", performanceHistoryHandler.History)
 		}
 
-		r.Get("/leaderboard", leaderboardHandler.GetLeaderboard)
+		r.With(rateLimitMiddlewareByKey(leaderboardLimiter, authenticatedUserOrIPKey)).Get("/leaderboard", leaderboardHandler.GetLeaderboard)
 		r.Get("/leaderboard/me", leaderboardHandler.GetMyStanding)
 
 		r.Get("/competitions", competitionHandler.ListCompetitions)
+		r.Get("/arena/competitions", competitionHandler.GetArenaCatalogue)
+		r.Get("/arena/competitions/{competitionId}", competitionHandler.GetArenaCatalogueItem)
+		r.Get("/competitions/{competitionId}/eligibility", competitionHandler.GetCompetitionEligibility)
 		r.Post("/competitions/{competitionId}/join", competitionHandler.JoinCompetition)
+		r.Delete("/competitions/{competitionId}/entry", competitionHandler.WithdrawFromCompetition)
 		r.Get("/competitions/{competitionId}/me", competitionHandler.GetMyCompetitionStatus)
 		r.Get("/competitions/{competitionId}/leaderboard", competitionHandler.GetCompetitionLeaderboard)
+		r.Get("/competitions/{competitionId}/results", competitionHandler.GetCompetitionResults)
 
 		r.Get("/achievements", achievementHandler.ListAchievements)
 		r.Post("/achievements/evaluate", achievementHandler.Evaluate)
@@ -344,7 +368,7 @@ func New(d Deps) http.Handler {
 			r.With(maxBodyBytes(profileBodyLimit)).Patch("/profiles/me", profileHandler.UpdateMe)
 			// Static segment registered before {handle} so Explore is never
 			// shadowed by the public-profile wildcard.
-			r.Get("/profiles/explore", profileHandler.Explore)
+			r.With(rateLimitMiddlewareByKey(exploreLimiter, authenticatedUserOrIPKey)).Get("/profiles/explore", profileHandler.Explore)
 			r.Get("/profiles/{handle}", profileHandler.GetPublic)
 		}
 	})
@@ -363,5 +387,9 @@ func NewOperations(d Deps) http.Handler {
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler(d.ReadinessChecks, d.Info))
 	r.Handle("/metrics", metricsHandler())
+	if d.OutboxAdmin != nil {
+		r.Get("/outbox/dead-letters", listDeadLettersHandler(d.OutboxAdmin))
+		r.Post("/outbox/dead-letters/{id}/requeue", requeueDeadLetterHandler(d.OutboxAdmin))
+	}
 	return r
 }

@@ -8,6 +8,7 @@ import { MessageThread } from "@/components/dm/MessageThread";
 import { Button } from "@/components/ui/button";
 import { useConversations, useMessages } from "@/hooks/useDM";
 import { useMarkConversationRead } from "@/hooks/useSafety";
+import { avatarInitials } from "@/utils/avatarInitials";
 import { cn } from "@/utils/cn";
 
 export function MessagesPanel() {
@@ -128,8 +129,8 @@ export function MessagesPanel() {
         <section className={cn("space-y-3 bg-[radial-gradient(circle_at_top_right,rgba(99,102,241,0.045),transparent_30%)] p-4", !selectedId && "hidden lg:block")}>
           <div className="flex items-center justify-between gap-3 border-b border-indigo-300/10 pb-3">
             <div className="flex items-center gap-3">
-              <div className="grid h-9 w-9 place-items-center rounded-lg border border-indigo-300/15 bg-indigo-400/[0.07] font-mono text-[10px] uppercase text-indigo-100">
-                {selected ? (selected.other_user.avatar_key || selected.other_user.handle.slice(0, 2)) : "—"}
+              <div className="grid h-9 w-9 place-items-center overflow-hidden rounded-lg border border-indigo-300/15 bg-indigo-400/[0.07] font-mono text-[10px] uppercase text-indigo-100">
+                {selected ? avatarInitials(selected.other_user.avatar_key, selected.other_user.handle) : "—"}
               </div>
               <div>
               <h3 className="text-sm font-semibold text-zinc-100">
