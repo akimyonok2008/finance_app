@@ -214,12 +214,12 @@ func TestAdvanceCompetitionLifecycles_FollowsTimestamps(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, got.LifecycleStatus, "at %s", at)
 	}
-	step(fixedTime, LifecyclePublished)                                    // nothing due yet
-	step(opens, LifecycleRegistrationOpen)                                 // join window opens
-	step(closes, LifecycleRegistrationClosed)                              // join window closes
-	step(edition.StartsAt, LifecycleActive)                                // competition starts
-	step(edition.EndsAt.Add(time.Minute), LifecycleFinalizing)             // competition ends
-	step(edition.EndsAt.Add(2*time.Minute), LifecycleFinalizing)           // idempotent
+	step(fixedTime, LifecyclePublished)                          // nothing due yet
+	step(opens, LifecycleRegistrationOpen)                       // join window opens
+	step(closes, LifecycleRegistrationClosed)                    // join window closes
+	step(edition.StartsAt, LifecycleActive)                      // competition starts
+	step(edition.EndsAt.Add(time.Minute), LifecycleFinalizing)   // competition ends
+	step(edition.EndsAt.Add(2*time.Minute), LifecycleFinalizing) // idempotent
 }
 
 func TestRunCompetitionBaselines_CommonBaselineNormalizesTo100(t *testing.T) {

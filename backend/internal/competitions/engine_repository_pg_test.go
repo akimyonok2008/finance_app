@@ -58,7 +58,7 @@ func pgEngineEntry(competitionID, userID string) CompetitionEntry {
 			ID: uuid.NewString(), CompetitionEntryID: entryID,
 			Symbol: "AAPL", AssetType: "stock", Quantity: money.QuantityFromFloat64(1),
 			Currency: "USD", StartingPrice: money.PriceFromFloat64(20), StartingPriceCurrency: "USD",
-			StartingValueBase: money.MustAmount("20"),
+			StartingValueBase:          money.MustAmount("20"),
 			ClassificationSnapshotJSON: json.RawMessage(`{"asset_type":"stock","venue_mic":"XNAS"}`),
 			VenueMIC:                   "XNAS",
 			IncludedInScore:            false,

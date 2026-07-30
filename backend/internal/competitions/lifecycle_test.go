@@ -25,13 +25,13 @@ func TestValidateLifecycleTransition_AllowsTheDocumentedPath(t *testing.T) {
 
 func TestValidateLifecycleTransition_RejectsInvalidMoves(t *testing.T) {
 	invalid := [][2]string{
-		{LifecycleCompleted, LifecycleActive},    // completed may never return to active
+		{LifecycleCompleted, LifecycleActive}, // completed may never return to active
 		{LifecycleCompleted, LifecycleFinalizing},
 		{LifecycleCancelled, LifecyclePublished}, // cancelled is terminal
 		{LifecycleActive, LifecycleDraft},        // no state re-enters draft
 		{LifecyclePublished, LifecycleDraft},
-		{LifecycleActive, LifecycleCompleted},    // must pass through finalizing
-		{LifecycleDraft, LifecycleActive},        // no skipping registration
+		{LifecycleActive, LifecycleCompleted}, // must pass through finalizing
+		{LifecycleDraft, LifecycleActive},     // no skipping registration
 		{LifecycleRegistrationOpen, LifecycleActive},
 	}
 	for _, tc := range invalid {
