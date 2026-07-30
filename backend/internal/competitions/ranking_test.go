@@ -127,29 +127,38 @@ func TestEngineMyStatus_ReflectsProjectionRank(t *testing.T) {
 	assert.False(t, notJoined.Joined)
 }
 
-func TestRefreshCompetitionRankings_SkipsUnpriceableEntryWithoutBlockingOthers(t *testing.T) {
+func TestRefreshCompetitionRankings_FailsClosedWhenAnyEntryIsUnpriceable(t *testing.T) {
 	h := newHarness(nil, nil)
 	ctx := context.Background()
 	edition := rankingEdition(t, h, "rank-5")
 	require.NoError(t, h.repo.CreateEngineEntry(ctx, activeEntry("e1", edition.ID, "u1", "AAA", "100")))
 	require.NoError(t, h.repo.CreateEngineEntry(ctx, activeEntry("e2", edition.ID, "u2", "UNPRICED", "100")))
 	h.mp.Set("AAA", 110, "USD")
-	// UNPRICED is never set: u2's entry fails valuation but must not block
-	// promotion for u1.
+	// UNPRICED is never set: incomplete participant coverage must withhold the
+	// entire generation rather than silently publishing a one-user board.
 
 	require.NoError(t, h.svc.RefreshCompetitionRankings(ctx))
 
 	page, err := h.svc.EditionLeaderboard(ctx, edition.ID, 0, 10)
 	require.NoError(t, err)
-	require.Len(t, page.Entries, 1, "the unpriceable entry is excluded, not blocking, from this generation")
-	assert.Equal(t, "u1", page.Entries[0].DisplayName) // no display-name seed: falls back to user id
-	assert.Equal(t, 1, page.Entries[0].Rank)
+	assert.True(t, page.Unavailable)
+	assert.Empty(t, page.Entries)
+
+	first, err := h.repo.EnsureBuildingGeneration(ctx, edition.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), first.Generation, "the incomplete generation is terminal and retry starts clean")
+
+	h.mp.Set("UNPRICED", 120, "USD")
+	require.NoError(t, h.svc.RefreshCompetitionRankings(ctx))
+	page, err = h.svc.EditionLeaderboard(ctx, edition.ID, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 2)
 }
 
 // TestPromoteGeneration_WithheldOnWriteFailure exercises the repository layer
 // directly: a ranking-row write failure recorded during a lap must withhold
-// promotion (the building generation is retried from scratch), exactly like
-// the global leaderboard's cycleRankingFailed gate.
+// promotion. A failed generation is terminal so its partial rows and latched
+// failure state cannot contaminate a retry.
 func TestPromoteGeneration_WithheldOnWriteFailure(t *testing.T) {
 	repo := NewInMemoryCompetitionRepository()
 	ctx := context.Background()
@@ -165,11 +174,10 @@ func TestPromoteGeneration_WithheldOnWriteFailure(t *testing.T) {
 	err = repo.PromoteGeneration(ctx, competitionID, gen.Generation, time.Now())
 	assert.ErrorIs(t, err, ErrGenerationConflict, "a lap with a write failure must never be promoted")
 
-	// The next tick retries the SAME building generation rather than starting
-	// a new one on top of a withheld promotion.
+	require.NoError(t, repo.FailGeneration(ctx, competitionID, gen.Generation, "write failed", time.Now()))
 	again, err := repo.EnsureBuildingGeneration(ctx, competitionID)
 	require.NoError(t, err)
-	assert.Equal(t, gen.Generation, again.Generation)
+	assert.Greater(t, again.Generation, gen.Generation)
 
 	_, _, found, err := repo.ActiveGeneration(ctx, competitionID)
 	require.NoError(t, err)

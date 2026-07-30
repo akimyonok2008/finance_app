@@ -77,6 +77,11 @@ type RankingRepository interface {
 	// counts, and whether any ranking-row write failed. writeFailed latches —
 	// once true for a generation it stays true until the next generation.
 	AdvanceGeneration(ctx context.Context, competitionID string, generation int64, cursorEntryID string, processed, successful, failed int, writeFailed bool) error
+	// FailGeneration terminally rejects an incomplete building generation and
+	// removes its partial rows. The previously active generation remains
+	// untouched; EnsureBuildingGeneration creates a fresh retry on the next
+	// worker pass.
+	FailGeneration(ctx context.Context, competitionID string, generation int64, reason string, now time.Time) error
 	// PromoteGeneration materializes sequential ranks (return% desc, display
 	// name asc, user_id asc — see the package doc comment on tie-breaking),
 	// atomically promotes the generation to active, marks the previously
@@ -112,12 +117,11 @@ func (s *Service) SetRankingBatchSize(n int) {
 // currently-active engine edition and writes them into that competition's
 // building generation. When a batch reaches the end of the entry population
 // (a short page), the lap is complete and the generation is promoted — unless
-// any ranking-row write failed during the lap, in which case promotion is
-// withheld and the same building generation is retried from scratch on the
-// next lap (see PromoteGeneration's doc and leaderboard.Service.RefreshCache,
-// which this mirrors). A single entry that fails VALUATION (unpriceable
-// position, stale FX) is simply excluded from this generation — like the
-// global leaderboard's "skipped" users — and does not block promotion.
+// any valuation or ranking-row write failed during the lap, in which case the
+// incomplete generation is terminally failed and a clean generation is
+// retried on the next pass. The last active generation remains readable
+// throughout. Competition boards are complete participant sets: unlike the
+// global leaderboard, an unpriceable entry must never be silently omitted.
 func (s *Service) RefreshCompetitionRankings(ctx context.Context) error {
 	repo, ok := s.repo.(RankingRepository)
 	entryRepo, ok2 := s.repo.(EngineEntryRepository)
@@ -193,6 +197,18 @@ func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingReposit
 	// An empty lap on an edition that was never ranked (zero entries ever)
 	// is not a completed pass over a real population — nothing to promote.
 	if gen.ProcessedEntries+processed == 0 {
+		return nil
+	}
+	totalFailed := gen.FailedEntries + failed
+	if gen.WriteFailure || writeFailed || totalFailed > 0 {
+		reason := fmt.Sprintf("incomplete coverage: processed=%d successful=%d failed=%d write_failure=%t",
+			gen.ProcessedEntries+processed, gen.SuccessfulEntries+successful, totalFailed, gen.WriteFailure || writeFailed)
+		if err := repo.FailGeneration(ctx, competitionID, gen.Generation, reason, now); err != nil {
+			return fmt.Errorf("fail incomplete generation: %w", err)
+		}
+		slog.Warn("competition_ranking_generation_failed",
+			"competition_id", competitionID, "generation", gen.Generation,
+			"failed_entries", totalFailed, "write_failure", gen.WriteFailure || writeFailed)
 		return nil
 	}
 	if err := repo.PromoteGeneration(ctx, competitionID, gen.Generation, now); err != nil {
@@ -435,12 +451,29 @@ func (r *InMemoryCompetitionRepository) AdvanceGeneration(_ context.Context, com
 	return nil
 }
 
+func (r *InMemoryCompetitionRepository) FailGeneration(_ context.Context, competitionID string, generation int64, reason string, now time.Time) error {
+	st := r.rankingState(competitionID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	g, ok := st.generations[generation]
+	if !ok || g.Status != GenerationBuilding {
+		return ErrGenerationConflict
+	}
+	completed := now.UTC()
+	g.Status = GenerationFailed
+	g.CompletedAt = &completed
+	g.FailureReason = reason
+	delete(st.rows, generation)
+	return nil
+}
+
 func (r *InMemoryCompetitionRepository) PromoteGeneration(_ context.Context, competitionID string, generation int64, now time.Time) error {
 	st := r.rankingState(competitionID)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	g, ok := st.generations[generation]
-	if !ok || g.Status != GenerationBuilding || g.WriteFailure {
+	if !ok || g.Status != GenerationBuilding || g.WriteFailure || g.FailedEntries != 0 ||
+		g.ProcessedEntries != g.SuccessfulEntries {
 		return ErrGenerationConflict
 	}
 

@@ -758,24 +758,23 @@ interpolation.
 Personal standing is calculated live. `previous_rank` and `rank_delta` are not
 historically populated; `best_rank` currently mirrors the present rank.
 
-## Weekly competitions
+## Arena competitions
 
-Competition APIs create an ISO-week sprint (Monday 00:00 UTC). Joining requires
-a nonempty portfolio and freezes symbols, quantities, quote prices, and starting
-base value. Later portfolio edits do not affect the entry.
+Arena uses reusable, immutable competition-definition versions and scheduled
+editions. Eligibility and scoring are independent typed configurations.
+Joining an engine edition requires an idempotency key, evaluates a canonical
+portfolio snapshot, and freezes only the scoring composition. Every admitted
+entry receives the same start-time baseline. Active rankings are served from a
+separate, fail-closed PostgreSQL generation; completed editions are served only
+from immutable final-result rows.
 
-```text
-sprint_return = (current frozen-composition value / starting value - 1) × 100
-sprint_index  = 100 × current value / starting value
-```
+The user-facing routes are `/arena` and
+`/arena/competitions/:competitionId`. They remain independent from the global
+leaderboard.
 
-The active frontend does not expose sprint screens. Completed standings are not
-finalized; querying them later reprices the frozen composition with then-current
-quotes. Provider failures skip an entrant.
-
-Sprint (and Arena) are not currently product features — this API exists as
-backend/legacy code only, and would only be built out into a user-facing
-feature if a future decision is made to add it.
+The older ISO-week sprint API remains compatible with existing rows: it uses a
+join-time frozen composition and can reprice legacy completed standings. New
+editions never use that path.
 
 ## Achievements
 

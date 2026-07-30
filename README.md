@@ -416,11 +416,11 @@ portfolio mutation, and the live database calculation remains the fallback.
 - Ranked snapshot and evaluation workers currently scan the full user list in
   process; repository uniqueness and claim leases are multi-instance safe, but
   the scan is not yet paginated for large populations.
-- Weekly competition APIs are implemented, but the active frontend redirects
-  `/sprint` and `/arena` to Leaderboard. Completed sprint results are repriced
-  rather than finalized and persisted. Sprint and Arena are not currently
-  shipped product features — they exist only as backend/legacy code, and would
-  only become user-facing if a future decision is made to launch them.
+- Arena is an independent product area at `/arena`, backed by generic,
+  versioned competition definitions and scheduled editions. Engine editions
+  use common start-time baselines, projection-backed rankings, and immutable
+  final results. Pre-engine weekly sprint rows retain their legacy behavior for
+  migration compatibility and are not used as the model for new editions.
 - The FX provider is a static development provider for USD, TRY, EUR, and GBP.
 - Google login is optional. Apple authentication code is not routed, and no
   Apple frontend flow exists.
@@ -435,18 +435,19 @@ portfolio mutation, and the live database calculation remains the fallback.
 
 ## Legacy, transitional, and planned
 
-- **Legacy/unreachable:** Arena and sprint frontend components remain in the
-  source tree, but their routes redirect to Leaderboard. Arena and Sprint are
-  not currently product features; they would only be built out and shipped if
-  a future decision is made to add them. Legacy achievement tables remain for
-  migration compatibility; current awards use benchmark achievement storage.
+- **Legacy:** pre-engine weekly sprint rows retain join-time baselines and live
+  repricing for migration compatibility. New Arena editions use the versioned
+  competition engine, frozen rule snapshots, common baselines, separate
+  ranking generations, and immutable results. Legacy achievement tables remain
+  for migration compatibility; current awards use benchmark achievement
+  storage.
 - **Transitional:** users begin newly verified badge eligibility at their first
   trusted ranked snapshot after migration; legacy archive points are not
   backfilled. Existing awards are preserved and marked `archive_model_v0`.
 - **Removed:** the Portfolio Coach implementation and UI are not part of the
   current application.
 - **Not implemented:** brokerage execution, AI advice, Apple login, live FX,
-  finalized competitions, and production-scale social infrastructure.
+  real-money competition prizes, and production-scale social infrastructure.
 
 ## Verification
 

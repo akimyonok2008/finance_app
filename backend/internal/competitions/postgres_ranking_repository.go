@@ -160,6 +160,33 @@ func (r *PostgresCompetitionRepository) AdvanceGeneration(ctx context.Context, c
 	return nil
 }
 
+func (r *PostgresCompetitionRepository) FailGeneration(ctx context.Context, competitionID string, generation int64, reason string, now time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("competition repository: begin fail generation tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE competition_ranking_generations
+		SET status = 'failed', completed_at = $1, failure_reason = $2
+		WHERE competition_id = $3 AND generation = $4 AND status = 'building'
+	`, now.UTC(), reason, competitionID, generation)
+	if err != nil {
+		return fmt.Errorf("competition repository: fail generation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrGenerationConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM competition_rankings
+		WHERE competition_id = $1 AND generation = $2
+	`, competitionID, generation); err != nil {
+		return fmt.Errorf("competition repository: prune failed generation: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // PromoteGeneration materializes sequential ranks (return% desc, display name
 // asc, user_id asc — a strict total order since user_id is unique, so ranks
 // are always sequential and never shared, see the package's tie-break policy
@@ -176,16 +203,17 @@ func (r *PostgresCompetitionRepository) PromoteGeneration(ctx context.Context, c
 
 	var status string
 	var writeFailure bool
+	var processed, successful, failed int
 	if err := tx.QueryRow(ctx, `
-		SELECT status, write_failure FROM competition_ranking_generations
+		SELECT status, write_failure, processed_entries, successful_entries, failed_entries
 		WHERE competition_id = $1 AND generation = $2 FOR UPDATE
-	`, competitionID, generation).Scan(&status, &writeFailure); err != nil {
+	`, competitionID, generation).Scan(&status, &writeFailure, &processed, &successful, &failed); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrGenerationConflict
 		}
 		return fmt.Errorf("competition repository: lock generation: %w", err)
 	}
-	if status != GenerationBuilding || writeFailure {
+	if status != GenerationBuilding || writeFailure || failed != 0 || processed != successful {
 		return ErrGenerationConflict
 	}
 

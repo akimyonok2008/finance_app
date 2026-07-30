@@ -172,7 +172,8 @@ func TestPostgresRanking_WriteFailureWithholdsPromotion(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, found)
 
+	require.NoError(t, repo.FailGeneration(ctx, edition.ID, gen.Generation, "write failed", now))
 	retry, err := repo.EnsureBuildingGeneration(ctx, edition.ID)
 	require.NoError(t, err)
-	assert.Equal(t, gen.Generation, retry.Generation, "the same generation is retried, not abandoned")
+	assert.Greater(t, retry.Generation, gen.Generation, "the retry uses a clean generation")
 }
