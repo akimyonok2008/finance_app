@@ -32,7 +32,8 @@ func rankingTestPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(), `
 		UPDATE leaderboard_ranking_state
-		SET active_generation = 0, building_generation = 1, cycle_started_at = now(), activated_at = NULL
+		SET active_generation = 0, building_generation = 1, cycle_started_at = now(),
+		    activated_at = NULL, last_cycle_seconds = NULL
 		WHERE id
 	`)
 	require.NoError(t, err)
@@ -141,6 +142,32 @@ func TestPostgresRankingStore_ActiveGenerationAgeReportsFreshness(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.WithinDuration(t, time.Now().UTC(), at, 5*time.Second)
+}
+
+func TestPostgresRankingStore_LastCycleDurationRecordedOnPromotion(t *testing.T) {
+	pool := rankingTestPool(t)
+	store := NewPostgresRankingStore(pool)
+	ctx := context.Background()
+
+	_, known, err := store.LastCycleDuration(ctx)
+	require.NoError(t, err)
+	assert.False(t, known, "no cycle has completed yet")
+
+	// Backdate the running cycle's start so the promoted duration is
+	// measurable and deterministic (roughly 10 minutes).
+	_, err = pool.Exec(ctx, `
+		UPDATE leaderboard_ranking_state SET cycle_started_at = now() - interval '10 minutes' WHERE id
+	`)
+	require.NoError(t, err)
+	user := seedRankingUser(t, pool, "Cycler")
+	require.NoError(t, store.Upsert(ctx, TimeframeAll, user, testIndex("100"), testRatio("0"), time.Now().UTC()))
+	require.NoError(t, store.CompleteCycle(ctx))
+
+	d, known, err := store.LastCycleDuration(ctx)
+	require.NoError(t, err)
+	require.True(t, known, "promotion must record the build-cycle duration")
+	assert.InDelta(t, (10 * time.Minute).Seconds(), d.Seconds(), 30,
+		"recorded duration must reflect how long the generation took to build")
 }
 
 func TestPostgresRankingStore_UpsertOverwritesPreviousValue(t *testing.T) {

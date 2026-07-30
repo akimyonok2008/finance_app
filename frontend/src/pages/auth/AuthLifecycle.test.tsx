@@ -33,17 +33,16 @@ afterEach(() => {
 
 describe("authentication lifecycle pages", () => {
   it("verifies an email token and stores the resulting session", async () => {
-    const session = {
-      token: "verified-jwt",
-      user: {
-        id: "u1",
-        email: "user@example.com",
-        display_name: "User",
-        email_verified: true,
-        has_password: true,
-      },
+    // The backend issues the session exclusively as an HttpOnly cookie —
+    // the verify-email response body carries only `user`, never a token.
+    const user = {
+      id: "u1",
+      email: "user@example.com",
+      display_name: "User",
+      email_verified: true,
+      has_password: true,
     };
-    vi.stubGlobal("fetch", vi.fn(() => jsonResponse(session)));
+    vi.stubGlobal("fetch", vi.fn(() => jsonResponse({ user })));
     window.history.replaceState({}, "", "/verify-email?token=one-time-token&source=email#status");
 
     render(
@@ -55,7 +54,7 @@ describe("authentication lifecycle pages", () => {
     expect(window.location.pathname + window.location.search + window.location.hash)
       .toBe("/verify-email?source=email#status");
     expect(await screen.findByText("Email verified")).toBeTruthy();
-    expect(acceptSession).toHaveBeenCalledWith(session);
+    expect(acceptSession).toHaveBeenCalledWith({ token: "cookie-session", user });
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining("/auth/verify-email"),
       expect.objectContaining({

@@ -184,6 +184,24 @@ func (r *PostgresRankingStore) ActiveGenerationAge(ctx context.Context) (time.Ti
 	return *at, true, nil
 }
 
+// LastCycleDuration implements the optional CycleDurationReporter capability:
+// how long the most recently promoted generation took to build (recorded by
+// CompleteCycle). found=false means no post-migration-0043 cycle has
+// completed yet.
+func (r *PostgresRankingStore) LastCycleDuration(ctx context.Context) (time.Duration, bool, error) {
+	var secs *float64
+	err := r.pool.QueryRow(ctx, `
+		SELECT last_cycle_seconds FROM leaderboard_ranking_state WHERE id
+	`).Scan(&secs)
+	if err != nil {
+		return 0, false, err
+	}
+	if secs == nil || *secs <= 0 {
+		return 0, false, nil
+	}
+	return time.Duration(*secs * float64(time.Second)), true, nil
+}
+
 // CompleteCycle materializes the final ordinal rank (rnk) for the building
 // generation, then atomically promotes it to active (making its rows the
 // ones every read method above serves), starts the next building
@@ -229,11 +247,16 @@ func (r *PostgresRankingStore) CompleteCycle(ctx context.Context) error {
 		return err
 	}
 
+	// last_cycle_seconds captures how long this generation took to build
+	// (cycle_started_at on the right-hand side is the pre-update value). It
+	// feeds the adaptive trust window in Service.rankingFresh, so the window
+	// scales with the population instead of expiring on a fixed clock.
 	var promotedGeneration int64
 	if err := tx.QueryRow(ctx, `
 		UPDATE leaderboard_ranking_state
 		SET active_generation   = building_generation,
 		    building_generation = building_generation + 1,
+		    last_cycle_seconds  = EXTRACT(EPOCH FROM (now() - cycle_started_at)),
 		    cycle_started_at    = now(),
 		    activated_at        = now()
 		WHERE id

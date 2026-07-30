@@ -318,6 +318,19 @@ func (r *Resolver) ResolveProviderSymbol(ctx context.Context, instrumentID, prov
 // (keyed on the MIC uniqueness constraint) if this is the first instrument
 // seen at that listing. mic must be non-empty; exchangeCode is a hint used
 // only when creating a new row.
+// InstrumentByID reads one instrument from the identity register by its
+// stable internal id — a plain lookup with no provider calls. Used by
+// read-side consumers (e.g. competition snapshot classification) that hold a
+// position's instrument_id and need its stable metadata (asset type, MIC,
+// listing country, currency).
+func (r *Resolver) InstrumentByID(ctx context.Context, id string) (*Instrument, error) {
+	in, err := r.repo.GetInstrumentByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &in, nil
+}
+
 func (r *Resolver) FindOrCreateVenue(ctx context.Context, mic, exchangeCode string) (*Venue, error) {
 	mic = normalizeScope(mic)
 	if mic == "" {

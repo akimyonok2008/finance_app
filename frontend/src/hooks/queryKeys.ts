@@ -58,6 +58,13 @@ export const queryKeys = {
   competitions: ["competitions"] as const,
   currentSprintStatus: (id: string) => ["currentSprintStatus", id] as const,
   sprintLeaderboard: (id: string) => ["sprintLeaderboard", id] as const,
+  arenaCatalogue: (filters: { category?: string; joined?: boolean } = {}) =>
+    ["arenaCatalogue", filters] as const,
+  arenaCompetition: (id: string) => ["arenaCompetition", id] as const,
+  arenaEligibility: (id: string) => ["arenaEligibility", id] as const,
+  arenaMyStatus: (id: string) => ["arenaMyStatus", id] as const,
+  arenaLeaderboard: (id: string, after: number) => ["arenaLeaderboard", id, after] as const,
+  arenaResults: (id: string) => ["arenaResults", id] as const,
   myProfile: ["profile", "me"] as const,
   publicProfile: (handle: string) => ["profile", handle] as const,
   exploreProfiles: (params: object) => ["exploreProfiles", params] as const,

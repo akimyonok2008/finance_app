@@ -28,3 +28,20 @@ regression here would fail CI rather than surface as a silent ordering change.
 If you need a genuinely later step, just pick the next unused number (the
 directory currently runs through `00NN`, check the highest and add one) —
 don't touch history to make the prefixes look tidy.
+
+# Forward-only, no rollback
+
+There are no down-migrations for anything in this directory, and none are
+planned. `RunMigrations` only ever applies files forward; there is no
+"undo N" path.
+
+This is a deliberate tradeoff, not an oversight: several of these migrations
+drop constraints, backfill data, or restructure tables in ways where a
+mechanically-generated reverse would not actually be safe to run (e.g. it
+would silently discard data written under the new schema). Writing a correct
+down-migration requires the same care as writing the forward one, on a
+case-by-case basis.
+
+**Consequence:** if a schema release turns out to be bad, the only recovery
+path is restoring from backup — there is no "roll the schema back" button.
+Plan releases (and the backup/restore drill) with that in mind.

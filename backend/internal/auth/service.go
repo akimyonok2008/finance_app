@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,21 @@ import (
 )
 
 const minPasswordLength = 8
+
+// maxAvatarKeyLength mirrors the profiles table's avatar_key length CHECK
+// (migration 0002) — profiles enforce it, but the users table (migration
+// 0001) never has, so a registration/OAuth-provisioned avatar_key could
+// otherwise be stored and rendered (as raw text, not an image — there is no
+// avatar upload/image system) unbounded.
+const maxAvatarKeyLength = 40
+
+func truncateRunes(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) > max {
+		runes = runes[:max]
+	}
+	return string(runes)
+}
 
 // Service holds the authentication business logic: validation, hashing,
 // uniqueness checks, and token issuance. It depends only on the repository
@@ -178,7 +194,7 @@ func (s *Service) RegisterContext(ctx context.Context, in RegisterInput) (*User,
 		return nil, "", err
 	}
 
-	avatarKey := strings.TrimSpace(in.AvatarKey)
+	avatarKey := truncateRunes(strings.TrimSpace(in.AvatarKey), maxAvatarKeyLength)
 	if avatarKey == "" {
 		avatarKey = "default"
 	}
@@ -191,6 +207,7 @@ func (s *Service) RegisterContext(ctx context.Context, in RegisterInput) (*User,
 		PasswordHash: string(hash),
 		HasPassword:  true,
 		AuthVersion:  1,
+		Role:         RoleUser,
 		SignupIPHash: s.hashSignupIP(in.SignupIP),
 	}
 	rawToken, record, err := newLifecycleToken(user.ID, s.verificationTTL)
@@ -351,7 +368,7 @@ func (s *Service) loginWithProviderClaims(ctx context.Context, claims ProviderCl
 
 	user, err := s.repo.FindByEmail(email)
 	if errors.Is(err, ErrUserNotFound) {
-		user, err = s.createProviderUser(ctx, email, claims.DisplayName, claims.AvatarKey)
+		return s.registerProviderUser(ctx, email, claims)
 	}
 	if err != nil {
 		return nil, "", err
@@ -366,30 +383,38 @@ func (s *Service) loginWithProviderClaims(ctx context.Context, claims ProviderCl
 	return s.issue(user)
 }
 
-func (s *Service) createProviderUser(ctx context.Context, email, displayName, avatarKey string) (*User, error) {
-	displayName = strings.TrimSpace(displayName)
+// registerProviderUser atomically persists a brand-new OAuth account, its
+// provider identity, and required aggregate initialization (see
+// PostgresUserRepository.CreateProviderUser). A failure rolls back the user
+// row too, so OAuth registration can never leave behind a user with a
+// permanently missing required aggregate, matching the guarantee
+// CreateWithVerification gives password registration.
+func (s *Service) registerProviderUser(ctx context.Context, email string, claims ProviderClaims) (*User, string, error) {
+	displayName := strings.TrimSpace(claims.DisplayName)
 	if displayName == "" {
 		displayName = strings.Split(email, "@")[0]
 	}
 	if len([]rune(displayName)) < 2 {
 		displayName = "Investor"
 	}
-	if avatarKey = strings.TrimSpace(avatarKey); avatarKey == "" {
+	avatarKey := truncateRunes(strings.TrimSpace(claims.AvatarKey), maxAvatarKeyLength)
+	if avatarKey == "" {
 		avatarKey = "default"
 	}
 	now := time.Now().UTC()
 	user := &User{
 		ID: uuid.NewString(), Email: email, DisplayName: displayName,
 		AvatarKey: avatarKey, HasPassword: false, EmailVerifiedAt: &now,
-		AuthVersion: 1,
+		AuthVersion: 1, Role: RoleUser,
 	}
-	if err := s.repo.Create(user); err != nil {
-		return nil, err
+	identity := &AuthIdentity{
+		ID: uuid.NewString(), UserID: user.ID, Provider: claims.Provider,
+		ProviderSubject: claims.Subject, Email: email, EmailVerified: claims.EmailVerified,
 	}
-	if err := s.initializeAccount(ctx, user.ID); err != nil {
-		return nil, err
+	if err := s.repo.CreateProviderUser(ctx, user, identity, s.txCreationHooks...); err != nil {
+		return nil, "", err
 	}
-	return user, nil
+	return s.issue(user)
 }
 
 func (s *Service) issue(user *User) (*User, string, error) {
@@ -642,6 +667,54 @@ func (s *Service) ListRankableUsers(ctx context.Context) ([]RankableUser, error)
 	out := make([]RankableUser, 0, len(users))
 	for _, u := range users {
 		out = append(out, RankableUser{ID: u.ID, DisplayName: u.DisplayName, AvatarKey: u.AvatarKey})
+	}
+	return out, nil
+}
+
+// pagedUserLister is the optional repository capability behind
+// ListRankableUsersPage: keyset-paginated enumeration ordered by user ID.
+// Implemented by PostgresUserRepository; the in-memory repository doesn't
+// need it (the service falls back to sorting the full list, which is fine at
+// in-memory scale).
+type pagedUserLister interface {
+	ListUsersPage(ctx context.Context, afterID string, limit int) ([]User, error)
+}
+
+// ListRankableUsersPage is the keyset-paginated counterpart of
+// ListRankableUsers: up to limit users with ID > afterID, ordered by ID. It
+// lets population-scale background workers (the leaderboard refresh) select
+// one bounded batch per tick without loading every user into memory. Same
+// trust boundary as ListRankableUsers: only the narrow rankable projection
+// ever leaves the auth module.
+func (s *Service) ListRankableUsersPage(ctx context.Context, afterID string, limit int) ([]RankableUser, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if paged, ok := s.repo.(pagedUserLister); ok {
+		users, err := paged.ListUsersPage(ctx, afterID, limit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]RankableUser, 0, len(users))
+		for _, u := range users {
+			out = append(out, RankableUser{ID: u.ID, DisplayName: u.DisplayName, AvatarKey: u.AvatarKey})
+		}
+		return out, nil
+	}
+	all, err := s.ListRankableUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	out := make([]RankableUser, 0, limit)
+	for _, u := range all {
+		if u.ID <= afterID {
+			continue
+		}
+		out = append(out, u)
+		if len(out) == limit {
+			break
+		}
 	}
 	return out, nil
 }

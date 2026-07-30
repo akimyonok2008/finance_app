@@ -1079,10 +1079,18 @@ go test ./...
 go vet ./...
 ```
 
-PostgreSQL integration tests require:
+PostgreSQL integration tests require `DATABASE_URL_TEST` to point at a
+**disposable** database — `seedUser` and its equivalents across the
+`*_pg_test.go` files insert real rows and never delete them, because they
+assume nothing else reads the database they're pointed at. Do not point this
+at the dev stack's postgres (`localhost:5432`); use the dedicated disposable
+instance instead:
 
 ```bash
-DATABASE_URL_TEST="postgres://postgres:postgres@localhost:5432/finance_app?sslmode=disable" go test ./...
+scripts/test-db.sh up   # starts a tmpfs-backed postgres on 127.0.0.1:5434
+export DATABASE_URL_TEST="postgres://postgres:postgres@127.0.0.1:5434/finance_app?sslmode=disable"
+go test ./...
+scripts/test-db.sh down # tears it down; nothing persists between runs
 ```
 
 The embedded migration runner holds an application-specific PostgreSQL advisory

@@ -10,9 +10,11 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -266,27 +268,60 @@ func benchmarkComparisonDataType(meta benchmark.BenchmarkEvaluationMetadata) str
 	return "unavailable"
 }
 
+// userBatchWalker hands each caller a bounded, cursor-advancing batch of
+// rankable users via auth's keyset pagination — O(batch) listed per tick
+// instead of the full population — wrapping to the start once a lap reaches
+// the end of the table. A periodic caller therefore still covers every user
+// over ceil(N/batch) ticks, with per-tick cost independent of N. batch <= 0
+// falls back to one full listing per call (dev/memory scale). Safe for
+// concurrent use; adapters embed a pointer so value copies share the cursor.
+type userBatchWalker struct {
+	mu     sync.Mutex
+	cursor string
+	users  *auth.Service
+	batch  int
+}
+
+func (w *userBatchWalker) next(ctx context.Context) ([]auth.RankableUser, error) {
+	if w.batch <= 0 {
+		return w.users.ListRankableUsers(ctx)
+	}
+	w.mu.Lock()
+	cursor := w.cursor
+	w.mu.Unlock()
+	page, err := w.users.ListRankableUsersPage(ctx, cursor, w.batch)
+	if err != nil {
+		return nil, err
+	}
+	next := ""
+	if len(page) == w.batch {
+		next = page[len(page)-1].ID
+	}
+	w.mu.Lock()
+	w.cursor = next
+	w.mu.Unlock()
+	return page, nil
+}
+
 // portfolioSnapshotAdapter preserves the private daily cost-basis/composition
 // archive. Ranked leaderboards, profiles, and achievements do not consume it.
 //
 // SnapshotAllDaily is called on every worker tick (default 60s), but a
-// snapshot is only ever needed once per user per UTC day. Without the
-// SnapshottedUserIDsToday pre-filter below, every tick for the other ~23h59m
-// of the day would still pay for a full RecordDailySnapshot valuation
-// (portfolio.Service.Summary) per user, only to have CreateArchiveSnapshot's
-// unique index discard it — an unbounded, steady-state cost that scales with
-// total user count on a short ticker. batchSize additionally caps how many
-// still-pending users get valued in a single tick, so a burst right after UTC
-// midnight (when everyone is newly pending at once) is spread across several
-// ticks instead of one large pass.
+// snapshot is only ever needed once per user per UTC day. The
+// SnapshottedUserIDsToday pre-filter keeps every tick after a user's snapshot
+// from re-paying the full RecordDailySnapshot valuation
+// (portfolio.Service.Summary) just to have CreateArchiveSnapshot's unique
+// index discard it. The walker bounds both the listing and the valuations of
+// a single tick, so a burst right after UTC midnight (when everyone is newly
+// pending at once) is spread across several ticks, and no tick ever loads the
+// whole user table.
 type portfolioSnapshotAdapter struct {
 	portfolio *portfolio.Service
-	users     *auth.Service
-	batchSize int // <= 0 means unbounded
+	walker    *userBatchWalker
 }
 
 func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, error) {
-	users, err := a.users.ListUsers(ctx)
+	batch, err := a.walker.next(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -294,17 +329,11 @@ func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, er
 	if err != nil {
 		return 0, err
 	}
-	pending := make([]auth.User, 0, len(users))
-	for _, u := range users {
-		if !done[u.ID] {
-			pending = append(pending, u)
-		}
-	}
-	if a.batchSize > 0 && len(pending) > a.batchSize {
-		pending = pending[:a.batchSize]
-	}
 	recorded := 0
-	for _, u := range pending {
+	for _, u := range batch {
+		if done[u.ID] {
+			continue
+		}
 		wrote, err := a.portfolio.RecordDailySnapshot(ctx, u.ID)
 		if err != nil {
 			slog.Warn("daily snapshot failed for user", "user_id", u.ID, "error", err)
@@ -331,14 +360,18 @@ func (a rankedMutationSnapshotAdapter) RecordMutationSnapshot(ctx context.Contex
 }
 
 type rankedSnapshotJobAdapter struct {
-	users        *auth.Service
+	walker       *userBatchWalker
 	history      *performancehistory.Service
 	achievements *achievements.Service
 }
 
+// SnapshotAll (the name predates batching) records the canonical ranked
+// snapshot for one walker batch per call, so a single pass never values the
+// whole population — full coverage accrues across ticks exactly like the
+// leaderboard refresh.
 func (a rankedSnapshotJobAdapter) SnapshotAll(ctx context.Context) performancehistory.BatchResult {
 	result := performancehistory.BatchResult{}
-	users, err := a.users.ListUsers(ctx)
+	users, err := a.walker.next(ctx)
 	if err != nil {
 		result.Failures++
 		return result
@@ -442,28 +475,6 @@ func (a rankedPerformanceAdapter) CurrentRankedPerformance(ctx context.Context, 
 		Paused:                 rp.Status == performance.StatusPaused,
 		TrackingStartedAt:      rp.TrackingStartedAt,
 	}, nil
-}
-
-type rankedCacheStateAdapter struct {
-	users       *auth.Service
-	performance *performance.Service
-}
-
-func (a rankedCacheStateAdapter) CurrentRankedCacheState(ctx context.Context, userID string) (jobs.RankedCacheState, bool, error) {
-	if _, err := a.users.UserByID(userID); err != nil {
-		if errors.Is(err, auth.ErrUserNotFound) {
-			return jobs.RankedCacheState{}, false, nil
-		}
-		return jobs.RankedCacheState{}, false, err
-	}
-	ranked, err := a.performance.CurrentRankedPerformance(ctx, userID)
-	if err != nil {
-		return jobs.RankedCacheState{}, false, err
-	}
-	return jobs.RankedCacheState{
-		Active: ranked.Status == performance.StatusActive,
-		Score:  ranked.RankedReturnPercentage,
-	}, true, nil
 }
 
 // profileRankedAdapter bridges the ranked-performance service to the profile
@@ -610,6 +621,22 @@ func main() {
 
 	if cfg.UsingDefaultSecret() {
 		slog.Warn("using the default development JWT secret; set JWT_SECRET before production")
+	}
+
+	// --- Sentry (optional error reporting; never gates startup) ---
+	// Unset SENTRY_DSN entirely disables reporting rather than silently
+	// pointing at a shared/default project — there's no default DSN here.
+	if cfg.SentryDSN != "" {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              cfg.SentryDSN,
+			Environment:      cfg.AppEnv,
+			AttachStacktrace: true,
+		}); err != nil {
+			slog.Error("sentry init failed; continuing without error reporting", "error", err)
+		} else {
+			defer sentry.Flush(2 * time.Second)
+			slog.Info("sentry error reporting enabled")
+		}
 	}
 
 	// --- Redis (optional cache/rate-limit backend; never gates startup) ---
@@ -878,6 +905,10 @@ func main() {
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
 	)
+	// The competition engine reads portfolio composition ONLY through this
+	// narrow, read-only, version-consistent boundary (eligibility previews
+	// and, later, join snapshots) — never through repositories directly.
+	competitionsSvc.SetSnapshotProvider(portfolioSvc)
 	// Benchmark badge engine. The portfolio side uses canonical ranked snapshots;
 	// the benchmark side uses Twelve Data historical closes when enabled. The
 	// deterministic offline provider supports previews in local development but
@@ -1007,20 +1038,24 @@ func main() {
 		slog.Warn("ranked-epoch backfill skipped: list users failed", "error", err)
 	}
 
-	// --- leaderboard caches (Redis only) ---
+	// --- sprint leaderboard cache (Redis only) ---
+	// The global leaderboard no longer uses Redis at all: it is served solely
+	// from the generation-based Postgres ranking projection (stale-tolerant by
+	// design — see leaderboard.Service.useRanking). Redis remains for sprint
+	// competition rankings, and its deletion hook still erases every
+	// leaderboard:* key on account deletion.
 	var rankedCache *leaderboard.RedisLeaderboardCache
 	if redisClient != nil {
 		rankedCache = leaderboard.NewRedisLeaderboardCache(redisClient)
-		leaderboardSvc.SetCache(rankedCache)
 		competitionsSvc.SetCache(rankedCache)
 		authSvc.RegisterDeletionHook(rankedCache)
 	}
 
 	// --- transactional outbox processor ---
-	// Derived work (leaderboard cache sync, daily archive snapshots) runs AFTER
-	// the mutation commits, driven by durable events written inside the same
+	// Derived work (lifecycle snapshots, daily archives) runs AFTER the
+	// mutation commits, driven by durable events written inside the same
 	// transaction. A projection failure retries; it can never roll back or fail a
-	// portfolio mutation, and Redis being down cannot corrupt core state.
+	// portfolio mutation.
 	store, eventSourceOK := repos.portfolio.(jobs.EventSource)
 	mandatoryProjection := cfg.StorageProvider == "postgres"
 	optionalJobs := shouldStartOptionalJobs(cfg.EnableBackgroundWorkers)
@@ -1030,11 +1065,6 @@ func main() {
 	}
 	if eventSourceOK && shouldStartOutbox(cfg.StorageProvider, optionalJobs) {
 		outboxProcessor := jobs.NewOutboxProcessor(store, cfg.LeaderboardRefreshInterval)
-		if rankedCache != nil {
-			outboxProcessor.SetCache(rankedCache, rankedCacheStateAdapter{
-				users: authSvc, performance: performanceSvc,
-			})
-		}
 		outboxProcessor.SetRankedSnapshotRecorder(rankedMutationSnapshotAdapter{history: historySvc})
 		if optionalJobs {
 			outboxProcessor.SetSnapshotRecorder(portfolioSvc)
@@ -1091,6 +1121,7 @@ func main() {
 		go leader.Run(ctx)
 	}
 	leaderboardSvc.SetRefreshBatchSize(cfg.RefreshBatchSize)
+	leaderboardSvc.SetRefreshParallelism(cfg.RefreshParallelism)
 	if optionalJobs {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
 		worker.SetLeaderElector(leader)
@@ -1098,11 +1129,14 @@ func main() {
 		// Private daily portfolio archives remain available for owner analytics;
 		// ranked achievements use the independent canonical snapshot worker below.
 		worker.SetPortfolioSnapshotter(portfolioSnapshotAdapter{
-			portfolio: portfolioSvc, users: authSvc, batchSize: cfg.RefreshBatchSize,
+			portfolio: portfolioSvc,
+			walker:    &userBatchWalker{users: authSvc, batch: cfg.RefreshBatchSize},
 		})
 		worker.Start(ctx)
 		rankedWorker := jobs.NewRankedSnapshotWorker(rankedSnapshotJobAdapter{
-			users: authSvc, history: historySvc, achievements: achievementsSvc,
+			walker:       &userBatchWalker{users: authSvc, batch: cfg.RefreshBatchSize},
+			history:      historySvc,
+			achievements: achievementsSvc,
 		}, cfg.RankedSnapshotInterval)
 		rankedWorker.Start(ctx)
 	} else {
@@ -1223,6 +1257,7 @@ func main() {
 			"real_market_data": strconv.FormatBool(cfg.EnableRealMarketData && priceProviderName == "twelvedata"),
 		},
 	})
+	outboxAdmin, _ := repos.portfolio.(server.OutboxAdmin)
 	operationsHandler := server.NewOperations(server.Deps{
 		ReadinessChecks: readinessChecks,
 		Info: map[string]string{
@@ -1230,6 +1265,7 @@ func main() {
 			"price_provider":   priceProviderName,
 			"real_market_data": strconv.FormatBool(cfg.EnableRealMarketData && priceProviderName == "twelvedata"),
 		},
+		OutboxAdmin: outboxAdmin,
 	})
 
 	slog.Info("finance_app API starting",

@@ -1,0 +1,27 @@
+# Disposable PostgreSQL for the DATABASE_URL_TEST-gated integration tests
+# (see README.md's Verification section — `seedUser` and friends across the
+# *_pg_test.go files insert real rows and never delete them, because they're
+# meant to run against a database nothing else reads). This runs on a
+# distinct port from the dev stack's postgres (5432) and stores data on
+# tmpfs, so `scripts/test-db.sh down` (or simply the container going away)
+# always leaves nothing behind — there is no volume for these tests to
+# accidentally pollute across runs, and it can never collide with the dev
+# database no matter what DATABASE_URL_TEST gets pointed at by mistake.
+name: finance-app-test-db
+
+services:
+  postgres-test:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: finance_app
+    ports:
+      - "5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finance_app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

@@ -45,6 +45,14 @@ const (
 	// cmd/api/main.go). 0 would mean unbounded; the default here is always a
 	// real cap rather than opt-in, since both jobs run on a short ticker.
 	defaultRefreshBatchSize = 500
+	// defaultRefreshParallelism is how many users of a leaderboard refresh
+	// batch are revalued concurrently (see
+	// leaderboard.Service.SetRefreshParallelism). Parallelism divides the
+	// wall-clock time of a full refresh cycle, which keeps the ranking
+	// projection's build time inside its trust window as the population
+	// grows. 4 is a conservative default that quarters cycle time without
+	// meaningfully pressuring the database pool or price caches.
+	defaultRefreshParallelism = 4
 )
 
 // Config holds runtime configuration sourced from the environment.
@@ -78,7 +86,10 @@ type Config struct {
 	// and daily-snapshot jobs (see defaultRefreshBatchSize above). Shared
 	// between the two since both are "full valuation over all users" jobs
 	// with the identical scaling problem.
-	RefreshBatchSize               int
+	RefreshBatchSize int
+	// RefreshParallelism bounds concurrent per-user valuations within one
+	// leaderboard refresh batch (see defaultRefreshParallelism above).
+	RefreshParallelism             int
 	PriceCacheTTL                  time.Duration
 	EnableRealMarketData           bool
 	TwelveDataAPIKey               string
@@ -184,6 +195,11 @@ type Config struct {
 	// bootstrap entirely — role assignment then requires a direct database
 	// action, never a public API.
 	AdminBootstrapEmail string
+
+	// SentryDSN enables error reporting (panics + explicit 5xx capture) when
+	// set; empty disables it entirely (sentry-go no-ops with an empty DSN, so
+	// callers never need to branch on this beyond passing it through).
+	SentryDSN string
 }
 
 // Load reads configuration from environment variables, falling back to
@@ -212,6 +228,7 @@ func Load() Config {
 		OutboxReadinessMaxAge:          getEnvDuration("OUTBOX_READINESS_MAX_AGE", 15*time.Minute),
 		LeaderboardRefreshInterval:     time.Duration(getEnvInt("LEADERBOARD_REFRESH_INTERVAL_SECONDS", defaultLeaderboardSecs)) * time.Second,
 		RefreshBatchSize:               getEnvInt("REFRESH_BATCH_SIZE", defaultRefreshBatchSize),
+		RefreshParallelism:             getEnvInt("LEADERBOARD_REFRESH_PARALLELISM", defaultRefreshParallelism),
 		PriceCacheTTL:                  time.Duration(getEnvInt("PRICE_CACHE_TTL_SECONDS", defaultPriceCacheSecs)) * time.Second,
 		EnableRealMarketData:           getEnvBool("ENABLE_REAL_MARKET_DATA", false),
 		TwelveDataAPIKey:               getEnv("TWELVE_DATA_API_KEY", ""),
@@ -296,6 +313,8 @@ func Load() Config {
 		ReauthenticationTTL:         getEnvDuration("REAUTHENTICATION_TTL", 5*time.Minute),
 
 		AdminBootstrapEmail: getEnv("ADMIN_BOOTSTRAP_EMAIL", ""),
+
+		SentryDSN: getEnv("SENTRY_DSN", ""),
 	}
 }
 

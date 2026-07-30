@@ -498,6 +498,16 @@ func (r *PostgresRepository) WithLockedPortfolio(ctx context.Context, userID str
 // this window, so no work is lost.
 const outboxLeaseTTL = 5 * time.Minute
 
+// outboxMaxAttempts caps how many times a failing event is retried before it
+// is dead-lettered. Without a cap, a permanently unpriceable symbol (delisted
+// ticker, provider coverage gap) retries forever and its growing age poisons
+// the readiness backlog check for the whole pod.
+const outboxMaxAttempts = 10
+
+// outboxMaxBackoff bounds the exponential backoff between retries so a
+// persistently failing dependency isn't hammered every poll interval.
+const outboxMaxBackoff = time.Hour
+
 // ClaimOutboxEvents claims unprocessed events exclusively.
 //
 // Two mechanisms combine: FOR UPDATE SKIP LOCKED prevents two workers colliding
@@ -512,7 +522,9 @@ func (r *PostgresRepository) ClaimOutboxEvents(ctx context.Context, limit int) (
 		WHERE id IN (
 			SELECT id FROM portfolio_outbox
 			WHERE processed_at IS NULL
+			  AND dead_lettered_at IS NULL
 			  AND (claimed_at IS NULL OR claimed_at < NOW() - $2::interval)
+			  AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
 			ORDER BY created_at
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
@@ -555,10 +567,22 @@ func (r *PostgresRepository) MarkOutboxProcessed(ctx context.Context, id string)
 }
 
 // MarkOutboxFailed records the failure and RELEASES the lease so the event is
-// retried promptly rather than waiting for the lease to expire.
+// retried after an exponential backoff. Once attempt_count (already
+// incremented by the claim that produced this failure) reaches
+// outboxMaxAttempts, the event is dead-lettered instead of scheduled again:
+// it stops being claimed and drops out of the readiness backlog, so one
+// permanently failing event can no longer take the pod out of rotation.
 func (r *PostgresRepository) MarkOutboxFailed(ctx context.Context, id, cause string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE portfolio_outbox SET last_error=$2, claimed_at=NULL WHERE id=$1`, id, cause)
+	_, err := r.pool.Exec(ctx, `
+		UPDATE portfolio_outbox
+		   SET last_error = $2,
+		       claimed_at = NULL,
+		       next_attempt_at = CASE WHEN attempt_count >= $3 THEN next_attempt_at
+		                              ELSE NOW() + (LEAST(POWER(2, attempt_count), $4) * INTERVAL '1 second')
+		                         END,
+		       dead_lettered_at = CASE WHEN attempt_count >= $3 THEN NOW() ELSE NULL END
+		 WHERE id = $1`,
+		id, cause, outboxMaxAttempts, outboxMaxBackoff.Seconds())
 	if err != nil {
 		return fmt.Errorf("portfolio: mark outbox failed: %w", err)
 	}
@@ -570,7 +594,7 @@ func (r *PostgresRepository) OutboxBacklog(ctx context.Context) (int64, time.Dur
 	var oldest *time.Time
 	if err := r.pool.QueryRow(ctx, `
 		SELECT count(*), min(created_at)
-		FROM portfolio_outbox WHERE processed_at IS NULL`).Scan(&count, &oldest); err != nil {
+		FROM portfolio_outbox WHERE processed_at IS NULL AND dead_lettered_at IS NULL`).Scan(&count, &oldest); err != nil {
 		return 0, 0, fmt.Errorf("portfolio: inspect outbox backlog: %w", err)
 	}
 	if oldest == nil {
@@ -581,6 +605,64 @@ func (r *PostgresRepository) OutboxBacklog(ctx context.Context) (int64, time.Dur
 		age = 0
 	}
 	return count, age, nil
+}
+
+// ListDeadLetteredOutbox returns events that exhausted outboxMaxAttempts, most
+// recently dead-lettered first, for an operator to inspect.
+func (r *PostgresRepository) ListDeadLetteredOutbox(ctx context.Context, limit int) ([]OutboxEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, event_type, aggregate_type, aggregate_id, aggregate_version,
+		       user_id, ranked_index, ranking_status, tracking_started_at,
+		       valuation_as_of, data_quality_status, created_at, attempt_count,
+		       last_error, dead_lettered_at
+		FROM portfolio_outbox
+		WHERE dead_lettered_at IS NOT NULL
+		ORDER BY dead_lettered_at DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio: list dead-lettered outbox: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]OutboxEvent, 0, limit)
+	for rows.Next() {
+		var (
+			ev         OutboxEvent
+			eventType  string
+			lastError  *string
+			deadLetter *time.Time
+		)
+		if err := rows.Scan(&ev.ID, &eventType, &ev.AggregateType, &ev.AggregateID,
+			&ev.AggregateVersion, &ev.UserID, &ev.RankedIndex, &ev.RankingStatus,
+			&ev.TrackingStartedAt, &ev.ValuationAsOf, &ev.DataQualityStatus,
+			&ev.CreatedAt, &ev.AttemptCount, &lastError, &deadLetter); err != nil {
+			return nil, fmt.Errorf("portfolio: scan dead-lettered outbox: %w", err)
+		}
+		ev.EventType = OutboxEventType(eventType)
+		if lastError != nil {
+			ev.LastError = *lastError
+		}
+		ev.DeadLetteredAt = deadLetter
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+// RequeueOutboxEvent clears a dead-lettered event's terminal state (and resets
+// its attempt count) so the processor claims and retries it on the next poll.
+func (r *PostgresRepository) RequeueOutboxEvent(ctx context.Context, id string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE portfolio_outbox
+		   SET dead_lettered_at = NULL, next_attempt_at = NULL, claimed_at = NULL,
+		       attempt_count = 0, last_error = NULL
+		 WHERE id = $1 AND dead_lettered_at IS NOT NULL`, id)
+	if err != nil {
+		return fmt.Errorf("portfolio: requeue outbox event: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrOutboxEventNotDeadLettered
+	}
+	return nil
 }
 
 // newAuditID is used by callers that need a stable audit identifier.

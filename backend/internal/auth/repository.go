@@ -28,6 +28,11 @@ type UserRepository interface {
 	// verification token, and the corresponding durable email-outbox message.
 	// A failure must leave none of the three records behind.
 	CreateWithVerification(ctx context.Context, user *User, token LifecycleToken, email EmailOutboxMessage, initHooks ...TxInitHook) error
+	// CreateProviderUser atomically persists a new OAuth-originated user
+	// together with its provider identity and required aggregate
+	// initialization. A failure leaves none of the three records behind,
+	// the same guarantee CreateWithVerification gives password registrations.
+	CreateProviderUser(ctx context.Context, user *User, identity *AuthIdentity, initHooks ...TxInitHook) error
 	// FindByEmail looks up a user by email. The email is normalized internally,
 	// so callers may pass any casing. Returns ErrUserNotFound on a miss.
 	FindByEmail(email string) (*User, error)
@@ -154,6 +159,48 @@ func (r *InMemoryUserRepository) CreateWithVerification(
 	r.byEmail[key] = &stored
 	r.emailTokens = append(r.emailTokens, memoryLifecycleToken{LifecycleToken: token})
 	r.emailOutbox = append(r.emailOutbox, email)
+	r.mu.Unlock()
+
+	for _, hook := range initHooks {
+		if err := hook(ctx, nil, user.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *InMemoryUserRepository) CreateProviderUser(
+	ctx context.Context,
+	user *User,
+	identity *AuthIdentity,
+	initHooks ...TxInitHook,
+) error {
+	r.mu.Lock()
+
+	key := normalizeEmail(user.Email)
+	if _, exists := r.byEmail[key]; exists {
+		r.mu.Unlock()
+		return ErrEmailExists
+	}
+	idKey := identityKey(identity.Provider, identity.ProviderSubject)
+	if _, exists := r.identities[idKey]; exists {
+		r.mu.Unlock()
+		return ErrEmailExists
+	}
+	stored := *user
+	if stored.AuthVersion == 0 {
+		stored.AuthVersion = 1
+	}
+	if stored.PasswordHash != "" {
+		stored.HasPassword = true
+	}
+	if stored.Role == "" {
+		stored.Role = RoleUser
+	}
+	r.byID[stored.ID] = &stored
+	r.byEmail[key] = &stored
+	storedIdentity := *identity
+	r.identities[idKey] = &storedIdentity
 	r.mu.Unlock()
 
 	for _, hook := range initHooks {

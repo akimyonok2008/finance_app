@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/money"
@@ -65,6 +66,7 @@ type OutboxEvent struct {
 	ProcessedAt       *time.Time
 	AttemptCount      int
 	LastError         string
+	DeadLetteredAt    *time.Time
 
 	// InstrumentID, DisplaySymbolAtEventTime and ProviderReferenceAtEventTime
 	// are snapshots of the mutation's instrument identity at commit time, so
@@ -164,4 +166,17 @@ type AggregateStore interface {
 	// acquired; this is purely an optimization to avoid upstream provider calls
 	// for requests that are already known to be duplicates.
 	FindAuditByRequestID(ctx context.Context, userID, requestID string) (MutationAudit, bool, error)
+
+	// ListDeadLetteredOutbox returns events that exhausted outboxMaxAttempts,
+	// most recently dead-lettered first, for an operator to inspect.
+	ListDeadLetteredOutbox(ctx context.Context, limit int) ([]OutboxEvent, error)
+	// RequeueOutboxEvent clears a dead-lettered event's terminal state so the
+	// processor claims and retries it again (attempt_count resets to 0). It is
+	// an operator escape hatch for the case a dead letter turns out to be
+	// recoverable (e.g. the price provider gap was fixed upstream).
+	RequeueOutboxEvent(ctx context.Context, id string) error
 }
+
+// ErrOutboxEventNotDeadLettered is returned by RequeueOutboxEvent when the id
+// doesn't exist or isn't currently dead-lettered (nothing to requeue).
+var ErrOutboxEventNotDeadLettered = errors.New("outbox event not found or not dead-lettered")

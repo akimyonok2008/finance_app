@@ -53,6 +53,16 @@ const LeaderboardPage = lazy(() =>
     default: LeaderboardPage,
   })),
 );
+const ArenaPage = lazy(() =>
+  import("@/pages/arena/ArenaPage").then(({ ArenaPage }) => ({
+    default: ArenaPage,
+  })),
+);
+const CompetitionDetailPage = lazy(() =>
+  import("@/pages/arena/CompetitionDetailPage").then(({ CompetitionDetailPage }) => ({
+    default: CompetitionDetailPage,
+  })),
+);
 const MyProfilePage = lazy(() =>
   import("@/pages/Profile/MyProfilePage").then(({ MyProfilePage }) => ({
     default: MyProfilePage,
@@ -107,6 +117,11 @@ const ReportsQueuePage = lazy(() =>
 const PrivacyPolicyPage = lazy(() =>
   import("@/pages/PrivacyPolicyPage").then(({ PrivacyPolicyPage }) => ({
     default: PrivacyPolicyPage,
+  })),
+);
+const NotFoundPage = lazy(() =>
+  import("@/pages/NotFoundPage").then(({ NotFoundPage }) => ({
+    default: NotFoundPage,
   })),
 );
 
@@ -189,7 +204,23 @@ export default function App() {
                 }
               />
 
-              <Route path="/arena" element={<Navigate to="/leaderboard" replace />} />
+              <Route
+                path="/arena"
+                element={
+                  <ProtectedRoute>
+                    <ArenaPage />
+                  </ProtectedRoute>
+                }
+              />
+
+              <Route
+                path="/arena/competitions/:competitionId"
+                element={
+                  <ProtectedRoute>
+                    <CompetitionDetailPage />
+                  </ProtectedRoute>
+                }
+              />
 
               <Route
                 path="/profile"
@@ -276,8 +307,7 @@ export default function App() {
 
               <Route path="/" element={<PublicHomeRoute />} />
 
-              {/* Fallback for unimplemented routes */}
-              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+              <Route path="*" element={<NotFoundPage />} />
             </Routes>
           </Suspense>
 

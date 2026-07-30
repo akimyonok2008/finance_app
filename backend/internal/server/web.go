@@ -19,6 +19,37 @@ func serveIndex(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(indexHTML)
 }
 
+// securityHeaders sets the baseline response headers every endpoint should
+// carry regardless of content type. This API is reachable directly (the
+// compose topology exposes it on its own port, not only behind the SPA's
+// nginx origin), so it cannot rely on a front proxy to add these:
+//
+//   - X-Content-Type-Options: nosniff — stops a browser from re-interpreting
+//     a JSON error body as HTML/JS if a client ever mis-renders a response.
+//   - Referrer-Policy: strict-origin-when-cross-origin — avoids leaking full
+//     request paths (which can carry tokens/ids in query strings) to a
+//     cross-origin Referer.
+//   - X-Frame-Options: DENY — this is a JSON API with no embeddable UI of its
+//     own, so there is no legitimate framing case to allow.
+//   - Strict-Transport-Security — only added in production, since HSTS on a
+//     plain-HTTP development origin is meaningless and can be actively
+//     harmful if that host/port is ever reused without TLS.
+func securityHeaders(appEnv string) func(http.Handler) http.Handler {
+	isProduction := strings.EqualFold(appEnv, "production")
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			h.Set("X-Frame-Options", "DENY")
+			if isProduction {
+				h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // corsMiddleware builds the CORS policy from the deployment environment and
 // an optional explicit allow-list (CORS_ALLOWED_ORIGINS):
 //

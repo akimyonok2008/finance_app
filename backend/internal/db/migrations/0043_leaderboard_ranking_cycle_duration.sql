@@ -1,0 +1,14 @@
+-- Adaptive projection trust window. The ranking projection used to be trusted
+-- for a fixed 30 minutes after activation, but a full build cycle takes
+-- ceil(users / batch) ticks — linear in population. Once the population grows
+-- past the point where a cycle outlasts the fixed window, every read falls
+-- back to the O(N) live path for the tail of every cycle, and the extra load
+-- slows the refresh further (a self-reinforcing feedback loop).
+--
+-- The fix: CompleteCycle records how long the just-promoted generation took
+-- to build, and Service.rankingFresh trusts the active generation for
+-- max(configured floor, 2 x last_cycle_seconds), capped by a hard limit that
+-- only trips when the refresh pipeline is genuinely dead. The projection is
+-- then trusted for as long as the pipeline is demonstrably still cycling,
+-- regardless of population size.
+ALTER TABLE leaderboard_ranking_state ADD COLUMN last_cycle_seconds DOUBLE PRECISION;

@@ -408,13 +408,17 @@ func cloneActivity(activity Activity) Activity {
 func (r *InMemoryRepository) ClaimOutboxEvents(_ context.Context, limit int) ([]OutboxEvent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := time.Now().UTC()
 	out := make([]OutboxEvent, 0, limit)
 	for i := range r.outbox {
 		if len(out) >= limit {
 			break
 		}
 		ev := &r.outbox[i]
-		if ev.ProcessedAt != nil || r.claimed[ev.ID] {
+		if ev.ProcessedAt != nil || ev.DeadLetteredAt != nil || r.claimed[ev.ID] {
+			continue
+		}
+		if next, ok := r.nextAttempt[ev.ID]; ok && now.Before(next) {
 			continue
 		}
 		r.claimed[ev.ID] = true
@@ -438,13 +442,29 @@ func (r *InMemoryRepository) MarkOutboxProcessed(_ context.Context, id string) e
 	return nil
 }
 
+// MarkOutboxFailed records the failure and schedules a backoff-delayed retry.
+// Once attempt_count (already incremented by the claim that produced this
+// failure) reaches outboxMaxAttempts, the event is dead-lettered instead: it
+// stops being claimed and drops out of the readiness backlog, mirroring the
+// Postgres behaviour in PostgresRepository.MarkOutboxFailed.
 func (r *InMemoryRepository) MarkOutboxFailed(_ context.Context, id, cause string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	delete(r.claimed, id) // released for retry
 	for i := range r.outbox {
 		if r.outbox[i].ID == id {
 			r.outbox[i].LastError = cause
-			delete(r.claimed, id) // released for retry
+			if r.outbox[i].AttemptCount >= outboxMaxAttempts {
+				now := time.Now().UTC()
+				r.outbox[i].DeadLetteredAt = &now
+				delete(r.nextAttempt, id)
+			} else {
+				backoff := time.Duration(1<<uint(r.outbox[i].AttemptCount)) * time.Second
+				if backoff > outboxMaxBackoff {
+					backoff = outboxMaxBackoff
+				}
+				r.nextAttempt[id] = time.Now().UTC().Add(backoff)
+			}
 			return nil
 		}
 	}
@@ -460,7 +480,7 @@ func (r *InMemoryRepository) OutboxBacklog(ctx context.Context) (int64, time.Dur
 	var pending int64
 	var oldest time.Time
 	for _, event := range r.outbox {
-		if event.ProcessedAt != nil {
+		if event.ProcessedAt != nil || event.DeadLetteredAt != nil {
 			continue
 		}
 		pending++
@@ -472,6 +492,38 @@ func (r *InMemoryRepository) OutboxBacklog(ctx context.Context) (int64, time.Dur
 		return pending, 0, nil
 	}
 	return pending, time.Since(oldest), nil
+}
+
+// ListDeadLetteredOutbox returns events that exhausted outboxMaxAttempts, most
+// recently dead-lettered first, for an operator to inspect.
+func (r *InMemoryRepository) ListDeadLetteredOutbox(_ context.Context, limit int) ([]OutboxEvent, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]OutboxEvent, 0, limit)
+	for i := len(r.outbox) - 1; i >= 0 && len(out) < limit; i-- {
+		if r.outbox[i].DeadLetteredAt != nil {
+			out = append(out, r.outbox[i])
+		}
+	}
+	return out, nil
+}
+
+// RequeueOutboxEvent clears a dead-lettered event's terminal state (and resets
+// its attempt count) so ClaimOutboxEvents picks it up again.
+func (r *InMemoryRepository) RequeueOutboxEvent(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.outbox {
+		if r.outbox[i].ID == id && r.outbox[i].DeadLetteredAt != nil {
+			r.outbox[i].DeadLetteredAt = nil
+			r.outbox[i].AttemptCount = 0
+			r.outbox[i].LastError = ""
+			delete(r.nextAttempt, id)
+			delete(r.claimed, id)
+			return nil
+		}
+	}
+	return ErrOutboxEventNotDeadLettered
 }
 
 // --- ranked-state read side ---------------------------------------------------

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -172,70 +171,13 @@ func TestBuildResult_ReportsSkippedCount(t *testing.T) {
 	assert.Equal(t, 1, res.SkippedCount)
 }
 
-// --- cache integration (Phase 3) ----------------------------------------------
+// --- refresh / projection maintenance -----------------------------------------
 
-func cacheUsers() fakeUsers {
-	return fakeUsers{users: []auth.User{user("u1", "Alpha"), user("u2", "Beta")}}
-}
-
-func TestBuild_CacheMembershipUsesCanonicalPersistentRanking(t *testing.T) {
-	// Redis deliberately disagrees with the persistent projection. It may select
-	// members, but its float scores must not determine values or ordering.
-	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary("1.0", "101"), "u2": summary("2.0", "102"),
-	}}
-	svc := NewService(cacheUsers(), sums)
-	cache := newTestCache(t)
-	svc.SetCache(cache)
-
-	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "u1", testRatio("50.0")))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "u2", testRatio("25.0")))
-
-	board, err := svc.Build(ctx)
-	require.NoError(t, err)
-	require.Len(t, board, 2)
-	assert.Equal(t, "Beta", board[0].DisplayName)
-	assert.Equal(t, 2.0, board[0].GainLossPercentage.Float64())
-	assert.Equal(t, 102.0, board[0].PortfolioIndex.Float64())
-	assert.Equal(t, 1, board[0].Rank)
-}
-
-func TestBuild_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
-	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary("8.1", "108.1"), "u2": summary("12.4", "112.4"),
-	}}
-	svc := NewService(cacheUsers(), sums)
-	svc.SetCache(newTestCache(t)) // attached but empty
-
-	board, err := svc.Build(context.Background())
-	require.NoError(t, err)
-	require.Len(t, board, 2)
-	assert.Equal(t, "Beta", board[0].DisplayName, "live calculation must be used when cache is empty")
-	assert.InDelta(t, 12.4, board[0].GainLossPercentage.Float64(), 0.001)
-}
-
-func TestRefreshCache_PopulatesScores(t *testing.T) {
-	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary("8.1", "108.1"), "u2": summary("12.4", "112.4"),
-	}}
-	svc := NewService(cacheUsers(), sums)
-	cache := newTestCache(t)
-	svc.SetCache(cache)
-
-	ctx := context.Background()
-	skipped, err := svc.RefreshCache(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 0, skipped)
-
-	top, err := cache.GetGlobalTop(ctx, 10)
-	require.NoError(t, err)
-	require.Len(t, top, 2)
-	assert.Equal(t, "u2", top[0].UserID)
-	assert.InDelta(t, 12.4, top[0].Score, 0.001)
-}
-
-func TestRefreshCache_ReconcilesPausedDeletedAndPreservesValuationFailures(t *testing.T) {
+// TestRefreshCache_PausedUserExcludedFromNextGeneration proves the projection
+// analogue of the old Redis eviction rule: a user who empties their portfolio
+// must drop out of the next promoted generation, and a user whose valuation
+// merely fails is skipped (counted) without blocking anyone else.
+func TestRefreshCache_PausedUserExcludedFromNextGeneration(t *testing.T) {
 	users := fakeUsers{users: []auth.User{
 		user("active", "Active"), user("paused", "Paused"), user("unpriced", "Unpriced"),
 	}}
@@ -249,56 +191,26 @@ func TestRefreshCache_ReconcilesPausedDeletedAndPreservesValuationFailures(t *te
 		errs: map[string]error{"unpriced": errors.New("temporary quote failure")},
 	}
 	svc := NewService(users, sums)
-	cache := newTestCache(t)
-	svc.SetCache(cache)
+	ranking := newFakeRankingStore(users.users)
+	svc.SetRankingStore(ranking)
 	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "paused", testRatio("12")))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "deleted", testRatio("40")))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "unpriced", testRatio("5")))
 
 	skipped, err := svc.RefreshCache(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, skipped)
-	top, err := cache.GetGlobalTop(ctx, 0)
-	require.NoError(t, err)
-	require.Len(t, top, 2)
-	assert.ElementsMatch(t, []string{"active", "unpriced"},
-		[]string{top[0].UserID, top[1].UserID})
 
-	// Reconciliation is idempotent.
+	rows, err := ranking.TopPage(ctx, TimeframeAll, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "paused and failing users must be excluded from the promoted generation")
+	assert.Equal(t, "active", rows[0].userID)
+
+	// Idempotent: a second full cycle converges on the same state.
 	skipped, err = svc.RefreshCache(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, skipped)
-	top, err = cache.GetGlobalTop(ctx, 0)
+	rows, err = ranking.TopPage(ctx, TimeframeAll, 10)
 	require.NoError(t, err)
-	assert.Len(t, top, 2)
-}
-
-func TestRefreshCache_ConcurrentWorkersConvergeIdempotently(t *testing.T) {
-	users := cacheUsers()
-	sums := fakeRanked{byUser: map[string]RankedPerformance{
-		"u1": summary("8.1", "108.1"), "u2": summary("12.4", "112.4"),
-	}}
-	cache := newTestCache(t)
-	services := []*Service{NewService(users, sums), NewService(users, sums)}
-	for _, svc := range services {
-		svc.SetCache(cache)
-	}
-
-	var wg sync.WaitGroup
-	for _, svc := range services {
-		wg.Add(1)
-		go func(svc *Service) {
-			defer wg.Done()
-			_, err := svc.RefreshCache(context.Background())
-			assert.NoError(t, err)
-		}(svc)
-	}
-	wg.Wait()
-	top, err := cache.GetGlobalTop(context.Background(), 0)
-	require.NoError(t, err)
-	require.Len(t, top, 2)
-	assert.Equal(t, "u2", top[0].UserID)
+	assert.Len(t, rows, 1)
 }
 
 // TestRefreshCache_BatchedRevaluesBoundedSubsetPerCall locks in the fix for
@@ -306,15 +218,15 @@ func TestRefreshCache_ConcurrentWorkersConvergeIdempotently(t *testing.T) {
 // user on every call (a problem on a short ticker interval as user count
 // grows): with SetRefreshBatchSize(1) on three users, each call must only
 // call CurrentRankedPerformance for one user, and three calls must cover all
-// three without ever wrongly evicting the two users not revalued that call.
+// three.
 func TestRefreshCache_BatchedRevaluesBoundedSubsetPerCall(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "A"), user("u2", "B"), user("u3", "C")}}
 	counts := &countingRanked{byUser: map[string]RankedPerformance{
 		"u1": summary("1", "101"), "u2": summary("2", "102"), "u3": summary("3", "103"),
 	}}
 	svc := NewService(users, counts)
-	cache := newTestCache(t)
-	svc.SetCache(cache)
+	ranking := newFakeRankingStore(users.users)
+	svc.SetRankingStore(ranking)
 	svc.SetRefreshBatchSize(1)
 	ctx := context.Background()
 
@@ -329,11 +241,11 @@ func TestRefreshCache_BatchedRevaluesBoundedSubsetPerCall(t *testing.T) {
 	assert.Equal(t, 1, counts.calls["u2"])
 	assert.Equal(t, 1, counts.calls["u3"])
 
-	// All three must still be present in the cache: a user not revalued on a
-	// given call must never be evicted as if deleted/unrankable.
-	top, err := cache.GetGlobalTop(ctx, 0)
+	// The full cycle just completed, so the promoted generation covers all
+	// three users — no one was dropped for being outside an earlier batch.
+	rows, err := ranking.TopPage(ctx, TimeframeAll, 10)
 	require.NoError(t, err)
-	assert.Len(t, top, 3)
+	assert.Len(t, rows, 3)
 }
 
 // TestRefreshCache_PromotesGenerationOnlyAfterFullCycle locks in the fix for
@@ -422,27 +334,6 @@ func (c *countingRanked) CurrentRankedPerformance(_ context.Context, userID stri
 		return RankedPerformance{}, errors.New("no ranked performance")
 	}
 	return rp, nil
-}
-
-func TestCachedReadRemovesUnknownUserMember(t *testing.T) {
-	svc := NewService(
-		fakeUsers{users: []auth.User{user("active", "Active")}},
-		fakeRanked{byUser: map[string]RankedPerformance{"active": summary("8", "108")}},
-	)
-	cache := newTestCache(t)
-	svc.SetCache(cache)
-	ctx := context.Background()
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "ghost", testRatio("99")))
-	require.NoError(t, cache.UpsertGlobalScore(ctx, "active", testRatio("8")))
-
-	board, err := svc.Build(ctx)
-	require.NoError(t, err)
-	require.Len(t, board, 1)
-	assert.Equal(t, "Active", board[0].DisplayName)
-	top, err := cache.GetGlobalTop(ctx, 0)
-	require.NoError(t, err)
-	require.Len(t, top, 1)
-	assert.Equal(t, "active", top[0].UserID)
 }
 
 func TestBuild_ListUsersErrorIsReturned(t *testing.T) {

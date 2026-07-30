@@ -136,6 +136,59 @@ func (r *PostgresUserRepository) CreateWithVerification(
 	return nil
 }
 
+func (r *PostgresUserRepository) CreateProviderUser(
+	ctx context.Context,
+	user *User,
+	identity *AuthIdentity,
+	initHooks ...TxInitHook,
+) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("auth repository: begin provider registration: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	authVersion := user.AuthVersion
+	if authVersion == 0 {
+		authVersion = 1
+	}
+	hasPassword := user.HasPassword || user.PasswordHash != ""
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO users (
+			id, email, password_hash, display_name, avatar_key,
+			email_verified_at, auth_version, has_password, signup_ip_hash
+		) VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, NULLIF($9, ''))
+	`, user.ID, normalizeEmail(user.Email), user.PasswordHash, user.DisplayName, user.AvatarKey,
+		user.EmailVerifiedAt, authVersion, hasPassword, user.SignupIPHash); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrEmailExists
+		}
+		return fmt.Errorf("auth repository: create provider user: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO auth_identities (
+			id, user_id, provider, provider_subject, email, email_verified
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`, identity.ID, identity.UserID, string(identity.Provider), identity.ProviderSubject,
+		normalizeEmail(identity.Email), identity.EmailVerified); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrEmailExists
+		}
+		return fmt.Errorf("auth repository: create provider identity: %w", err)
+	}
+	for _, hook := range initHooks {
+		if err := hook(ctx, tx, user.ID); err != nil {
+			return fmt.Errorf("auth repository: provider init hook: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("auth repository: commit provider registration: %w", err)
+	}
+	return nil
+}
+
 func (r *PostgresUserRepository) ClaimEmailOutbox(
 	ctx context.Context,
 	limit int,
@@ -280,6 +333,38 @@ func (r *PostgresUserRepository) ListUsers(ctx context.Context) ([]User, error) 
 	defer rows.Close()
 
 	var out []User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, fmt.Errorf("auth repository: scan user row: %w", err)
+		}
+		out = append(out, *u)
+	}
+	return out, rows.Err()
+}
+
+// ListUsersPage returns up to limit non-deleted users with id > afterID,
+// ordered by id — the keyset page behind auth.Service.ListRankableUsersPage.
+// A single indexed range scan on the primary key, so cost is O(limit)
+// regardless of population size. An empty afterID ("start of the population")
+// maps to the nil UUID, since the id column is a UUID and can't compare
+// against an empty string.
+func (r *PostgresUserRepository) ListUsersPage(ctx context.Context, afterID string, limit int) ([]User, error) {
+	if afterID == "" {
+		afterID = "00000000-0000-0000-0000-000000000000"
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+userColumns+` FROM users
+		 WHERE deleted_at IS NULL AND id > $1
+		 ORDER BY id
+		 LIMIT $2`, afterID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("auth repository: list users page: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]User, 0, limit)
 	for rows.Next() {
 		u, err := scanUser(rows)
 		if err != nil {

@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /account
+Disallow: /dashboard
+Disallow: /messages
+Disallow: /portfolio
+Disallow: /reports
+Disallow: /settings

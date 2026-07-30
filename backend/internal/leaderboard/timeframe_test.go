@@ -260,9 +260,6 @@ func TestUserStanding_PausedOverridesAnyCachedRankAndPreservesIndex(t *testing.T
 		RankedIndex: testIndex("112"), RankedReturnPercentage: testRatio("12"), Paused: true,
 	}
 	svc := NewService(users, fakeRanked{byUser: map[string]RankedPerformance{"u1": paused}})
-	cache := newTestCache(t)
-	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", testRatio("12")))
-	svc.SetCache(cache)
 
 	st, err := svc.UserStanding(context.Background(), "u1", TimeframeAll)
 	require.NoError(t, err)
@@ -273,46 +270,36 @@ func TestUserStanding_PausedOverridesAnyCachedRankAndPreservesIndex(t *testing.T
 	assert.Contains(t, st.Reason, "paused")
 }
 
-func TestGetUserRank_PausedStateEvictsStaleCachedRank(t *testing.T) {
+func TestGetUserRank_PausedStateIsUnranked(t *testing.T) {
 	users := fakeUsers{users: []auth.User{user("u1", "Alpha")}}
 	paused := RankedPerformance{
 		RankedIndex: testIndex("112"), RankedReturnPercentage: testRatio("12"), Paused: true,
 	}
 	svc := NewService(users, fakeRanked{byUser: map[string]RankedPerformance{"u1": paused}})
-	cache := newTestCache(t)
-	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u1", testRatio("12")))
-	svc.SetCache(cache)
 
 	rank, err := svc.GetUserRank(context.Background(), "u1")
 	require.NoError(t, err)
 	assert.Zero(t, rank)
-	top, err := cache.GetGlobalTop(context.Background(), 0)
-	require.NoError(t, err)
-	assert.Empty(t, top)
 }
 
 func TestGetUserRank_ComputesCanonicalRankBeyondTopHundred(t *testing.T) {
 	users := make([]auth.User, 0, 101)
 	ranked := make(map[string]RankedPerformance, 101)
-	cache := newTestCache(t)
 	for i := 1; i <= 101; i++ {
 		id := fmt.Sprintf("u%03d", i)
 		users = append(users, user(id, id))
 		ranked[id] = summary(fmt.Sprintf("%d", 102-i), fmt.Sprintf("%d", 202-i))
-		require.NoError(t, cache.UpsertGlobalScore(context.Background(), id, testRatio(fmt.Sprintf("%d", 102-i))))
 	}
 	svc := NewService(fakeUsers{users: users}, fakeRanked{byUser: ranked})
-	svc.SetCache(cache)
 
 	rank, err := svc.GetUserRank(context.Background(), "u101")
 	require.NoError(t, err)
 	assert.Equal(t, 101, rank)
 }
 
-func TestGetUserRank_IgnoresRedisTieOrder(t *testing.T) {
-	// Redis breaks equal-score ties by member bytes in descending order, while
-	// the application contract uses display name ascending, then user id.
-	// "u-zulu" is therefore first in Redis but must be second canonically.
+func TestGetUserRank_CanonicalTieBreakByDisplayNameThenID(t *testing.T) {
+	// The application contract breaks equal-return ties by display name
+	// ascending, then user id — "u-zulu" sorts second despite equal returns.
 	users := fakeUsers{users: []auth.User{
 		user("u-zulu", "Zulu"),
 		user("u-alpha", "Alpha"),
@@ -321,12 +308,7 @@ func TestGetUserRank_IgnoresRedisTieOrder(t *testing.T) {
 		"u-zulu":  summary("10", "110"),
 		"u-alpha": summary("10", "110"),
 	}}
-	cache := newTestCache(t)
-	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u-zulu", testRatio("10")))
-	require.NoError(t, cache.UpsertGlobalScore(context.Background(), "u-alpha", testRatio("10")))
-
 	svc := NewService(users, ranked)
-	svc.SetCache(cache)
 
 	board, err := svc.Build(context.Background())
 	require.NoError(t, err)
