@@ -206,6 +206,7 @@ func (r *PostgresCompetitionRepository) PromoteGeneration(ctx context.Context, c
 	var processed, successful, failed int
 	if err := tx.QueryRow(ctx, `
 		SELECT status, write_failure, processed_entries, successful_entries, failed_entries
+		FROM competition_ranking_generations
 		WHERE competition_id = $1 AND generation = $2 FOR UPDATE
 	`, competitionID, generation).Scan(&status, &writeFailure, &processed, &successful, &failed); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
