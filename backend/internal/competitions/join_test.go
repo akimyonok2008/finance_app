@@ -298,3 +298,59 @@ func TestRunCompetitionBaselines_FailsClosedThenMarksExplicitly(t *testing.T) {
 	assert.Equal(t, BaselineFailed, entry.BaselineStatus)
 	assert.Contains(t, entry.DisqualificationReason, "AAPL-ID")
 }
+
+// admittedEntry builds a CompetitionEntry awaiting baseline (admitted,
+// baseline pending) for tests that drive RunCompetitionBaselines directly
+// against the repository, bypassing the Join eligibility/window flow.
+func admittedEntry(id, competitionID, userID, symbol string) CompetitionEntry {
+	return CompetitionEntry{
+		ID: id, CompetitionID: competitionID, UserID: userID,
+		EntryStatus: EntryAdmitted, BaselineStatus: BaselinePending,
+		Snapshots: []CompetitionEntrySnapshotPosition{{
+			ID: id + "-pos", CompetitionEntryID: id, Symbol: symbol, AssetType: "crypto",
+			Quantity: money.QuantityFromFloat64(1), Currency: "USD", IncludedInScore: true,
+		}},
+	}
+}
+
+// TestRunCompetitionBaselines_ReusesPersistedObservationAcrossPasses is the
+// regression test for the "batches see different start prices" bug: entry u1
+// is baselined in one pass at BTC-ID=50, the live quote then moves to 100
+// before u2 is admitted and baselined in a later pass. u2 must still receive
+// BTC-ID=50 — the persisted observation captured by the first pass — never a
+// fresh live query.
+func TestRunCompetitionBaselines_ReusesPersistedObservationAcrossPasses(t *testing.T) {
+	h := newHarness(nil, nil)
+	edition := engineEdition(t, h, "crypto-w1", `{"schema_version":1,"scope":"matching_assets","filter":{"asset_types":["crypto"]},"include_cash":false}`)
+	ctx := context.Background()
+
+	require.NoError(t, h.repo.CreateEngineEntry(ctx, admittedEntry("e1", edition.ID, "u1", "BTC-ID")))
+	require.NoError(t, h.repo.TransitionLifecycle(ctx, edition.ID, LifecycleRegistrationOpen, LifecycleRegistrationClosed, fixedTime))
+
+	h.clk.Time = edition.StartsAt.Add(time.Minute)
+	h.mp.Set("BTC-ID", 50, "USD")
+
+	completed, err := h.svc.RunCompetitionBaselines(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, completed)
+
+	// The live quote moves on before the second participant is admitted and
+	// baselined in a later pass.
+	h.mp.Set("BTC-ID", 100, "USD")
+	require.NoError(t, h.repo.CreateEngineEntry(ctx, admittedEntry("e2", edition.ID, "u2", "BTC-ID")))
+
+	completed, err = h.svc.RunCompetitionBaselines(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, completed)
+
+	u1, err := h.repo.GetEntry(ctx, edition.ID, "u1")
+	require.NoError(t, err)
+	u2, err := h.repo.GetEntry(ctx, edition.ID, "u2")
+	require.NoError(t, err)
+	for _, e := range []CompetitionEntry{*u1, *u2} {
+		for _, s := range e.Snapshots {
+			assert.Equal(t, 0, s.StartingPrice.Cmp(money.MustPrice("50")),
+				"user %s must be baselined at the frozen start observation, not the later live quote", e.UserID)
+		}
+	}
+}

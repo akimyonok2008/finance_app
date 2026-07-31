@@ -27,6 +27,7 @@ type ArenaCardWire = {
   participant_count: number;
   joined: boolean;
   entry_status?: string;
+  is_legacy: boolean;
 };
 
 function fromCardWire(w: ArenaCardWire): ArenaCompetitionCard {
@@ -45,22 +46,37 @@ function fromCardWire(w: ArenaCardWire): ArenaCompetitionCard {
     participantCount: w.participant_count,
     joined: w.joined,
     entryStatus: w.entry_status,
+    isLegacy: w.is_legacy,
   };
 }
 
+export type ArenaBucket = "live" | "upcoming" | "mine" | "completed";
+
+type ArenaCataloguePageWire = {
+  items: ArenaCardWire[];
+  has_more: boolean;
+};
+
+export type ArenaCataloguePage = {
+  items: ArenaCompetitionCard[];
+  hasMore: boolean;
+};
+
 export async function getArenaCatalogue(
-  filters: { category?: string; joined?: boolean } = {},
+  filters: { bucket?: ArenaBucket; category?: string; limit?: number; offset?: number } = {},
   signal?: AbortSignal,
-): Promise<ArenaCompetitionCard[]> {
+): Promise<ArenaCataloguePage> {
   const params = new URLSearchParams();
+  if (filters.bucket) params.set("bucket", filters.bucket);
   if (filters.category) params.set("category", filters.category);
-  if (filters.joined !== undefined) params.set("joined", String(filters.joined));
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  if (filters.offset !== undefined) params.set("offset", String(filters.offset));
   const query = params.toString();
-  const cards = await apiRequest<ArenaCardWire[]>(
+  const page = await apiRequest<ArenaCataloguePageWire>(
     `/arena/competitions${query ? `?${query}` : ""}`,
     { signal },
   );
-  return cards.map(fromCardWire);
+  return { items: page.items.map(fromCardWire), hasMore: page.has_more };
 }
 
 export async function getArenaCatalogueItem(

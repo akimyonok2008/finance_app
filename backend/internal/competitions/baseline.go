@@ -80,8 +80,11 @@ func (s *Service) AdvanceCompetitionLifecycles(ctx context.Context) error {
 // RunCompetitionBaselines establishes the common start-time baseline for
 // every admitted entry of every started edition:
 //
-//  1. Price the frozen included composition with one shared observation memo
-//     per pass, so entries baselined together use identical observations.
+//  1. Price the frozen included composition from the competition's persisted
+//     start observation set (competition_observation_sets), capturing any
+//     symbol/pair not yet seen and never re-querying one already captured —
+//     so every entry, in any batch or pass, is baselined from identical
+//     observations (see observations.go, captureObservations).
 //  2. eligible_starting_value_base = Σ included position values + included cash.
 //  3. starting_weight per included position, index normalized to 100.
 //  4. Entry becomes active (baseline completed) — or stays pending for retry,
@@ -91,7 +94,8 @@ func (s *Service) AdvanceCompetitionLifecycles(ctx context.Context) error {
 // baselined partially and never silently dropped.
 func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 	repo, ok := s.repo.(EngineEntryRepository)
-	if !ok {
+	obsRepo, ok2 := s.repo.(ObservationRepository)
+	if !ok || !ok2 {
 		return 0, nil
 	}
 	now := s.clock.Now().UTC()
@@ -113,7 +117,16 @@ func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 		if len(entries) == 0 {
 			continue
 		}
-		memo := newObservationMemo(s)
+		// One shared, persisted observation set per competition — captured
+		// incrementally as new symbols/pairs are first seen across passes,
+		// never re-queried for a symbol already captured. This is what makes
+		// every entry's start-time price/FX identical regardless of which
+		// 200-entry batch or which pass baselines it (see observations.go).
+		memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
+		if err != nil {
+			slog.Error("competition_baseline_observation_capture_failed", "competition_id", comp.ID, "error", err)
+			continue
+		}
 		deadline := comp.StartsAt.Add(window)
 		for _, entry := range entries {
 			if err := s.baselineEntry(ctx, repo, entry, memo, now); err != nil {
@@ -135,6 +148,35 @@ func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 	return completed, nil
 }
 
+// retryCompetitionBaseline runs the same bounded, persisted-observation
+// baseline path as the scheduler, but for one explicitly selected edition.
+func (s *Service) retryCompetitionBaseline(ctx context.Context, comp Competition) error {
+	repo, ok := s.repo.(EngineEntryRepository)
+	obsRepo, ok2 := s.repo.(ObservationRepository)
+	if !ok || !ok2 {
+		return fmt.Errorf("competition baseline repository is unavailable")
+	}
+	if comp.LifecycleStatus != LifecycleRegistrationClosed && comp.LifecycleStatus != LifecycleActive {
+		return fmt.Errorf("baseline retry requires registration_closed or active lifecycle")
+	}
+	now := s.clock.Now().UTC()
+	entries, err := repo.ListPendingBaselineEntries(ctx, comp.ID, defaultBaselineBatch)
+	if err != nil || len(entries) == 0 {
+		return err
+	}
+	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, entry := range entries {
+		if err := s.baselineEntry(ctx, repo, entry, memo, now); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // observationMemo shares one price/FX observation set across a baseline pass,
 // so every entry valued in the pass sees identical observations. Floats exist
 // only at the provider boundary, exactly like the legacy snapshot math.
@@ -146,6 +188,8 @@ type observationMemo struct {
 	}
 	fxRates map[string]money.Ratio // "FROM->TO"
 }
+
+var _ priceSource = (*observationMemo)(nil)
 
 func newObservationMemo(s *Service) *observationMemo {
 	return &observationMemo{
@@ -195,7 +239,7 @@ func (m *observationMemo) toBase(ctx context.Context, value money.Amount, curren
 // baselineEntry values one entry's included composition and persists the
 // official baseline atomically. Any single unpriceable component aborts the
 // whole entry (no partial baselines).
-func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository, entry CompetitionEntry, memo *observationMemo, now time.Time) error {
+func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository, entry CompetitionEntry, memo priceSource, now time.Time) error {
 	type valued struct {
 		snapshotID string
 		price      money.Price

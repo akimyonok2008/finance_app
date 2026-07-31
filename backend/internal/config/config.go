@@ -301,7 +301,7 @@ func Load() Config {
 		AppleRedirectURI:  getEnv("APPLE_REDIRECT_URI", ""),
 
 		PasswordRegistrationEnabled: getEnvBool("PASSWORD_REGISTRATION_ENABLED", true),
-		PublicAppURL:                getEnv("PUBLIC_APP_URL", "http://localhost:5173"),
+		PublicAppURL:                getEnv("PUBLIC_APP_URL", "http://localhost:5137"),
 		EmailSender:                 getEnv("EMAIL_SENDER", "development"),
 		SMTPHost:                    getEnv("SMTP_HOST", ""),
 		SMTPPort:                    getEnv("SMTP_PORT", "587"),

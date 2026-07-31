@@ -24,6 +24,12 @@ type ArenaCompetitionSummary struct {
 	ParticipantCount int        `json:"participant_count"`
 	Joined           bool       `json:"joined"`
 	EntryStatus      string     `json:"entry_status,omitempty"`
+	// IsLegacy marks pre-engine weekly-sprint rows (join-time baseline, live
+	// repricing) so the client can separate them from engine editions instead
+	// of rendering them as if they were the same product. Kept in the
+	// catalogue only for migration compatibility with users already entered
+	// in one — see Competition.IsLegacy.
+	IsLegacy bool `json:"is_legacy"`
 }
 
 // DefinitionMetadataProvider is an optional capability of
@@ -36,35 +42,136 @@ type DefinitionMetadataProvider interface {
 	DefinitionMetadata(ctx context.Context, definitionID string) (description, category, iconKey string, err error)
 }
 
-// maxArenaCatalogueSize caps the catalogue response. Competitions are a small,
-// operator-curated set (unlike users or rankings), so a simple cap is
-// sufficient discipline — no cursor pagination is needed at this scale.
+// maxArenaCatalogueSize caps the catalogue response for repositories that
+// can't paginate the query itself (the in-memory store — see
+// ArenaCatalogue's fallback path). Postgres pushes the limit into SQL
+// instead via ArenaCatalogueRepository.
 const maxArenaCatalogueSize = 100
 
-// ArenaCatalogue lists every competition (legacy sprint and engine editions)
-// as privacy-safe summary cards, enriched with the caller's own joined/entry
-// status. Definition display metadata is resolved once per distinct
-// definition, not once per edition.
-func (s *Service) ArenaCatalogue(ctx context.Context, userID string) ([]ArenaCompetitionSummary, error) {
+// Arena catalogue bucket values — the four sections the catalogue page
+// renders as separate tabs, each independently paginated.
+const (
+	ArenaBucketLive      = "live"
+	ArenaBucketUpcoming  = "upcoming"
+	ArenaBucketMine      = "mine"
+	ArenaBucketCompleted = "completed"
+)
+
+// ArenaCatalogueQuery narrows and paginates one bucket/tab of the catalogue.
+type ArenaCatalogueQuery struct {
+	Bucket   string // one of the ArenaBucket* constants; "" = no bucket filter
+	Category string // "" = any category
+	Limit    int
+	Offset   int
+}
+
+// ArenaCataloguePage is one page of catalogue cards plus whether more exist
+// past this page (Offset+len(Cards)).
+type ArenaCataloguePage struct {
+	Cards   []ArenaCompetitionSummary
+	HasMore bool
+}
+
+const defaultArenaCataloguePageSize = 20
+
+// ArenaCataloguePageResponse is the wire shape of GET /arena/competitions:
+// one page of cards plus whether more exist for this bucket/category.
+type ArenaCataloguePageResponse struct {
+	Items   []ArenaCompetitionSummary `json:"items"`
+	HasMore bool                      `json:"has_more"`
+}
+
+func normalizeArenaCatalogueQuery(q ArenaCatalogueQuery) ArenaCatalogueQuery {
+	if q.Limit <= 0 || q.Limit > maxArenaCatalogueSize {
+		q.Limit = defaultArenaCataloguePageSize
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+	return q
+}
+
+// arenaBucketMatch mirrors the client's per-tab bucket rule so the in-memory
+// fallback path (below) filters identically to the SQL path.
+func arenaBucketMatch(bucket string, c ArenaCompetitionSummary) bool {
+	switch bucket {
+	case ArenaBucketLive:
+		return c.Status == StatusActive
+	case ArenaBucketCompleted:
+		return c.Status == StatusCompleted
+	case ArenaBucketMine:
+		return c.Joined && c.Status != StatusCompleted
+	case ArenaBucketUpcoming:
+		return c.Status != StatusActive && c.Status != StatusCompleted && c.Status != LifecycleCancelled && !c.Joined
+	default:
+		return true
+	}
+}
+
+// ArenaCatalogue lists one bucket/tab of the catalogue, paginated. If the
+// repository implements ArenaCatalogueRepository (Postgres), the bucket,
+// category filter, and pagination are pushed into SQL. Otherwise (the
+// in-memory repository used in dev/tests) it falls back to loading every
+// competition and filtering/slicing in Go — fine at that scale.
+func (s *Service) ArenaCatalogue(ctx context.Context, userID string, query ArenaCatalogueQuery) (ArenaCataloguePage, error) {
+	query = normalizeArenaCatalogueQuery(query)
+
+	if err := s.ensureCurrentSprint(ctx); err != nil {
+		return ArenaCataloguePage{}, err
+	}
+
+	if pager, ok := s.repo.(ArenaCatalogueRepository); ok {
+		return pager.ArenaCataloguePage(ctx, ArenaCatalogueFilter{
+			UserID:   userID,
+			Bucket:   query.Bucket,
+			Category: query.Category,
+			Limit:    query.Limit,
+			Offset:   query.Offset,
+		})
+	}
+
 	comps, err := s.ListCompetitions(ctx)
 	if err != nil {
-		return nil, err
-	}
-	if len(comps) > maxArenaCatalogueSize {
-		comps = comps[:maxArenaCatalogueSize]
+		return ArenaCataloguePage{}, err
 	}
 	metaProvider, _ := s.repo.(DefinitionMetadataProvider)
 	metaCache := map[string][3]string{}
 
-	out := make([]ArenaCompetitionSummary, 0, len(comps))
+	all := make([]ArenaCompetitionSummary, 0, len(comps))
 	for _, c := range comps {
 		summary, err := s.summarize(ctx, c, userID, metaProvider, metaCache)
 		if err != nil {
-			return nil, err
+			return ArenaCataloguePage{}, err
 		}
-		out = append(out, summary)
+		// Legacy weekly sprints stay reachable for migration compatibility —
+		// existing participants (or anyone who already has an entry) keep
+		// seeing and using theirs — but they're dropped from discovery for
+		// everyone else, so a new user never sees the old join-time-baseline
+		// product presented as if it were an engine competition.
+		if summary.IsLegacy && !summary.Joined {
+			continue
+		}
+		if query.Category != "" && summary.Category != query.Category {
+			continue
+		}
+		if !arenaBucketMatch(query.Bucket, summary) {
+			continue
+		}
+		all = append(all, summary)
 	}
-	return out, nil
+
+	start := query.Offset
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + query.Limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := all[start:end]
+	out := make([]ArenaCompetitionSummary, len(page))
+	copy(out, page)
+	return ArenaCataloguePage{Cards: out, HasMore: end < len(all)}, nil
 }
 
 // ArenaCatalogueItem returns one competition's catalogue card, or
@@ -87,7 +194,8 @@ func (s *Service) summarize(ctx context.Context, c Competition, userID string, m
 		ID: c.ID, Name: c.Name, StartsAt: c.StartsAt, EndsAt: c.EndsAt,
 		ScoringScope: c.ScoringScope,
 	}
-	if c.IsLegacy() {
+	summary.IsLegacy = c.IsLegacy()
+	if summary.IsLegacy {
 		summary.Status = c.Status
 	} else {
 		summary.Status = c.LifecycleStatus

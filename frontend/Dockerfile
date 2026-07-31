@@ -12,7 +12,7 @@ RUN npm ci
 
 COPY . .
 
-EXPOSE 5173
+EXPOSE 5137
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
 
 # ---- build: compiles the static production assets ---------------------------

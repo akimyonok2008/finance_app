@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ardakimyonok/finance_app/internal/benchmark"
@@ -20,6 +21,10 @@ type RankedPerformanceHistoryProvider interface {
 	ProtectEvidence(ctx context.Context, ids ...string) error
 	EligibilityThreshold() float64
 	SnapshotFrequency() string
+}
+
+type rankedHistoryReader interface {
+	RankedHistory(ctx context.Context, userID, timeframe string) (performancehistory.RankedHistory, error)
 }
 
 type Service struct {
@@ -82,6 +87,114 @@ func (s *Service) EvaluateAll(ctx context.Context, userID string) ([]Achievement
 		return nil, err
 	}
 	return s.list(ctx, userID, true)
+}
+
+// AchievementReturns compares every badge benchmark with the user's canonical
+// ranked performance over the same leaderboard-style timeframe.
+func (s *Service) AchievementReturns(ctx context.Context, userID, rawTimeframe string) (AchievementReturnsResponse, error) {
+	timeframe := parseReturnsTimeframe(rawTimeframe)
+	now := s.now().UTC()
+	out := AchievementReturnsResponse{
+		Timeframe: timeframe,
+		To:        now.Format(time.RFC3339),
+		Rows:      make([]AchievementReturnRow, 0, len(s.badges)),
+	}
+
+	var start time.Time
+	if duration, bounded := performancehistory.TimeframeWindow(timeframe); bounded {
+		start = now.Add(-duration)
+		out.From = start.Format(time.RFC3339)
+	} else {
+		reader, ok := s.history.(rankedHistoryReader)
+		if !ok {
+			return s.unavailableReturns(out, "All-time ranked history is unavailable."), nil
+		}
+		history, err := reader.RankedHistory(ctx, userID, timeframe)
+		if err != nil {
+			return AchievementReturnsResponse{}, err
+		}
+		if !history.Available || history.From == "" {
+			reason := history.Reason
+			if reason == "" {
+				reason = "Ranked performance history is not available for this timeframe."
+			}
+			return s.unavailableReturns(out, reason), nil
+		}
+		start, err = time.Parse(time.RFC3339, history.From)
+		if err != nil {
+			return AchievementReturnsResponse{}, fmt.Errorf("achievements: parse all-time history boundary: %w", err)
+		}
+		out.From = start.UTC().Format(time.RFC3339)
+	}
+
+	window, err := s.history.Window(ctx, userID, start, now)
+	if err != nil {
+		if IsHistoryNotReady(err) {
+			return s.unavailableReturns(out, "Not enough trusted ranked history for this timeframe yet."), nil
+		}
+		return AchievementReturnsResponse{}, err
+	}
+
+	cache := map[string]benchmarkResult{}
+	for _, badge := range s.badges {
+		row := AchievementReturnRow{
+			Key: badge.ID, Name: badge.Name, Difficulty: string(badge.Difficulty),
+			NativePeriod: string(badge.Period),
+		}
+		result, aligned, evalErr := s.benchmarkEvaluation(
+			ctx, badge, window, benchmark.RequirementForPreview(), cache,
+		)
+		if evalErr != nil {
+			row.Reason = benchmarkReasonFor(classifyBenchmarkError(evalErr))
+			out.Rows = append(out.Rows, row)
+			continue
+		}
+		portfolioReturn, returnErr := rankedReturn(aligned)
+		if returnErr != nil {
+			row.Reason = "Portfolio and benchmark dates could not be aligned."
+			out.Rows = append(out.Rows, row)
+			continue
+		}
+		benchmarkReturn := result.ReturnPercentage.Float64()
+		portfolioReturn = round(portfolioReturn)
+		benchmarkReturn = round(benchmarkReturn)
+		edge := round(portfolioReturn - benchmarkReturn)
+		row.Available = true
+		row.PortfolioReturnPercentage = &portfolioReturn
+		row.BenchmarkReturnPercentage = &benchmarkReturn
+		row.EdgePoints = &edge
+		row.AlignedFrom = result.EffectiveStart.UTC().Format(time.RFC3339)
+		row.AlignedTo = result.EffectiveEnd.UTC().Format(time.RFC3339)
+		out.Rows = append(out.Rows, row)
+	}
+	return out, nil
+}
+
+func (s *Service) unavailableReturns(out AchievementReturnsResponse, reason string) AchievementReturnsResponse {
+	for _, badge := range s.badges {
+		out.Rows = append(out.Rows, AchievementReturnRow{
+			Key: badge.ID, Name: badge.Name, Difficulty: string(badge.Difficulty),
+			NativePeriod: string(badge.Period), Reason: reason,
+		})
+	}
+	return out
+}
+
+func parseReturnsTimeframe(raw string) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case performancehistory.Timeframe1W:
+		return performancehistory.Timeframe1W
+	case performancehistory.Timeframe1M:
+		return performancehistory.Timeframe1M
+	case performancehistory.Timeframe3M:
+		return performancehistory.Timeframe3M
+	case performancehistory.Timeframe6M:
+		return performancehistory.Timeframe6M
+	case performancehistory.Timeframe1Y:
+		return performancehistory.Timeframe1Y
+	default:
+		return performancehistory.TimeframeAll
+	}
 }
 
 // EvaluateLocked evaluates only badges that have not already been awarded.

@@ -210,7 +210,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The API listens on `http://localhost:8080`.
+Open `http://localhost:5137`. The API listens on `http://localhost:8080`.
 
 To run the complete local stack:
 

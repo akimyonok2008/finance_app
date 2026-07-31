@@ -1,8 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
 import {
+  type ArenaBucket,
   getAchievements,
   getArenaCatalogue,
   getArenaCatalogueItem,
@@ -17,11 +18,22 @@ import { useAuth } from "@/auth/useAuth";
 import { queryKeys } from "@/hooks/queryKeys";
 
 const LEADERBOARD_PAGE_SIZE = 25;
+export const ARENA_CATALOGUE_PAGE_SIZE = 12;
 
-export function useArenaCatalogue(filters: { category?: string; joined?: boolean } = {}) {
-  return useQuery({
-    queryKey: queryKeys.arenaCatalogue(filters),
-    queryFn: ({ signal }) => getArenaCatalogue(filters, signal),
+/** One catalogue tab (live/upcoming/mine/completed), server-paginated with "load more". */
+export function useArenaCatalogueBucket(bucket: ArenaBucket, category?: string) {
+  return useInfiniteQuery({
+    queryKey: queryKeys.arenaCatalogue({ bucket, category }),
+    queryFn: ({ pageParam, signal }) =>
+      getArenaCatalogue(
+        { bucket, category, limit: ARENA_CATALOGUE_PAGE_SIZE, offset: pageParam },
+        signal,
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.hasMore
+        ? allPages.reduce((count, page) => count + page.items.length, 0)
+        : undefined,
     retry: 1,
   });
 }

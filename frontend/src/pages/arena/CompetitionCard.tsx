@@ -42,6 +42,11 @@ export function CompetitionCard({
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
+            {competition.isLegacy && (
+              <div className="mb-2 inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] text-amber-300">
+                Legacy sprint
+              </div>
+            )}
             {competition.category && (
               <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
                 {categoryLabel(competition.category)}

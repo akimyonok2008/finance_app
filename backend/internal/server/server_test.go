@@ -206,7 +206,7 @@ func TestHealth_AlwaysOK(t *testing.T) {
 func TestCORSPreflight_AllowsIdempotencyKey(t *testing.T) {
 	h := newFullServer(t, nil)
 	req := httptest.NewRequest(http.MethodOptions, "/portfolio/buys", nil)
-	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Origin", "http://localhost:5137")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type,idempotency-key")
 	rec := httptest.NewRecorder()

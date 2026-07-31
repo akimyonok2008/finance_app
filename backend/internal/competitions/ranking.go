@@ -145,6 +145,21 @@ func (s *Service) RefreshCompetitionRankings(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) retryCompetitionRanking(ctx context.Context, comp Competition) error {
+	repo, ok := s.repo.(RankingRepository)
+	if !ok {
+		return fmt.Errorf("competition ranking repository is unavailable")
+	}
+	if comp.LifecycleStatus != LifecycleActive {
+		return fmt.Errorf("ranking retry requires active lifecycle")
+	}
+	batchSize := s.rankingBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultRankingBatchSize
+	}
+	return s.refreshEditionRanking(ctx, repo, comp.ID, batchSize, s.clock.Now().UTC())
+}
+
 func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingRepository, competitionID string, batchSize int, now time.Time) error {
 	gen, err := repo.EnsureBuildingGeneration(ctx, competitionID)
 	if err != nil {
@@ -225,7 +240,7 @@ func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingReposit
 // to the 100 baseline) and return percentage. This is the single valuation
 // core shared by ranking refresh and finalization — finalization simply
 // supplies an end-time-scoped memo.
-func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEntry, memo *observationMemo) (money.IndexValue, money.Ratio, error) {
+func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEntry, memo priceSource) (money.IndexValue, money.Ratio, error) {
 	if entry.EligibleStartingValueBase.Sign() <= 0 {
 		return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("entry %s has no eligible starting value", entry.ID)
 	}

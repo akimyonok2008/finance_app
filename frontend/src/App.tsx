@@ -276,7 +276,7 @@ export default function App() {
                 }
               />
 
-              <Route path="/sprint" element={<Navigate to="/leaderboard" replace />} />
+              <Route path="/sprint" element={<Navigate to="/arena" replace />} />
               <Route path="/profile/me" element={<Navigate to="/profile" replace />} />
               <Route
                 path="/achievements"

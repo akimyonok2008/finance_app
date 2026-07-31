@@ -25,6 +25,8 @@ export type ArenaCompetitionCard = {
   participantCount: number;
   joined: boolean;
   entryStatus?: string;
+  /** Pre-engine weekly sprint: join-time baseline + live repricing, kept only for migration compatibility with users already entered in one. */
+  isLegacy: boolean;
 };
 
 export type EligibilityRuleResult = {
