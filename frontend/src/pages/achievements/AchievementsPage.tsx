@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 
 import { AchievementSummaryHero } from "@/components/achievements/AchievementSummaryHero";
+import { AchievementReturnsTable } from "@/components/achievements/AchievementReturnsTable";
 import { BadgeDetailModal } from "@/components/achievements/BadgeDetailModal";
 import { BadgeDifficultyPill } from "@/components/achievements/BadgeDifficultyPill";
 import { BadgeGrid } from "@/components/achievements/BadgeGrid";
@@ -17,6 +18,7 @@ import { BadgeStatusPill } from "@/components/achievements/BadgeStatusPill";
 import { AppNav } from "@/components/layout/AppNav";
 import { useAchievementsProgress } from "@/hooks/useAchievementsProgress";
 import type { AchievementProgress } from "@/types/achievements";
+import type { LeaderboardTimeframe } from "@/types/leaderboard";
 import { cn } from "@/utils/cn";
 
 type AchievementTab = "overview" | "legendary" | "strategy" | "all";
@@ -116,6 +118,8 @@ function LoadingOverview() {
 export function AchievementsPage() {
   const { query, items, summary } = useAchievementsProgress();
   const [tab, setTab] = useState<AchievementTab>("overview");
+  const [returnsTimeframe, setReturnsTimeframe] =
+    useState<LeaderboardTimeframe>("1M");
   const [selected, setSelected] = useState<AchievementProgress | null>(null);
 
   const legendary = useMemo(
@@ -190,6 +194,8 @@ export function AchievementsPage() {
               closest={closest}
               onSelect={setSelected}
               onChangeTab={setTab}
+              returnsTimeframe={returnsTimeframe}
+              onReturnsTimeframeChange={setReturnsTimeframe}
             />
           ) : tab === "legendary" ? (
             <CatalogueSection
@@ -261,6 +267,8 @@ function Overview({
   closest,
   onSelect,
   onChangeTab,
+  returnsTimeframe,
+  onReturnsTimeframeChange,
 }: {
   items: AchievementProgress[];
   summary: ReturnType<typeof useAchievementsProgress>["summary"];
@@ -268,6 +276,8 @@ function Overview({
   closest: AchievementProgress[];
   onSelect: (badge: AchievementProgress) => void;
   onChangeTab: (tab: AchievementTab) => void;
+  returnsTimeframe: LeaderboardTimeframe;
+  onReturnsTimeframeChange: (timeframe: LeaderboardTimeframe) => void;
 }) {
   const closestBadge = closest[0];
   const bestUnlocked = summary.mostPrestigious;
@@ -316,6 +326,11 @@ function Overview({
           onClick={nextMajor ? () => onSelect(nextMajor) : undefined}
         />
       </section>
+
+      <AchievementReturnsTable
+        timeframe={returnsTimeframe}
+        onTimeframeChange={onReturnsTimeframeChange}
+      />
 
       <OverviewSection
         title="Recently unlocked"

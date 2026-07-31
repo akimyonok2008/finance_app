@@ -100,7 +100,7 @@ func NewService(repo UserRepository, tokens *TokenManager) *Service {
 	return &Service{
 		repo: repo, tokens: tokens,
 		emailSender:     DevelopmentEmailSender{},
-		publicAppURL:    "http://localhost:5173",
+		publicAppURL:    "http://localhost:5137",
 		verificationTTL: 24 * time.Hour,
 		resetTTL:        time.Hour,
 		reauthTTL:       5 * time.Minute,

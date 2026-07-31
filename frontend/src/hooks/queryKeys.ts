@@ -55,11 +55,14 @@ export const queryKeys = {
   leaderboardMe: ["leaderboardMe"] as const,
   leaderboardStanding: (timeframe: string) => ["leaderboardMe", timeframe] as const,
   achievements: ["achievements"] as const,
+  achievementReturns: (timeframe: string) =>
+    ["achievements", "returns", timeframe] as const,
   competitions: ["competitions"] as const,
   currentSprintStatus: (id: string) => ["currentSprintStatus", id] as const,
   sprintLeaderboard: (id: string) => ["sprintLeaderboard", id] as const,
-  arenaCatalogue: (filters: { category?: string; joined?: boolean } = {}) =>
-    ["arenaCatalogue", filters] as const,
+  arenaCatalogue: (
+    filters: { bucket?: string; category?: string; limit?: number; offset?: number } = {},
+  ) => ["arenaCatalogue", filters] as const,
   arenaCompetition: (id: string) => ["arenaCompetition", id] as const,
   arenaEligibility: (id: string) => ["arenaEligibility", id] as const,
   arenaMyStatus: (id: string) => ["arenaMyStatus", id] as const,

@@ -36,6 +36,27 @@ type EditionRepository interface {
 	TransitionLifecycle(ctx context.Context, competitionID, from, to string, now time.Time) error
 }
 
+// ArenaCatalogueFilter is the SQL-pushdown filter for one page of the Arena
+// catalogue: bucket and category narrow the WHERE clause, UserID resolves
+// the caller's joined/entry_status per row, and Limit/Offset paginate.
+type ArenaCatalogueFilter struct {
+	UserID   string
+	Bucket   string
+	Category string
+	Limit    int
+	Offset   int
+}
+
+// ArenaCatalogueRepository is an optional repository capability: a
+// repository that can filter, join, and paginate the Arena catalogue
+// entirely in SQL instead of loading every competition row and
+// enriching/filtering each one in Go. Implemented by
+// PostgresCompetitionRepository; the in-memory repository omits it and
+// Service.ArenaCatalogue falls back to the Go-side path.
+type ArenaCatalogueRepository interface {
+	ArenaCataloguePage(ctx context.Context, filter ArenaCatalogueFilter) (ArenaCataloguePage, error)
+}
+
 // InMemoryCompetitionRepository is a goroutine-safe, process-local store.
 type InMemoryCompetitionRepository struct {
 	mu           sync.RWMutex
@@ -49,6 +70,9 @@ type InMemoryCompetitionRepository struct {
 	rankingStates map[string]*memoryRankingState
 	displayNames  map[string]string
 	resultStore   *memoryResults
+	// observations backs ObservationRepository (see observations.go), keyed
+	// by "competitionID|boundary".
+	observations map[string]*memoryObservationSet
 }
 
 // NewInMemoryCompetitionRepository returns an empty repository.

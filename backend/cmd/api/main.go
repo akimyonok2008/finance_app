@@ -909,6 +909,15 @@ func main() {
 	// narrow, read-only, version-consistent boundary (eligibility previews
 	// and, later, join snapshots) — never through repositories directly.
 	competitionsSvc.SetSnapshotProvider(portfolioSvc)
+	var competitionAdminSvc *competitions.AdminService
+	if repos.pgPool != nil {
+		competitionAdminSvc = competitions.NewAdminService(
+			competitionsSvc,
+			competitions.NewPostgresDefinitionRepository(repos.pgPool),
+			repos.competitions.(competitions.EditionRepository),
+			competitions.NewPostgresCompetitionAdminRepository(repos.pgPool),
+		)
+	}
 	// Benchmark badge engine. The portfolio side uses canonical ranked snapshots;
 	// the benchmark side uses Twelve Data historical closes when enabled. The
 	// deterministic offline provider supports previews in local development but
@@ -1235,6 +1244,7 @@ func main() {
 		Portfolio:                   portfolioSvc,
 		Leaderboard:                 leaderboardSvc,
 		Competitions:                competitionsSvc,
+		CompetitionAdmin:            competitionAdminSvc,
 		Achievements:                achievementsSvc,
 		Profile:                     profileSvc,
 		Strategy:                    strategySvc,

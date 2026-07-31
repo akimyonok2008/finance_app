@@ -97,9 +97,21 @@ func newEnv(t *testing.T) (http.Handler, *auth.TokenManager, *achievements.Servi
 	r.Group(func(r chi.Router) {
 		r.Use(auth.RequireAuth(tm))
 		r.Get("/achievements", h.ListAchievements)
+		r.Get("/achievements/returns", h.ListReturns)
 		r.Post("/achievements/evaluate", h.Evaluate)
 	})
 	return r, tm, svc
+}
+
+func getPath(t *testing.T, router http.Handler, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
 }
 
 func post(t *testing.T, router http.Handler, path, token string) *httptest.ResponseRecorder {
@@ -176,4 +188,34 @@ func TestAchievements_ResponseHasNoForbiddenFields(t *testing.T) {
 	} {
 		assert.NotContainsf(t, body, `"`+k+`":`, "must not expose %q", k)
 	}
+}
+
+func TestAchievementReturns_UsesSelectedTimeframeAndPrivacySafePercentages(t *testing.T) {
+	r, tm, _ := newEnv(t)
+	tok, _ := tm.Generate("u1", "u1@e.com")
+
+	rec := getPath(t, r, "/achievements/returns?timeframe=3M", tok)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var result achievements.AchievementReturnsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	assert.Equal(t, "3M", result.Timeframe)
+	require.Len(t, result.Rows, len(benchmark.Badges))
+	assert.True(t, result.Rows[0].Available)
+	assert.NotNil(t, result.Rows[0].PortfolioReturnPercentage)
+	assert.NotNil(t, result.Rows[0].BenchmarkReturnPercentage)
+	assert.NotNil(t, result.Rows[0].EdgePoints)
+
+	body := rec.Body.String()
+	for _, key := range []string{
+		"user_id", "portfolio_id", "position_id", "current_value", "quantity",
+		"average_buy_price", "starting_value", "symbol",
+	} {
+		assert.NotContainsf(t, body, `"`+key+`":`, "must not expose %q", key)
+	}
+}
+
+func TestAchievementReturns_RequiresAuthentication(t *testing.T) {
+	r, _, _ := newEnv(t)
+	assert.Equal(t, http.StatusUnauthorized, getPath(t, r, "/achievements/returns?timeframe=1M", "").Code)
 }

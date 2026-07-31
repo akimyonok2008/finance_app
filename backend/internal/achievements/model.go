@@ -57,6 +57,31 @@ type AchievementProgress struct {
 	Reason                        string   `json:"reason"`
 }
 
+// AchievementReturnsResponse is the privacy-safe comparison table for one
+// leaderboard-style timeframe. It contains percentages and dates only.
+type AchievementReturnsResponse struct {
+	Timeframe string                 `json:"timeframe"`
+	From      string                 `json:"from,omitempty"`
+	To        string                 `json:"to"`
+	Rows      []AchievementReturnRow `json:"rows"`
+}
+
+// AchievementReturnRow compares the authenticated user's canonical ranked
+// return with one badge benchmark over aligned market-close boundaries.
+type AchievementReturnRow struct {
+	Key                       string   `json:"key"`
+	Name                      string   `json:"name"`
+	Difficulty                string   `json:"difficulty"`
+	NativePeriod              string   `json:"native_period"`
+	Available                 bool     `json:"available"`
+	PortfolioReturnPercentage *float64 `json:"portfolio_return_percentage,omitempty"`
+	BenchmarkReturnPercentage *float64 `json:"benchmark_return_percentage,omitempty"`
+	EdgePoints                *float64 `json:"edge_points,omitempty"`
+	AlignedFrom               string   `json:"aligned_from,omitempty"`
+	AlignedTo                 string   `json:"aligned_to,omitempty"`
+	Reason                    string   `json:"reason,omitempty"`
+}
+
 // iconKeyForDifficulty maps a difficulty tier to a stable icon key the frontend
 // can style. Kept deterministic so responses never churn.
 func iconKeyForDifficulty(d benchmark.Difficulty) string {

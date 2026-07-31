@@ -73,15 +73,15 @@ type FinalizationRepository interface {
 // FinalizeCompetitions transitions every edition in LifecycleFinalizing to
 // LifecycleCompleted:
 //
-//  1. Value every EntryActive entry at end-time observations, shared across
-//     the whole pass (one observationMemo) so every participant is priced
-//     from identical observations — the "authoritative end-time price and FX
-//     observations" policy: the first pass whose valuations all succeed (or
-//     whose failures age out of the operational window) becomes final.
-//  2. An entry that fails valuation is retried on the next call while still
-//     inside defaultFinalizationWindow of ends_at; past that window it is
-//     explicitly disqualified (auditable reason) and finalization proceeds
-//     without it — never a silent omission.
+//  1. Value every EntryActive entry from the competition's persisted end
+//     observation set (competition_observation_sets), captured once per
+//     symbol/pair and never re-queried afterward, so a slow or delayed
+//     finalizer's retries never reprice participants against a later market
+//     moment than the pass that valued everyone else.
+//  2. An entry whose composition needs a symbol/pair not yet captured is
+//     retried on the next call while still inside defaultFinalizationWindow
+//     of ends_at; past that window it is explicitly disqualified (auditable
+//     reason) and finalization proceeds without it — never a silent omission.
 //  3. Sequential final ranks are materialized once, atomically, alongside the
 //     lifecycle transition — results are then immutable: nothing after this
 //     point ever reprices them with current market data.
@@ -90,7 +90,8 @@ type FinalizationRepository interface {
 func (s *Service) FinalizeCompetitions(ctx context.Context) (int, error) {
 	entryRepo, ok := s.repo.(EngineEntryRepository)
 	finalRepo, ok2 := s.repo.(FinalizationRepository)
-	if !ok || !ok2 {
+	obsRepo, ok3 := s.repo.(ObservationRepository)
+	if !ok || !ok2 || !ok3 {
 		return 0, nil
 	}
 	editions, err := entryRepo.ListEditionsByLifecycle(ctx, LifecycleFinalizing)
@@ -105,7 +106,7 @@ func (s *Service) FinalizeCompetitions(ctx context.Context) (int, error) {
 
 	finalized := 0
 	for _, comp := range editions {
-		ok, err := s.finalizeEdition(ctx, finalRepo, comp, window, now)
+		ok, err := s.finalizeEdition(ctx, finalRepo, obsRepo, comp, window, now)
 		if err != nil {
 			slog.Error("competition_finalization_failed", "competition_id", comp.ID, "error", err)
 			continue
@@ -117,13 +118,37 @@ func (s *Service) FinalizeCompetitions(ctx context.Context) (int, error) {
 	return finalized, nil
 }
 
-func (s *Service) finalizeEdition(ctx context.Context, repo FinalizationRepository, comp Competition, window time.Duration, now time.Time) (bool, error) {
+func (s *Service) retryCompetitionFinalization(ctx context.Context, comp Competition) error {
+	repo, ok := s.repo.(FinalizationRepository)
+	obsRepo, ok2 := s.repo.(ObservationRepository)
+	if !ok || !ok2 {
+		return fmt.Errorf("competition finalization repository is unavailable")
+	}
+	if comp.LifecycleStatus != LifecycleFinalizing {
+		return fmt.Errorf("finalization retry requires finalizing lifecycle")
+	}
+	window := s.finalizationWindow
+	if window <= 0 {
+		window = defaultFinalizationWindow
+	}
+	_, err := s.finalizeEdition(ctx, repo, obsRepo, comp, window, s.clock.Now().UTC())
+	return err
+}
+
+func (s *Service) finalizeEdition(ctx context.Context, repo FinalizationRepository, obsRepo ObservationRepository, comp Competition, window time.Duration, now time.Time) (bool, error) {
 	entries, err := repo.ListActiveEntriesForFinalization(ctx, comp.ID)
 	if err != nil {
 		return false, fmt.Errorf("list active entries: %w", err)
 	}
 
-	memo := newObservationMemo(s)
+	// One shared, persisted end-time observation set — captured once (the
+	// first finalization pass that needs a given symbol/pair) and reused by
+	// every retry, so a slow or delayed finalizer never reprices participants
+	// against a later market moment than the pass that valued everyone else.
+	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryEnd, comp.EndsAt, entries, now)
+	if err != nil {
+		return false, fmt.Errorf("capture end observations: %w", err)
+	}
 	type valuedEntry struct {
 		entry    CompetitionEntry
 		idx      money.IndexValue
@@ -172,7 +197,7 @@ func (s *Service) finalizeEdition(ctx context.Context, repo FinalizationReposito
 	})
 
 	evidence, _ := json.Marshal(map[string]any{
-		"valuation_policy":   "shared_observation_pass_at_finalization",
+		"valuation_policy":   "persisted_end_observation_set",
 		"disqualified_count": len(failed),
 		"finalized_at":       now,
 	})

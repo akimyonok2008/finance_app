@@ -278,6 +278,42 @@ func TestFinalizeCompetitions_ResultsAreImmutableAndReplayIdempotent(t *testing.
 	assert.Equal(t, firstResults, thirdResults, "the replay must not overwrite the original immutable rows")
 }
 
+// TestFinalizeCompetitions_ReusesPersistedObservationAcrossRetries is the
+// regression test for the "a delayed finalizer reprices against a later
+// market moment" bug: the first pass captures AAA's end price while it also
+// discovers a still-unpriceable entry, so it retries without writing
+// results. Before the retry runs, AAA's live quote moves — but the already
+// finalized entry's return must reflect the originally captured price, not
+// the new one.
+func TestFinalizeCompetitions_ReusesPersistedObservationAcrossRetries(t *testing.T) {
+	h := newHarness(nil, nil)
+	ctx := context.Background()
+	h.svc.SetFinalizationWindow(2 * time.Hour)
+	edition := finalizingEdition(t, h, "final-3", fixedTime)
+	require.NoError(t, h.repo.CreateEngineEntry(ctx, activeEntry("e1", edition.ID, "u1", "AAA", "100")))
+	require.NoError(t, h.repo.CreateEngineEntry(ctx, activeEntry("e2", edition.ID, "u2", "UNPRICED", "100")))
+	h.mp.Set("AAA", 130, "USD") // +30% — captured into the persisted end observation set on this pass
+
+	h.clk.Time = fixedTime.Add(30 * time.Minute)
+	finalized, err := h.svc.FinalizeCompetitions(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, finalized, "still inside the window: e2 blocks completion, so nothing is written yet")
+
+	// The live quote moves on before the retry that finally disqualifies e2
+	// and finalizes with e1.
+	h.mp.Set("AAA", 500, "USD")
+	h.clk.Time = fixedTime.Add(3 * time.Hour)
+	finalized, err = h.svc.FinalizeCompetitions(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, finalized)
+
+	results, err := h.svc.Results(ctx, edition.ID)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, 0, results[0].ReturnPercentage.Cmp(money.MustRatio("30")),
+		"must reflect the price captured on the first pass, not the later live quote")
+}
+
 func TestResults_UnavailableBeforeCompletion(t *testing.T) {
 	h := newHarness(nil, nil)
 	ctx := context.Background()

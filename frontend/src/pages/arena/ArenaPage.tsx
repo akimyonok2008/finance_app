@@ -2,70 +2,103 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useState } from "react";
 
 import { AppNav } from "@/components/layout/AppNav";
-import { useAchievements, useArenaCatalogue } from "@/hooks/useArena";
+import { Button } from "@/components/ui/button";
+import { type ArenaBucket } from "@/api/arenaApi";
+import { useAchievements, useArenaCatalogueBucket } from "@/hooks/useArena";
 import { ArenaEmptyState } from "@/pages/arena/ArenaEmptyState";
 import { ArenaSkeleton } from "@/pages/arena/ArenaSkeleton";
 import { CompetitionCard } from "@/pages/arena/CompetitionCard";
 import { TrophyCase } from "@/pages/arena/TrophyCase";
-import type { ArenaCompetitionCard } from "@/types/arena";
 import { cn } from "@/utils/cn";
 
 type MobileTab = "competitions" | "trophies";
 
-function CompetitionSection({
-  title,
-  subtitle,
-  competitions,
-}: {
-  title: string;
-  subtitle?: string;
-  competitions: ArenaCompetitionCard[];
-}) {
-  if (competitions.length === 0) return null;
-  return (
-    <section aria-label={title}>
-      <div className="mb-4 flex items-baseline justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-zinc-400">
-          {title}
-        </h2>
-        {subtitle && <span className="text-xs text-zinc-500">{subtitle}</span>}
-      </div>
+const CATALOGUE_TABS: { label: string; value: ArenaBucket }[] = [
+  { label: "Live", value: "live" },
+  { label: "My competitions", value: "mine" },
+  { label: "Upcoming", value: "upcoming" },
+  { label: "Completed", value: "completed" },
+];
+
+function CatalogueTab({ bucket }: { bucket: ArenaBucket }) {
+  const query = useArenaCatalogueBucket(bucket);
+  const cards = query.data?.pages.flatMap((page) => page.items) ?? [];
+
+  if (query.isLoading) {
+    return (
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {competitions.map((competition, index) => (
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5">
+            <div className="h-4 w-16 animate-pulse rounded bg-zinc-800" />
+            <div className="mt-3 h-5 w-40 animate-pulse rounded bg-zinc-800" />
+            <div className="mt-3 h-8 w-full animate-pulse rounded bg-zinc-800" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (query.isError) {
+    return <ArenaEmptyState error onRetry={() => query.refetch()} />;
+  }
+
+  if (cards.length === 0) {
+    return <ArenaEmptyState />;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {cards.map((competition, index) => (
           <CompetitionCard key={competition.id} competition={competition} index={index} />
         ))}
       </div>
-    </section>
+      {query.hasNextPage && (
+        <div className="flex justify-center">
+          <Button
+            variant="outline"
+            onClick={() => query.fetchNextPage()}
+            disabled={query.isFetchingNextPage}
+          >
+            {query.isFetchingNextPage ? "Loading…" : "Load more"}
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 
 export function ArenaPage() {
-  const catalogueQuery = useArenaCatalogue();
   const achievementsQuery = useAchievements();
   const [mobileTab, setMobileTab] = useState<MobileTab>("competitions");
-
-  const cards = catalogueQuery.data ?? [];
-  const live = cards.filter((c) => c.status === "active");
-  const upcoming = cards.filter(
-    (c) =>
-      c.status !== "active" &&
-      c.status !== "completed" &&
-      c.status !== "cancelled" &&
-      !c.joined,
-  );
-  const mine = cards.filter((c) => c.joined && c.status !== "completed");
-  const completed = cards.filter((c) => c.status === "completed");
-
-  const isLoading = catalogueQuery.isLoading || achievementsQuery.isLoading;
-  const isError = catalogueQuery.isError;
+  const [catalogueTab, setCatalogueTab] = useState<ArenaBucket>("live");
 
   const competitionsView = (
-    <div className="space-y-10">
-      <CompetitionSection title="Live" competitions={live} />
-      <CompetitionSection title="My competitions" competitions={mine} />
-      <CompetitionSection title="Upcoming" competitions={upcoming} />
-      <CompetitionSection title="Completed" competitions={completed} />
-      {cards.length === 0 && !isError && <ArenaEmptyState />}
+    <div className="space-y-6">
+      <div
+        role="tablist"
+        aria-label="Arena catalogue tabs"
+        className="flex flex-wrap gap-2 border-b border-zinc-800 pb-3"
+      >
+        {CATALOGUE_TABS.map((tab) => (
+          <button
+            key={tab.value}
+            type="button"
+            role="tab"
+            aria-selected={catalogueTab === tab.value}
+            onClick={() => setCatalogueTab(tab.value)}
+            className={cn(
+              "rounded-full px-4 py-1.5 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500",
+              catalogueTab === tab.value
+                ? "bg-zinc-50 text-zinc-950"
+                : "text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-100",
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      <CatalogueTab key={catalogueTab} bucket={catalogueTab} />
     </div>
   );
 
@@ -93,14 +126,12 @@ export function ArenaPage() {
           </p>
         </motion.header>
 
-        {isLoading ? (
+        {achievementsQuery.isLoading ? (
           <ArenaSkeleton />
-        ) : isError ? (
-          <ArenaEmptyState error onRetry={() => catalogueQuery.refetch()} />
         ) : (
           <>
             <div className="hidden lg:grid lg:grid-cols-3 lg:gap-8">
-              <div className="space-y-10 lg:col-span-2">{competitionsView}</div>
+              <div className="lg:col-span-2">{competitionsView}</div>
               <aside className="lg:col-span-1">{trophies}</aside>
             </div>
 

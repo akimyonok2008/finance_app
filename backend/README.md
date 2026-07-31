@@ -416,7 +416,7 @@ See `.env.example` for every setting. Important groups:
 | `TRUSTED_PROXY_CIDRS` | empty | Ingress/load-balancer CIDRs allowed to supply client-IP forwarding headers; trusts none by default |
 | `JWT_EXPIRY_HOURS` | `4` | HttpOnly browser-session JWT lifetime; no refresh token exists |
 | `PASSWORD_REGISTRATION_ENABLED` | `true` | Enables password registration and production email-delivery requirement |
-| `PUBLIC_APP_URL` | `http://localhost:5173` | Base URL used in verification/reset links |
+| `PUBLIC_APP_URL` | `http://localhost:5137` | Base URL used in verification/reset links |
 | `EMAIL_SENDER` | `development` | `development` logs lifecycle URLs; production password registration requires `smtp` |
 | `EMAIL_VERIFICATION_TTL` | `24h` | Verification-token lifetime |
 | `PASSWORD_RESET_TTL` | `1h` | Reset-token lifetime |

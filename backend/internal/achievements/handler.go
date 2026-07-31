@@ -32,6 +32,21 @@ func (h *Handler) ListAchievements(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, list)
 }
 
+// ListReturns handles GET /achievements/returns?timeframe=...
+func (h *Handler) ListReturns(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok || userID == "" {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	result, err := h.svc.AchievementReturns(r.Context(), userID, r.URL.Query().Get("timeframe"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "could not calculate achievement returns")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, result)
+}
+
 // Evaluate handles POST /achievements/evaluate: it re-evaluates all of the
 // authenticated user's achievements and returns the updated list.
 func (h *Handler) Evaluate(w http.ResponseWriter, r *http.Request) {

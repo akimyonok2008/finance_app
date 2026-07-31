@@ -17,17 +17,17 @@ const LegacyWeeklySprintDefinitionID = "c0000000-0000-4000-8000-000000000001"
 // under. CurrentVersion is the latest created version (0 = none yet; such a
 // definition cannot back an edition).
 type Definition struct {
-	ID                     string
-	Slug                   string
-	Name                   string
-	Description            string
-	Category               string
-	IconKey                string
-	PresentationConfigJSON json.RawMessage
-	IsEnabled              bool
-	CurrentVersion         int64
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	ID                     string          `json:"id"`
+	Slug                   string          `json:"slug"`
+	Name                   string          `json:"name"`
+	Description            string          `json:"description"`
+	Category               string          `json:"category"`
+	IconKey                string          `json:"icon_key"`
+	PresentationConfigJSON json.RawMessage `json:"presentation_config"`
+	IsEnabled              bool            `json:"is_enabled"`
+	CurrentVersion         int64           `json:"current_version"`
+	CreatedAt              time.Time       `json:"created_at"`
+	UpdatedAt              time.Time       `json:"updated_at"`
 }
 
 // DefinitionVersion is one immutable rule set for a definition. The JSON
@@ -36,14 +36,14 @@ type Definition struct {
 // append-only: the repository exposes no update, and (definition_id, version)
 // is the primary key, so an existing version can never be overwritten.
 type DefinitionVersion struct {
-	DefinitionID         string
-	Version              int64
-	EligibilityRulesJSON json.RawMessage
-	ScoringRulesJSON     json.RawMessage
-	ScheduleDefaultsJSON json.RawMessage
-	DisplayRulesJSON     json.RawMessage
-	CreatedAt            time.Time
-	CreatedBy            string
+	DefinitionID         string          `json:"definition_id"`
+	Version              int64           `json:"version"`
+	EligibilityRulesJSON json.RawMessage `json:"eligibility_rules"`
+	ScoringRulesJSON     json.RawMessage `json:"scoring_rules"`
+	ScheduleDefaultsJSON json.RawMessage `json:"schedule_defaults"`
+	DisplayRulesJSON     json.RawMessage `json:"display_rules"`
+	CreatedAt            time.Time       `json:"created_at"`
+	CreatedBy            string          `json:"created_by"`
 }
 
 // RulesSnapshot is the immutable rule payload stamped onto an edition at

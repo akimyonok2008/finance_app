@@ -33,13 +33,16 @@ type Deps struct {
 	Portfolio    *portfolio.Service
 	Leaderboard  *leaderboard.Service
 	Competitions *competitions.Service
-	Achievements *achievements.Service
-	Profile      *profile.Service
-	Strategy     *strategy.Service
-	MarketData   *marketdata.Service
-	Social       *social.Service
-	Safety       *safety.Service
-	Moderation   *moderation.Service
+	// CompetitionAdmin is the optional protected competition control plane.
+	// It is wired for durable PostgreSQL deployments; nil omits all routes.
+	CompetitionAdmin *competitions.AdminService
+	Achievements     *achievements.Service
+	Profile          *profile.Service
+	Strategy         *strategy.Service
+	MarketData       *marketdata.Service
+	Social           *social.Service
+	Safety           *safety.Service
+	Moderation       *moderation.Service
 	// PerformanceHistory is the CANONICAL ranked-performance snapshot service —
 	// the same source the leaderboard and benchmark achievements read. It backs
 	// GET /performance/history.
@@ -144,6 +147,10 @@ func New(d Deps) http.Handler {
 	}
 	leaderboardHandler := leaderboard.NewHandler(d.Leaderboard)
 	competitionHandler := competitions.NewHandler(d.Competitions, d.Achievements)
+	var competitionAdminHandler *competitions.AdminHandler
+	if d.CompetitionAdmin != nil {
+		competitionAdminHandler = competitions.NewAdminHandler(d.CompetitionAdmin)
+	}
 	achievementHandler := achievements.NewHandler(d.Achievements)
 	strategyHandler := strategy.NewHandler(d.Strategy)
 	var marketDataHandler *marketdata.Handler
@@ -355,8 +362,24 @@ func New(d Deps) http.Handler {
 		r.Get("/competitions/{competitionId}/me", competitionHandler.GetMyCompetitionStatus)
 		r.Get("/competitions/{competitionId}/leaderboard", competitionHandler.GetCompetitionLeaderboard)
 		r.Get("/competitions/{competitionId}/results", competitionHandler.GetCompetitionResults)
+		if competitionAdminHandler != nil {
+			r.Route("/admin/competitions", func(admin chi.Router) {
+				admin.Use(requireAdmin(moderationUserAdmin{d.Auth}))
+				admin.Get("/definitions", competitionAdminHandler.ListDefinitions)
+				admin.Post("/definitions", competitionAdminHandler.CreateDefinition)
+				admin.Post("/rules/validate", competitionAdminHandler.ValidateRules)
+				admin.Post("/definitions/{definitionId}/versions", competitionAdminHandler.CreateVersion)
+				admin.Post("/editions", competitionAdminHandler.CreateEdition)
+				admin.Post("/editions/{competitionId}/publish", competitionAdminHandler.Publish)
+				admin.Post("/editions/{competitionId}/cancel", competitionAdminHandler.Cancel)
+				admin.Get("/editions/{competitionId}/operations", competitionAdminHandler.Inspect)
+				admin.Post("/editions/{competitionId}/jobs/{job}/retry", competitionAdminHandler.Retry)
+				admin.Get("/editions/{competitionId}/audit", competitionAdminHandler.Audit)
+			})
+		}
 
 		r.Get("/achievements", achievementHandler.ListAchievements)
+		r.Get("/achievements/returns", achievementHandler.ListReturns)
 		r.Post("/achievements/evaluate", achievementHandler.Evaluate)
 
 		r.Post("/strategy-portfolio/copy-preview", strategyHandler.CopyPreview)

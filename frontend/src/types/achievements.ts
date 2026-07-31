@@ -75,3 +75,24 @@ export type AchievementsSummary = {
   /** First still-locked elite badge. */
   nextEliteTarget?: AchievementProgress;
 };
+
+export type AchievementReturnRow = {
+  key: string;
+  name: string;
+  difficulty: string;
+  native_period: string;
+  available: boolean;
+  portfolio_return_percentage?: number;
+  benchmark_return_percentage?: number;
+  edge_points?: number;
+  aligned_from?: string;
+  aligned_to?: string;
+  reason?: string;
+};
+
+export type AchievementReturnsResponse = {
+  timeframe: import("@/types/leaderboard").LeaderboardTimeframe;
+  from?: string;
+  to: string;
+  rows: AchievementReturnRow[];
+};

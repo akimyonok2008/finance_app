@@ -47,39 +47,34 @@ func (h *Handler) ListCompetitions(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// GetArenaCatalogue handles GET /arena/competitions: every competition
-// (legacy sprint and engine editions) as a privacy-safe catalogue card,
-// optionally filtered by ?category= and/or ?joined=true|false. This is
-// Arena's own discovery surface — deliberately separate from the global
-// leaderboard and never redirected to it.
+// GetArenaCatalogue handles GET /arena/competitions: one paginated bucket/tab
+// of the catalogue (legacy sprint and engine editions) as privacy-safe
+// catalogue cards. This is Arena's own discovery surface — deliberately
+// separate from the global leaderboard and never redirected to it.
+//
+// Query params: ?bucket=live|upcoming|mine|completed (omit for no bucket
+// filter), ?category=, ?limit=, ?offset=.
 func (h *Handler) GetArenaCatalogue(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(w, r)
 	if !ok {
 		return
 	}
-	cards, err := h.svc.ArenaCatalogue(r.Context(), uid)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	page, err := h.svc.ArenaCatalogue(r.Context(), uid, ArenaCatalogueQuery{
+		Bucket:   r.URL.Query().Get("bucket"),
+		Category: r.URL.Query().Get("category"),
+		Limit:    limit,
+		Offset:   offset,
+	})
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	if category := r.URL.Query().Get("category"); category != "" {
-		cards = filterArenaCards(cards, func(c ArenaCompetitionSummary) bool { return c.Category == category })
-	}
-	if joined := r.URL.Query().Get("joined"); joined != "" {
-		want := joined == "true"
-		cards = filterArenaCards(cards, func(c ArenaCompetitionSummary) bool { return c.Joined == want })
-	}
-	httpx.WriteJSON(w, http.StatusOK, cards)
-}
-
-func filterArenaCards(cards []ArenaCompetitionSummary, keep func(ArenaCompetitionSummary) bool) []ArenaCompetitionSummary {
-	out := make([]ArenaCompetitionSummary, 0, len(cards))
-	for _, c := range cards {
-		if keep(c) {
-			out = append(out, c)
-		}
-	}
-	return out
+	httpx.WriteJSON(w, http.StatusOK, ArenaCataloguePageResponse{
+		Items:   page.Cards,
+		HasMore: page.HasMore,
+	})
 }
 
 // GetArenaCatalogueItem handles GET /arena/competitions/{competitionId}: one
