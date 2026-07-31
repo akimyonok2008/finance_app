@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -834,6 +835,60 @@ func (s *Service) ListClosedPositions(ctx context.Context, userID string) ([]Clo
 			return nil, err
 		}
 		out = append(out, view)
+	}
+	// A partial sale never closes its episode (the remainder keeps trading
+	// under the same position), but the sold slice is still a realized,
+	// finished trade the user expects to see as its own card rather than
+	// buried in the Activity feed.
+	open := filterPositionsByStatus(positions, PositionStatusOpen)
+	for _, pos := range open {
+		cards, err := s.partialSaleCards(ctx, pos)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cards...)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ClosedAt > out[j].ClosedAt })
+	return out, nil
+}
+
+// partialSaleCards builds one closed-position card per partial sale recorded
+// against a STILL-OPEN position's episode. Unlike closedPositionSummary (which
+// aggregates every leg of a fully-closed episode into one totalled card), each
+// partial sale here is realized and finished on its own, so it gets its own
+// card keyed by the sell activity's own id rather than the (still-open,
+// shared) position id.
+func (s *Service) partialSaleCards(ctx context.Context, pos *Position) ([]ClosedPositionSummary, error) {
+	activities, err := s.repo.ListActivitiesByPositionEpisode(ctx, pos.UserID, pos.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ClosedPositionSummary, 0)
+	for _, a := range activities {
+		if a.Type != ActivitySell {
+			continue
+		}
+		if a.Quantity == nil || a.UnitPrice == nil || a.CostBasisAllocated == nil || a.RealizedGainLossBase == nil {
+			continue
+		}
+		basisBase, err := s.convertAmount(ctx, *a.CostBasisAllocated, a.Currency, fx.BaseCurrency)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrPriceProvider, a.Symbol, err)
+		}
+		realizedPct := 0.0
+		if a.RealizedGainLossPercentage != nil {
+			realizedPct = *a.RealizedGainLossPercentage
+		}
+		out = append(out, ClosedPositionSummary{
+			ID: a.ID, Symbol: a.Symbol, AssetType: a.AssetType,
+			Quantity: *a.Quantity, BaselinePrice: pos.AverageBuyPrice,
+			BaselineCurrency: pos.Currency, ClosePrice: *a.UnitPrice,
+			ClosePriceCurrency: a.Currency, ClosedAt: a.OccurredAt.Format(time.RFC3339),
+			RealizedGainLossBase:       *a.RealizedGainLossBase,
+			RealizedGainLossPercentage: round2(realizedPct),
+			ClosedCostBasisBase:        money.QuantizeValue(basisBase),
+			BaseCurrency:               fx.BaseCurrency,
+		})
 	}
 	return out, nil
 }

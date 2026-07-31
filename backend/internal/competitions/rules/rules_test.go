@@ -76,6 +76,20 @@ func TestParse_SpecExamplesValidate(t *testing.T) {
 	assert.Equal(t, []string{"crypto"}, s2.Filter.AssetTypes)
 }
 
+func TestParseScoring_RejectsUnsupportedTotalReturnFlags(t *testing.T) {
+	for _, flag := range []string{"include_dividends", "include_fees"} {
+		raw := `{"schema_version":1,"scope":"full_portfolio","include_cash":false,"` + flag + `":true}`
+		_, err := ParseScoring([]byte(raw))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "fixed-basket price return")
+	}
+
+	includeFXFalse, err := ParseScoring([]byte(`{"schema_version":1,"scope":"full_portfolio","include_cash":false,"include_fx":false}`))
+	require.NoError(t, err)
+	require.NotNil(t, includeFXFalse.IncludeFX)
+	assert.False(t, *includeFXFalse.IncludeFX)
+}
+
 func TestParseEligibility_RejectsInvalidDocuments(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":       `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"position_count","operator":"gte","value":"1","bogus":true}]}`,
@@ -123,6 +137,33 @@ func TestParseScoring_CustomUniverseAndLegacyFlags(t *testing.T) {
 	assert.True(t, legacy.LegacyJoinTimeBaseline)
 }
 
+func TestValidateCapabilities_RejectsUnsupportedFilterDimensions(t *testing.T) {
+	noCaps := Capabilities{}
+
+	sectorElig, err := ParseEligibility([]byte(`{"schema_version":1,"all":[{"code":"tech","label":"tech sector","metric":"portfolio_weight","filter":{"sectors":["technology"]},"operator":"gte","value":"0.30"}]}`))
+	require.NoError(t, err)
+	err = ValidateCapabilities(sectorElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, noCaps)
+	assert.ErrorContains(t, err, "sector filter is not supported")
+
+	issuerElig, err := ParseEligibility([]byte(`{"schema_version":1,"all":[{"code":"us_only","label":"US issuers","metric":"portfolio_weight","filter":{"issuer_countries":["US"]},"operator":"gte","value":"0.50"}]}`))
+	require.NoError(t, err)
+	err = ValidateCapabilities(issuerElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, noCaps)
+	assert.ErrorContains(t, err, "issuer_country filter is not supported")
+
+	universeScoring, err := ParseScoring([]byte(`{"schema_version":1,"scope":"custom_universe","filter":{"universe":"tech-v1"},"include_cash":false}`))
+	require.NoError(t, err)
+	minimalElig, err := ParseEligibility([]byte(`{"schema_version":1,"all":[{"code":"nonempty","label":"non-empty","metric":"position_count","operator":"gte","value":"1"}]}`))
+	require.NoError(t, err)
+	err = ValidateCapabilities(minimalElig, universeScoring, noCaps)
+	assert.ErrorContains(t, err, `custom universe "tech-v1" is not supported`)
+
+	// Fully capable deployment accepts all three dimensions.
+	fullCaps := Capabilities{SectorSupported: true, IssuerCountrySupported: true, UniverseResolverWired: true}
+	require.NoError(t, ValidateCapabilities(sectorElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, fullCaps))
+	require.NoError(t, ValidateCapabilities(issuerElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, fullCaps))
+	require.NoError(t, ValidateCapabilities(minimalElig, universeScoring, fullCaps))
+}
+
 func TestEvaluate_CryptoWeightThresholdExactDecimals(t *testing.T) {
 	elig, err := ParseEligibility([]byte(exampleEligibility))
 	require.NoError(t, err)
@@ -147,11 +188,13 @@ func TestEvaluate_CryptoWeightThresholdExactDecimals(t *testing.T) {
 	assert.True(t, res.Eligible)
 	assert.Equal(t, "30.00", res.Rules[0].Actual)
 
-	// Cash dilutes weight: 30 crypto of 100 positions + 20 cash = 25%.
-	diluted := factsWith("20", pos("i1", "crypto", "", "USD", "30"), pos("i2", "stock", "", "USD", "70"))
-	res = Evaluate(elig, diluted, now)
-	assert.False(t, res.Eligible)
-	assert.Equal(t, "25.00", res.Rules[0].Actual)
+	// Idle cash never dilutes weight: 30 crypto of 100 invested (70 stock)
+	// still reads as 30% crypto even with 20 sitting uninvested in cash —
+	// composition weights are measured against what's actually invested.
+	notDiluted := factsWith("20", pos("i1", "crypto", "", "USD", "30"), pos("i2", "stock", "", "USD", "70"))
+	res = Evaluate(elig, notDiluted, now)
+	assert.True(t, res.Eligible)
+	assert.Equal(t, "30.00", res.Rules[0].Actual)
 }
 
 func TestEvaluate_AllAndAnyGroups(t *testing.T) {
@@ -190,7 +233,7 @@ func TestEvaluate_MetricsAndOperators(t *testing.T) {
 		pos("i1", "stock", "XIST", "TRY", "50"),
 		pos("i2", "stock", "XNAS", "USD", "15"),
 		pos("i3", "crypto", "", "USD", "10"),
-	) // total 100: cash 25%, XIST 50%, largest 50%
+	) // total 100: cash 25%, invested 75 (XIST 50, largest 50 -> both 66.67% of invested)
 	facts.PortfolioAgeDays = 45
 
 	cases := []struct {
@@ -201,7 +244,7 @@ func TestEvaluate_MetricsAndOperators(t *testing.T) {
 		{"cash lte", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"cash_weight","operator":"lte","value":"0.25"}]}`, true},
 		{"cash lt fails on boundary", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"cash_weight","operator":"lt","value":"0.25"}]}`, false},
 		{"venue MIC weight (XIST)", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"portfolio_weight","filter":{"venue_mics":["XIST"]},"operator":"gte","value":"0.50"}]}`, true},
-		{"largest position between", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"largest_position_weight","operator":"between","value":"0.40","value_high":"0.60"}]}`, true},
+		{"largest position between", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"largest_position_weight","operator":"between","value":"0.60","value_high":"0.70"}]}`, true},
 		{"asset class count eq", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"asset_class_count","operator":"eq","value":"2"}]}`, true},
 		{"portfolio age", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"portfolio_age_days","operator":"gte","value":"30"}]}`, true},
 		{"filtered position count", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"position_count","filter":{"currencies":["USD"]},"operator":"eq","value":"2"}]}`, true},

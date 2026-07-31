@@ -290,6 +290,33 @@ func (r *PostgresCompetitionRepository) PromoteGeneration(ctx context.Context, c
 	return tx.Commit(ctx)
 }
 
+// TryLockCompetitionRanking claims a session-level Postgres advisory lock
+// keyed on competitionID, held on a single connection checked out from the
+// pool for the duration of the caller's refresh pass. This is what keeps the
+// scheduled worker and an admin-triggered retry (both funneled through
+// refreshEditionRanking) from claiming and writing the same batch of entries
+// concurrently, since ClaimActiveEntries/AdvanceGeneration have no row-level
+// claim of their own.
+func (r *PostgresCompetitionRepository) TryLockCompetitionRanking(ctx context.Context, competitionID string) (func(context.Context), bool, error) {
+	conn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("competition repository: acquire ranking lock connection: %w", err)
+	}
+	var locked bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1, 0))`, competitionID).Scan(&locked); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("competition repository: try advisory lock: %w", err)
+	}
+	if !locked {
+		conn.Release()
+		return nil, false, nil
+	}
+	return func(unlockCtx context.Context) {
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, competitionID)
+		conn.Release()
+	}, true, nil
+}
+
 func (r *PostgresCompetitionRepository) ActiveGeneration(ctx context.Context, competitionID string) (int64, time.Time, bool, error) {
 	var (
 		generation  int64

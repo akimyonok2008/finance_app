@@ -65,6 +65,7 @@ export type LeaderboardRow = {
 
 export type LeaderboardPage = {
   entries: LeaderboardRow[];
+  returnModel?: "fixed_basket_price_return_v1";
   nextCursor?: number;
   valuedAt?: string;
   /** No ranking generation has ever been promoted yet — a controlled "not ready", never a live scan. */

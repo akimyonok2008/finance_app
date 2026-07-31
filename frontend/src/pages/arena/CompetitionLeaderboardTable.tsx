@@ -60,7 +60,7 @@ export function CompetitionLeaderboardTable({
           <div className="grid grid-cols-[4rem_1fr_auto] border-b border-zinc-800 px-4 py-3 text-xs uppercase tracking-[0.18em] text-zinc-500">
             <span>Rank</span>
             <span>User</span>
-            <span>Return</span>
+            <span>Price return</span>
           </div>
           {rows.map((row, index) => (
             <motion.div

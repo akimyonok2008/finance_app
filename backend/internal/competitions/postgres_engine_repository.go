@@ -205,6 +205,18 @@ func (r *PostgresCompetitionRepository) ListPendingBaselineEntries(ctx context.C
 	return out, nil
 }
 
+// HasPendingBaselineEntries reports whether any entry is still admitted
+// (awaiting baseline) for this competition — see the interface doc.
+func (r *PostgresCompetitionRepository) HasPendingBaselineEntries(ctx context.Context, competitionID string) (bool, error) {
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM competition_entries WHERE competition_id = $1 AND entry_status = $2)
+	`, competitionID, EntryAdmitted).Scan(&exists); err != nil {
+		return false, fmt.Errorf("competition repository: has pending baseline entries: %w", err)
+	}
+	return exists, nil
+}
+
 // loadEngineSnapshots loads position snapshots (with inclusion flags) and
 // cash snapshots for one entry.
 func (r *PostgresCompetitionRepository) loadEngineSnapshots(ctx context.Context, e *CompetitionEntry) error {
@@ -280,10 +292,11 @@ func (r *PostgresCompetitionRepository) CompleteBaseline(ctx context.Context, en
 	for _, b := range baselines {
 		if _, err := tx.Exec(ctx, `
 			UPDATE competition_entry_snapshot_positions
-			SET starting_price = $1, starting_price_currency = $2, starting_value_base = $3,
-			    starting_weight = $4, baseline_price_observed_at = $5
-			WHERE id = $6 AND competition_entry_id = $7
-		`, b.Price, b.PriceCurrency, b.ValueBase, b.Weight, b.ObservedAt.UTC(), b.SnapshotID, entryID); err != nil {
+			SET symbol = $1, quantity = $2, starting_price = $3, starting_price_currency = $4,
+			    starting_value_base = $5, starting_weight = $6, baseline_price_observed_at = $7
+			WHERE id = $8 AND competition_entry_id = $9
+		`, b.Symbol, b.Quantity, b.Price, b.PriceCurrency, b.ValueBase, b.Weight,
+			b.ObservedAt.UTC(), b.SnapshotID, entryID); err != nil {
 			return fmt.Errorf("competition repository: write position baseline: %w", err)
 		}
 	}

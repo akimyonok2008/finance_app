@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/competitions/rules"
 	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
@@ -95,6 +96,15 @@ type RankingRepository interface {
 	// ever completed a full pass — callers must return a controlled
 	// "unavailable" response, never fall back to a live O(N) scan.
 	ActiveGeneration(ctx context.Context, competitionID string) (generation int64, activatedAt time.Time, found bool, err error)
+	// TryLockCompetitionRanking attempts to claim exclusive ownership of this
+	// competition's ranking refresh for the caller. ok=false means another
+	// worker (scheduled or an admin retry) currently holds it — the caller
+	// must skip this pass rather than run a batch concurrently, since
+	// ClaimActiveEntries/AdvanceGeneration have no per-row claim of their own
+	// and would double-process entries and double-count generation totals if
+	// two callers ran at once. When ok is true, unlock must be called exactly
+	// once to release it.
+	TryLockCompetitionRanking(ctx context.Context, competitionID string) (unlock func(context.Context), ok bool, err error)
 	// LeaderboardPage reads a cursor-paginated page (rank > afterRank) from
 	// the active generation, joined with display metadata.
 	LeaderboardPage(ctx context.Context, competitionID string, afterRank, limit int) ([]CompetitionLeaderboardEntry, error)
@@ -161,6 +171,24 @@ func (s *Service) retryCompetitionRanking(ctx context.Context, comp Competition)
 }
 
 func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingRepository, competitionID string, batchSize int, now time.Time) error {
+	unlock, ok, err := repo.TryLockCompetitionRanking(ctx, competitionID)
+	if err != nil {
+		return fmt.Errorf("lock competition ranking: %w", err)
+	}
+	if !ok {
+		slog.Info("competition_ranking_refresh_skipped_busy", "competition_id", competitionID)
+		return nil
+	}
+	defer unlock(ctx)
+
+	comp, err := s.repo.GetCompetition(ctx, competitionID)
+	if err != nil {
+		return fmt.Errorf("load competition scoring policy: %w", err)
+	}
+	_, scoring, err := effectiveRules(comp)
+	if err != nil {
+		return fmt.Errorf("load competition scoring policy: %w", err)
+	}
 	gen, err := repo.EnsureBuildingGeneration(ctx, competitionID)
 	if err != nil {
 		return fmt.Errorf("ensure building generation: %w", err)
@@ -177,7 +205,12 @@ func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingReposit
 	for _, entry := range entries {
 		processed++
 		lastEntryID = entry.ID
-		idx, retPct, err := s.valueCompetitionEntry(ctx, entry, memo)
+		adjusted, err := s.adjustedEntryBasket(ctx, *comp, entry, now)
+		if err != nil {
+			failed++
+			continue
+		}
+		idx, retPct, err := s.valueCompetitionEntry(ctx, adjusted, memo, scoring)
 		if err != nil {
 			failed++
 			slog.Warn("competition_ranking_entry_skipped",
@@ -226,6 +259,26 @@ func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingReposit
 			"failed_entries", totalFailed, "write_failure", gen.WriteFailure || writeFailed)
 		return nil
 	}
+	// Baseline runs in bounded batches (defaultBaselineBatch), so a clean lap
+	// over every currently-ACTIVE entry does not by itself mean every admitted
+	// entry has been priced yet — some may still be awaiting their first
+	// baseline pass. Promoting here would publish a generation that omits
+	// them, then silently change again once they baseline. Withhold
+	// promotion (never fail the generation — nothing is wrong, it's just not
+	// the whole population yet) until baseline coverage is complete; the
+	// leaderboard read path reports Unavailable until a generation is ever
+	// promoted (see EditionLeaderboard), which is the correct "not ready" state.
+	if entryRepo, ok := s.repo.(EngineEntryRepository); ok {
+		pending, err := entryRepo.HasPendingBaselineEntries(ctx, competitionID)
+		if err != nil {
+			return fmt.Errorf("check baseline coverage: %w", err)
+		}
+		if pending {
+			slog.Info("competition_ranking_promotion_deferred_baseline_incomplete",
+				"competition_id", competitionID, "generation", gen.Generation)
+			return nil
+		}
+	}
 	if err := repo.PromoteGeneration(ctx, competitionID, gen.Generation, now); err != nil {
 		slog.Warn("competition_ranking_promotion_skipped", "competition_id", competitionID, "generation", gen.Generation, "error", err)
 		return nil
@@ -240,7 +293,7 @@ func (s *Service) refreshEditionRanking(ctx context.Context, repo RankingReposit
 // to the 100 baseline) and return percentage. This is the single valuation
 // core shared by ranking refresh and finalization — finalization simply
 // supplies an end-time-scoped memo.
-func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEntry, memo priceSource) (money.IndexValue, money.Ratio, error) {
+func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEntry, memo priceSource, scoring rules.Scoring) (money.IndexValue, money.Ratio, error) {
 	if entry.EligibleStartingValueBase.Sign() <= 0 {
 		return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("entry %s has no eligible starting value", entry.ID)
 	}
@@ -254,9 +307,23 @@ func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEn
 			return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("price %s: %w", snap.Symbol, err)
 		}
 		local := snap.Quantity.MulPrice(price)
-		base, err := memo.toBase(ctx, local, currency)
-		if err != nil {
-			return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("fx %s: %w", currency, err)
+		var base money.Amount
+		if scoring.IncludeFX == nil || *scoring.IncludeFX {
+			base, err = memo.toBase(ctx, local, currency)
+			if err != nil {
+				return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("fx %s: %w", currency, err)
+			}
+		} else {
+			startingQuantity := snap.OriginalQuantity
+			if startingQuantity.Cmp(money.ZeroQuantity()) == 0 {
+				startingQuantity = snap.Quantity
+			}
+			startingLocal := startingQuantity.MulPrice(snap.StartingPrice)
+			factor, divErr := local.DivExact(startingLocal, money.ScaleWeight)
+			if divErr != nil {
+				return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("local price factor: %w", divErr)
+			}
+			base = snap.StartingValueBase.MulRatio(factor)
 		}
 		total = total.Add(base)
 	}
@@ -264,9 +331,13 @@ func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEn
 		if !cash.IncludedInScore {
 			continue
 		}
-		base, err := memo.toBase(ctx, cash.Amount, cash.Currency)
-		if err != nil {
-			return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("fx cash %s: %w", cash.Currency, err)
+		base := cash.ValueBase
+		if scoring.IncludeFX == nil || *scoring.IncludeFX {
+			var err error
+			base, err = memo.toBase(ctx, cash.Amount, cash.Currency)
+			if err != nil {
+				return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("fx cash %s: %w", cash.Currency, err)
+			}
 		}
 		total = total.Add(base)
 	}
@@ -299,13 +370,13 @@ func (s *Service) EditionLeaderboard(ctx context.Context, competitionID string, 
 		return nil, err
 	}
 	if !found {
-		return &CompetitionLeaderboardPage{Unavailable: true}, nil
+		return &CompetitionLeaderboardPage{Unavailable: true, ReturnModel: ReturnModelFixedBasketPriceV1}, nil
 	}
 	rows, err := repo.LeaderboardPage(ctx, competitionID, afterRank, limit)
 	if err != nil {
 		return nil, err
 	}
-	page := &CompetitionLeaderboardPage{Entries: rows, ValuedAt: &activatedAt}
+	page := &CompetitionLeaderboardPage{Entries: rows, ValuedAt: &activatedAt, ReturnModel: ReturnModelFixedBasketPriceV1}
 	if len(rows) == limit {
 		next := rows[len(rows)-1].Rank
 		page.NextCursor = &next
@@ -368,6 +439,22 @@ type memoryRankingState struct {
 	rows        map[int64]map[string]CompetitionRankingRow // generation -> entryID -> row
 	nextGen     int64
 	active      int64 // 0 = none promoted yet
+	locked      bool  // guards concurrent refresh passes, see TryLockCompetitionRanking
+}
+
+func (r *InMemoryCompetitionRepository) TryLockCompetitionRanking(_ context.Context, competitionID string) (func(context.Context), bool, error) {
+	st := r.rankingState(competitionID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.locked {
+		return nil, false, nil
+	}
+	st.locked = true
+	return func(context.Context) {
+		st.mu.Lock()
+		st.locked = false
+		st.mu.Unlock()
+	}, true, nil
 }
 
 var _ RankingRepository = (*InMemoryCompetitionRepository)(nil)

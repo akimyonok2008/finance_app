@@ -56,9 +56,15 @@ type Service struct {
 	// entries with failed end-time valuation before disqualifying them and
 	// finalizing without them (see finalize.go).
 	finalizationWindow time.Duration
+	// finalizationBatchSize bounds how many entries one finalizeEdition pass
+	// claims per competition per call (see finalize.go). <= 0 uses the default.
+	finalizationBatchSize int
 	// achievements is the optional idempotent trophy hook fired after each
 	// finalized result (see finalize.go).
 	achievements FinalizationAchievementTrigger
+	// basketAdjustments applies trusted splits and symbol changes to the frozen
+	// scoring basket without following live portfolio mutations.
+	basketAdjustments BasketAdjustmentProvider
 }
 
 // SetAchievementTrigger attaches the optional idempotent achievement hook

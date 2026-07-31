@@ -100,16 +100,19 @@ type Eligibility struct {
 
 // Scoring is the validated scoring document. Scope decides which frozen
 // positions are valued; IncludeCash decides whether frozen cash joins the
-// scored composition. The Include* flags document valuation treatment
-// (defaults per product policy: dividends, fees and FX all included);
-// deposits and withdrawals are structurally neutralized because scoring
-// always reprices the frozen join-time composition, never live flows.
+// scored composition. Version 1 is fixed-basket price return; deposits and
+// withdrawals are structurally neutralized because scoring reprices the
+// frozen join-time composition rather than following live flows.
 type Scoring struct {
 	SchemaVersion int     `json:"schema_version"`
 	Scope         string  `json:"scope"`
 	Filter        *Filter `json:"filter,omitempty"`
 	IncludeCash   bool    `json:"include_cash"`
 
+	// These fields are retained for schema compatibility. Version 1 implements
+	// fixed-basket PRICE return, not total return: dividend and fee inclusion
+	// are rejected when true. IncludeFX defaults to true; false freezes each
+	// component's baseline FX contribution and measures local-price movement.
 	IncludeDividends *bool `json:"include_dividends,omitempty"`
 	IncludeFees      *bool `json:"include_fees,omitempty"`
 	IncludeFX        *bool `json:"include_fx,omitempty"`
@@ -245,6 +248,12 @@ func ParseScoring(raw []byte) (Scoring, error) {
 	if err := validateFilter(s.Filter); err != nil {
 		return Scoring{}, fmt.Errorf("scoring: %w", err)
 	}
+	if s.IncludeDividends != nil && *s.IncludeDividends {
+		return Scoring{}, fmt.Errorf("scoring: include_dividends=true is unsupported by fixed-basket price return")
+	}
+	if s.IncludeFees != nil && *s.IncludeFees {
+		return Scoring{}, fmt.Errorf("scoring: include_fees=true is unsupported by fixed-basket price return")
+	}
 	switch s.Scope {
 	case ScopeFullPortfolio:
 		if !s.Filter.IsZero() {
@@ -277,4 +286,57 @@ func ValidateDefinitionVersionPayloads(eligibilityJSON, scoringJSON []byte) (Eli
 		return Eligibility{}, Scoring{}, err
 	}
 	return e, s, nil
+}
+
+// Capabilities describes which filter dimensions this deployment can
+// actually evaluate. Schema validation only checks that a document is
+// syntactically well-formed; a filter dimension can be syntactically valid
+// and still be backed by no real classification data or resolver, in which
+// case it can never match a position. ValidateCapabilities is the second,
+// deployment-aware admission gate that catches that case.
+type Capabilities struct {
+	// SectorSupported reports whether classification enrichment populates
+	// PositionFacts.Sector for live portfolios.
+	SectorSupported bool
+	// IssuerCountrySupported reports whether classification enrichment
+	// populates PositionFacts.IssuerCountry for live portfolios.
+	IssuerCountrySupported bool
+	// UniverseResolverWired reports whether a UniverseResolver is attached,
+	// so filter.universe references can actually be resolved.
+	UniverseResolverWired bool
+}
+
+// ValidateCapabilities rejects eligibility or scoring filters that reference
+// a dimension this deployment cannot evaluate. A rule document must not be
+// considered valid merely because its JSON is syntactically valid: an
+// administrator publishing a filter on a dimension with no backing data
+// would create a competition whose rules can never match anyone.
+func ValidateCapabilities(e Eligibility, s Scoring, caps Capabilities) error {
+	for _, group := range [][]Rule{e.All, e.Any} {
+		for _, r := range group {
+			if err := validateFilterCapabilities(r.Filter, caps); err != nil {
+				return fmt.Errorf("eligibility rule %q: %w", r.Code, err)
+			}
+		}
+	}
+	if err := validateFilterCapabilities(s.Filter, caps); err != nil {
+		return fmt.Errorf("scoring: %w", err)
+	}
+	return nil
+}
+
+func validateFilterCapabilities(f *Filter, caps Capabilities) error {
+	if f == nil {
+		return nil
+	}
+	if len(f.Sectors) > 0 && !caps.SectorSupported {
+		return fmt.Errorf("sector filter is not supported by this deployment (no sector classification data)")
+	}
+	if len(f.IssuerCountries) > 0 && !caps.IssuerCountrySupported {
+		return fmt.Errorf("issuer_country filter is not supported by this deployment (no issuer classification data)")
+	}
+	if f.Universe != "" && !caps.UniverseResolverWired {
+		return fmt.Errorf("custom universe %q is not supported: no universe resolver is configured", f.Universe)
+	}
+	return nil
 }

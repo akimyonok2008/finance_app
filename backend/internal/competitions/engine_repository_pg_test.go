@@ -107,17 +107,26 @@ func TestPostgresEngineEntry_AtomicCreateBaselineAndGuards(t *testing.T) {
 	require.Len(t, pending[0].Snapshots, 2)
 	require.Len(t, pending[0].CashSnapshots, 1)
 	var includedID string
+	var includedSymbol string
+	var includedQuantity money.Quantity
 	for _, s := range pending[0].Snapshots {
 		if s.IncludedInScore {
 			includedID = s.ID
+			includedSymbol = s.Symbol
+			includedQuantity = s.Quantity
 		}
 	}
 	require.NotEmpty(t, includedID)
 
+	pendingCoverage, err := repo.HasPendingBaselineEntries(ctx, edition.ID)
+	require.NoError(t, err)
+	assert.True(t, pendingCoverage, "the entry has not baselined yet")
+
 	// Official baseline lands atomically and is guarded against replays.
 	now := time.Now().UTC()
 	baselines := []PositionBaseline{{
-		SnapshotID: includedID, Price: money.PriceFromFloat64(50), PriceCurrency: "USD",
+		SnapshotID: includedID, Symbol: includedSymbol, Quantity: includedQuantity,
+		Price: money.PriceFromFloat64(50), PriceCurrency: "USD",
 		ValueBase: money.MustAmount("100"), Weight: money.MustRatio("1"), ObservedAt: now,
 	}}
 	require.NoError(t, repo.CompleteBaseline(ctx, entry.ID, money.MustAmount("115"), baselines, now))
@@ -127,6 +136,10 @@ func TestPostgresEngineEntry_AtomicCreateBaselineAndGuards(t *testing.T) {
 	pending, err = repo.ListPendingBaselineEntries(ctx, edition.ID, 10)
 	require.NoError(t, err)
 	assert.Empty(t, pending)
+
+	pendingCoverage, err = repo.HasPendingBaselineEntries(ctx, edition.ID)
+	require.NoError(t, err)
+	assert.False(t, pendingCoverage, "baseline coverage is complete: ranking may promote")
 
 	// Withdrawal is impossible once the entry is active.
 	assert.ErrorIs(t, repo.UpdateEntryStatus(ctx, entry.ID, EntryAdmitted, EntryWithdrawn, now), ErrEntryConflict)
