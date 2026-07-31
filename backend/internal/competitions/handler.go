@@ -279,7 +279,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrJoinWindowClosed),
 		errors.Is(err, ErrWithdrawalClosed),
-		errors.Is(err, ErrEntryConflict):
+		errors.Is(err, ErrEntryConflict),
+		errors.Is(err, ErrIdempotencyConflict):
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrEntryNotFound):
 		httpx.WriteError(w, http.StatusNotFound, err.Error())

@@ -2,6 +2,8 @@ package competitions
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,10 +51,18 @@ func (s *Service) Join(ctx context.Context, competitionID, userID, idempotencyKe
 	if idempotencyKey == "" {
 		return nil, ErrIdempotencyKeyRequired
 	}
-	return s.joinEdition(ctx, comp, userID)
+	return s.joinEdition(ctx, comp, userID, idempotencyKey)
 }
 
-func (s *Service) joinEdition(ctx context.Context, comp *Competition, userID string) (*JoinEditionResponse, error) {
+// joinFingerprint binds an Idempotency-Key to the exact join it was used for,
+// so a key collision against a different (competition, user) pair is
+// detected instead of silently replaying the wrong entry.
+func joinFingerprint(competitionID, userID string) string {
+	sum := sha256.Sum256([]byte(competitionID + "|" + userID))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Service) joinEdition(ctx context.Context, comp *Competition, userID, idempotencyKey string) (*JoinEditionResponse, error) {
 	if s.snapshots == nil {
 		return nil, ErrEligibilityUnavailable
 	}
@@ -61,7 +71,29 @@ func (s *Service) joinEdition(ctx context.Context, comp *Competition, userID str
 		return nil, ErrJoinWindowClosed
 	}
 
-	// Idempotent replay: an existing entry is returned as-is. The unique
+	engineRepo, ok := s.repo.(EngineEntryRepository)
+	if !ok {
+		return nil, ErrEligibilityUnavailable
+	}
+
+	fingerprint := joinFingerprint(comp.ID, userID)
+
+	// Durable idempotency: this key was already bound to a join. Replay the
+	// stored entry's response rather than re-running eligibility/snapshot
+	// work. A key bound to a DIFFERENT (competition, user) fingerprint is a
+	// conflict — reusing a key across two different joins is a client bug,
+	// not a retry, and must not silently return the wrong competition's entry.
+	if byKey, found, err := engineRepo.FindEntryByIdempotencyKey(ctx, userID, idempotencyKey); err != nil {
+		return nil, err
+	} else if found {
+		if byKey.RequestFingerprint != fingerprint {
+			return nil, ErrIdempotencyConflict
+		}
+		return joinResponseFromEntry(comp.ID, byKey), nil
+	}
+
+	// Idempotent replay: an existing entry (created under any key, including
+	// legacy rows with none stored) is returned as-is. The unique
 	// (competition_id, user_id) constraint is the hard backstop below, so a
 	// concurrent duplicate join degrades to this same read.
 	if existing, err := s.repo.GetEntry(ctx, comp.ID, userID); err == nil {
@@ -100,10 +132,8 @@ func (s *Service) joinEdition(ctx context.Context, comp *Competition, userID str
 	if err != nil {
 		return nil, err
 	}
-	engineRepo, ok := s.repo.(EngineEntryRepository)
-	if !ok {
-		return nil, ErrEligibilityUnavailable
-	}
+	entry.IdempotencyKey = idempotencyKey
+	entry.RequestFingerprint = fingerprint
 	if err := engineRepo.CreateEngineEntry(ctx, *entry); err != nil {
 		if errors.Is(err, ErrEntryExists) {
 			if existing, getErr := s.repo.GetEntry(ctx, comp.ID, userID); getErr == nil {

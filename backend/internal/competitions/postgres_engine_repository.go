@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ardakimyonok/finance_app/internal/money"
@@ -31,12 +32,13 @@ func (r *PostgresCompetitionRepository) CreateEngineEntry(ctx context.Context, e
 		INSERT INTO competition_entries
 			(id, competition_id, user_id, starting_value_base, starting_index, joined_at,
 			 entry_status, portfolio_version, snapshot_captured_at, eligibility_evidence_json,
-			 scoring_scope, eligible_starting_value_base, baseline_status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			 scoring_scope, eligible_starting_value_base, baseline_status,
+			 idempotency_key, request_fingerprint)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`, entry.ID, entry.CompetitionID, entry.UserID, entry.StartingValue, entry.StartingIndex,
 		entry.JoinedAt, entry.EntryStatus, entry.PortfolioVersion, entry.SnapshotCapturedAt,
 		entry.EligibilityEvidenceJSON, entry.ScoringScope, entry.EligibleStartingValueBase,
-		entry.BaselineStatus)
+		entry.BaselineStatus, nullableString(entry.IdempotencyKey), nullableString(entry.RequestFingerprint))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -76,6 +78,37 @@ func nullableUUID(v string) any {
 		return nil
 	}
 	return v
+}
+
+// nullableString maps "" to NULL for optional text columns.
+func nullableString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+// FindEntryByIdempotencyKey looks up an entry this user previously created
+// with the given Idempotency-Key, regardless of competition — used to catch
+// a key reused across two different join requests.
+func (r *PostgresCompetitionRepository) FindEntryByIdempotencyKey(ctx context.Context, userID, idempotencyKey string) (*CompetitionEntry, bool, error) {
+	if idempotencyKey == "" {
+		return nil, false, nil
+	}
+	var e CompetitionEntry
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, competition_id, user_id, starting_value_base, starting_index, joined_at,
+		       entry_status, eligibility_evidence_json, idempotency_key, request_fingerprint
+		FROM competition_entries WHERE user_id = $1 AND idempotency_key = $2
+	`, userID, idempotencyKey).Scan(&e.ID, &e.CompetitionID, &e.UserID, &e.StartingValue, &e.StartingIndex,
+		&e.JoinedAt, &e.EntryStatus, &e.EligibilityEvidenceJSON, &e.IdempotencyKey, &e.RequestFingerprint)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("competition repository: find entry by idempotency key: %w", err)
+	}
+	return &e, true, nil
 }
 
 func (r *PostgresCompetitionRepository) UpdateEntryStatus(ctx context.Context, entryID, from, to string, now time.Time) error {

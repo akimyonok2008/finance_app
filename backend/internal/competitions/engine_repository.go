@@ -28,6 +28,10 @@ type EngineEntryRepository interface {
 	// (competition, user) entry already exists — the caller treats that as an
 	// idempotent replay.
 	CreateEngineEntry(ctx context.Context, entry CompetitionEntry) error
+	// FindEntryByIdempotencyKey looks up an entry this user previously
+	// created with the given Idempotency-Key, regardless of competition.
+	// Used to detect a key reused across two different join requests.
+	FindEntryByIdempotencyKey(ctx context.Context, userID, idempotencyKey string) (*CompetitionEntry, bool, error)
 	// UpdateEntryStatus applies a guarded entry-state change (used for
 	// withdrawal). ErrEntryConflict when the entry was not in `from`.
 	UpdateEntryStatus(ctx context.Context, entryID, from, to string, now time.Time) error
@@ -108,6 +112,21 @@ func (r *InMemoryCompetitionRepository) CreateEngineEntry(_ context.Context, ent
 	}
 	r.entries[entry.CompetitionID][entry.UserID] = entry
 	return nil
+}
+
+func (r *InMemoryCompetitionRepository) FindEntryByIdempotencyKey(_ context.Context, userID, idempotencyKey string) (*CompetitionEntry, bool, error) {
+	if idempotencyKey == "" {
+		return nil, false, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, byUser := range r.entries {
+		if e, ok := byUser[userID]; ok && e.IdempotencyKey == idempotencyKey {
+			copyE := e
+			return &copyE, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 func (r *InMemoryCompetitionRepository) UpdateEntryStatus(_ context.Context, entryID, from, to string, now time.Time) error {
