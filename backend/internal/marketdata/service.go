@@ -23,6 +23,7 @@ type Service struct {
 	repo     Repository
 	provider Provider
 	cfg      ServiceConfig
+	history  prices.HistoricalPriceProvider
 }
 
 func NewService(repo Repository, provider Provider, cfg ServiceConfig) *Service {
@@ -39,6 +40,23 @@ func NewService(repo Repository, provider Provider, cfg ServiceConfig) *Service 
 		cfg.MaxQuoteBatchSize = 25
 	}
 	return &Service{repo: repo, provider: provider, cfg: cfg}
+}
+
+// SetHistoryProvider wires the optional historical-price capability (Twelve
+// Data daily-bar history today). Left unset, PriceAtOrBefore always returns
+// ErrProviderUnavailable so callers fall back to a live quote.
+func (s *Service) SetHistoryProvider(h prices.HistoricalPriceProvider) {
+	s.history = h
+}
+
+// PriceAtOrBefore resolves symbol's price at or before at via the wired
+// history provider. See prices.HistoricalPriceProvider for methodology
+// semantics.
+func (s *Service) PriceAtOrBefore(ctx context.Context, symbol string, at time.Time) (*prices.HistoricalPrice, error) {
+	if s.history == nil {
+		return nil, ErrProviderUnavailable
+	}
+	return s.history.PriceAtOrBefore(ctx, symbol, at)
 }
 
 func (s *Service) SearchInstruments(ctx context.Context, query string) (SearchResponse, error) {

@@ -186,6 +186,18 @@ const ProviderStatusStaleFallback = "provider_unavailable"
 // portfolio mutation that revalues it, fail outright. A symbol that was never
 // successfully priced still returns the provider's error: there is no
 // last-known value to fall back to.
+// PriceAtOrBefore delegates directly to the wrapped provider when it
+// supports historical lookups. Unlike GetLatestPrice this is not cached: a
+// point-in-time historical price never goes stale, and callers (competition
+// boundary observation capture) already dedupe/persist the result themselves.
+func (c *CachedPriceProvider) PriceAtOrBefore(ctx context.Context, symbol string, at time.Time) (*HistoricalPrice, error) {
+	hp, ok := c.provider.(HistoricalPriceProvider)
+	if !ok {
+		return nil, ErrPriceUnavailable
+	}
+	return hp.PriceAtOrBefore(ctx, symbol, at)
+}
+
 func (c *CachedPriceProvider) GetLatestPrice(ctx context.Context, symbol string) (*Price, error) {
 	sym := normalizeSymbol(symbol)
 

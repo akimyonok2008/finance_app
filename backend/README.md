@@ -776,6 +776,98 @@ The older ISO-week sprint API remains compatible with existing rows: it uses a
 join-time frozen composition and can reprice legacy completed standings. New
 editions never use that path.
 
+### Boundary price accuracy (known limitation, unresolved)
+
+Every entry's start/end value must be priced at the competition's declared
+`starts_at`/`ends_at` instant so that all participants share an identical
+valuation moment. `captureObservations` (`internal/competitions/observations.go`)
+persists one shared observation set per (competition, boundary) so that at
+least every participant is priced from the *same* stored value regardless of
+which worker batch or retry captured it — but until this fix, that stored
+value itself was not guaranteed to represent the declared instant:
+
+- The baseline/finalize workers run on a schedule, so a pass can fetch a
+  price several minutes after `starts_at`/`ends_at` has actually passed.
+- Batches (200 entries for baseline, 500 for finalize) can span multiple
+  worker passes; a symbol first needed by a later batch is captured later
+  than symbols the first batch already priced.
+- A pass that fails to price a symbol (provider outage, rate limit) retries
+  on a later pass — potentially hours or days later — and whatever the
+  provider was quoting *at retry time* got frozen in as the "boundary"
+  price.
+
+The original code called `GetLatestPrice` (the provider's current quote,
+whenever asked) and stamped the result `ObservedAt: now`, conflating "when
+this row was captured" with "what real-world instant the price represents."
+Two competitions with identical declared boundaries could end up valued at
+measurably different real moments depending on worker timing alone.
+
+**Current mitigation.** `captureSinglePrice` now prefers
+`prices.HistoricalPriceProvider.PriceAtOrBefore(symbol, effectiveAt)` over a
+live quote when a historical provider is wired (Twelve Data daily bars via
+`marketdata.TwelveDataHistoryProvider`), and records which method produced
+the stored price in `price_methodology` (migration 0059):
+
+- `session_close` — the close of the trading session at or before
+  `effectiveAt`. This is the only resolution the wired provider offers
+  (Twelve Data `/time_series` is queried at `interval=1day`, not intraday);
+  it is the close price for that session, not necessarily the price at
+  `effectiveAt`'s specific time of day.
+- `fallback_latest` — no historical provider was available, or the lookup
+  failed for that symbol; the pre-existing "whatever `GetLatestPrice`
+  returns right now" behavior, now explicit and auditable per row instead of
+  silently assumed accurate.
+- `exact` — reserved for a future intraday-capable provider; unused today.
+
+**What this does and does not fix.** A retried pass can no longer silently
+substitute a price from a wildly different real-world moment for a symbol
+already priced correctly for the rest of the boundary set — every symbol in
+a set is now anchored to (at worst) the same trading session's close. It
+does **not** yet produce a price at the *exact* declared instant: if
+`starts_at`/`ends_at` falls during a symbol's regular trading hours, the
+stored `session_close` price can still differ from the true price at that
+moment, because the market moved between the session close used and the
+declared instant.
+
+**Two candidate fixes, not yet built:**
+
+1. **Intraday lookup.** Twelve Data's `/time_series` supports
+   `interval=1min` (and other intraday granularities). Add a second
+   `PriceAtOrBefore` path that requests the nearest 1-minute bar at or
+   before `effectiveAt` and labels the result `exact` when the market was
+   open at that instant. Needs a way to know whether the market *was* open
+   (see below), and costs materially more API budget than daily bars — the
+   existing per-symbol series cache would need an intraday-aware
+   counterpart.
+2. **Constrain competition scheduling instead.** If `starts_at`/`ends_at` is
+   always scheduled for a moment when every instrument in the competition's
+   universe has a closed market, the most recent daily close *is* the exact
+   price at that instant — nothing trades between close and the next open,
+   so there is no gap left to close. This is far cheaper than (1) but has
+   real limits:
+   - It must hold for **every** venue represented in the universe
+     simultaneously, not just one exchange — e.g. NASDAQ (closes ~21:00
+     UTC) and BIST/Istanbul (`*.IS` symbols, closes ~15:00 UTC) have
+     different closed windows; a boundary safe for one can be mid-session
+     for the other. `venue_mic` (migration 0058) is what such a check would
+     key on.
+   - It does not help 24/7 instruments (crypto — `BTC-USD`/`ETH-USD` in the
+     mock catalogue never close), which would still need (1) or an explicit
+     carve-out.
+   - It is a scheduling *convention*, not an enforced invariant, unless
+     competition creation validates the chosen boundary against every
+     represented venue's trading hours — nothing currently stops an admin
+     from setting a boundary mid-session.
+   - Even if adopted, `captureSinglePrice` would need to actually know the
+     constraint holds (a market-hours check per venue) before it could
+     honestly report `exact` instead of `session_close` — right now every
+     daily-bar result is labelled `session_close` unconditionally.
+
+Neither fix is implemented. This section exists so the tradeoff is written
+down before a market-calendar policy (venue trading hours, holidays, and the
+"exact vs. session close vs. fallback" decision) gets built, rather than
+re-derived from scratch later.
+
 ## Achievements
 
 The current catalogue is twenty code-defined, permanent benchmark badges:

@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ardakimyonok/finance_app/internal/prices"
 )
 
 const timeSeriesBody = `{
@@ -78,6 +80,60 @@ func TestHistoryProviderCachesFetch(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
+}
+
+func TestPriceAtOrBefore_UsesSessionCloseAtOrBeforeCutoff(t *testing.T) {
+	provider, _ := newHistoryProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(timeSeriesBody))
+	})
+
+	// Cutoff falls mid-day on 2026-01-04, hours after that session's close:
+	// the result must be the 2026-01-04 close, not 2026-01-05's (which is
+	// still in the future relative to the cutoff) or a live quote.
+	cutoff := mustDate("2026-01-04").Add(20 * time.Hour)
+	got, err := provider.PriceAtOrBefore(context.Background(), "SPY", cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, "2026-01-04", got.TradingSessionDate)
+	assert.Equal(t, 105.0, got.Price)
+	assert.Equal(t, prices.MethodologySessionClose, got.Methodology)
+	assert.Equal(t, mustDate("2026-01-04"), got.ProviderTimestamp)
+}
+
+func TestPriceAtOrBefore_FallsBackToPriorSessionOnNonTradingDay(t *testing.T) {
+	provider, _ := newHistoryProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(timeSeriesBody))
+	})
+
+	// No bar exists for 2026-01-06 (a gap, e.g. weekend/holiday): the nearest
+	// PRIOR session's close must be used, never a later one.
+	got, err := provider.PriceAtOrBefore(context.Background(), "SPY", mustDate("2026-01-06"))
+	require.NoError(t, err)
+	assert.Equal(t, "2026-01-05", got.TradingSessionDate)
+	assert.Equal(t, 110.0, got.Price)
+}
+
+func TestPriceAtOrBefore_ErrorsWhenCutoffPredatesAllHistory(t *testing.T) {
+	provider, _ := newHistoryProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(timeSeriesBody))
+	})
+
+	_, err := provider.PriceAtOrBefore(context.Background(), "SPY", mustDate("2025-12-31"))
+	require.Error(t, err)
+}
+
+func TestPriceAtOrBefore_ParsesCurrencyFromMeta(t *testing.T) {
+	body := `{
+	  "meta": {"symbol": "THYAO.IS", "interval": "1day", "currency": "try"},
+	  "values": [{"datetime": "2026-01-05", "close": "295.50"}],
+	  "status": "ok"
+	}`
+	provider, _ := newHistoryProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	})
+
+	got, err := provider.PriceAtOrBefore(context.Background(), "THYAO.IS", mustDate("2026-01-05"))
+	require.NoError(t, err)
+	assert.Equal(t, "TRY", got.Currency)
 }
 
 func mustDate(s string) time.Time {

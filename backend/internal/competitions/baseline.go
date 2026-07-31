@@ -127,7 +127,15 @@ func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 		// never re-queried for a symbol already captured. This is what makes
 		// every entry's start-time price/FX identical regardless of which
 		// 200-entry batch or which pass baselines it (see observations.go).
-		memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
+		//
+		// lastBatch mirrors finalize's own lapComplete: registration is
+		// already closed by the time baseline runs (ListBaselineDueEditions
+		// only returns registration_closed/active editions), so the admitted
+		// population is fixed and fewer entries than the batch limit means
+		// there is no further batch left that could still introduce a new
+		// symbol or currency pair — only then is it safe to seal the set.
+		lastBatch := len(entries) < defaultBaselineBatch
+		memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, lastBatch, now)
 		if err != nil {
 			slog.Error("competition_baseline_observation_capture_failed", "competition_id", comp.ID, "error", err)
 			continue
@@ -191,7 +199,8 @@ func (s *Service) retryCompetitionBaseline(ctx context.Context, comp Competition
 	if err != nil {
 		return err
 	}
-	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
+	lastBatch := len(entries) < defaultBaselineBatch
+	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, lastBatch, now)
 	if err != nil {
 		return err
 	}

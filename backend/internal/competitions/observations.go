@@ -8,6 +8,7 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/fx"
 	"github.com/ardakimyonok/finance_app/internal/money"
+	"github.com/ardakimyonok/finance_app/internal/prices"
 )
 
 // Boundary types for a competition's shared observation sets (migration
@@ -20,10 +21,16 @@ const (
 	BoundaryEnd   = "end"
 )
 
-// Observation set statuses.
+// Observation set statuses. A set only ever becomes sealed once a worker
+// pass both (a) captures every symbol/pair its own batch of entries needed
+// and (b) that batch was the LAST one needed to cover the boundary's entire
+// entry population — never from (a) alone. A batch that satisfies only (a)
+// leaves the set pending, so a later batch that first sees a different
+// symbol or currency pair is never masked by an already-"complete" set (see
+// captureObservations).
 const (
-	ObservationPending   = "pending"
-	ObservationCompleted = "completed"
+	ObservationPending = "pending"
+	ObservationSealed  = "sealed"
 )
 
 // observationProvider tags which provider captured a competition's boundary
@@ -32,13 +39,22 @@ const (
 const observationProvider = "live_quote"
 
 // PriceObservation is one symbol's frozen price for a competition boundary.
+// ObservedAt is when this row was captured/persisted by the worker; it is
+// bookkeeping, not the price's real-world moment. ProviderTimestamp is the
+// latter: the provider's own timestamp for the price actually used (a
+// trading session's close for Methodology == prices.MethodologySessionClose,
+// or the live-fetch instant for prices.MethodologyFallbackLatest). See
+// captureSinglePrice.
 type PriceObservation struct {
-	InstrumentID string
-	VenueMIC     string
-	Symbol       string
-	Price        money.Price
-	Currency     string
-	ObservedAt   time.Time
+	InstrumentID       string
+	VenueMIC           string
+	Symbol             string
+	Price              money.Price
+	Currency           string
+	ObservedAt         time.Time
+	ProviderTimestamp  time.Time
+	TradingSessionDate string // YYYY-MM-DD, set when Methodology == prices.MethodologySessionClose
+	Methodology        string
 }
 
 func observationKey(instrumentID, symbol string) string {
@@ -58,8 +74,10 @@ type FxObservation struct {
 }
 
 // ObservationSet is one competition's boundary observation record
-// (competition_observation_sets). Status stays 'pending' until every symbol
-// and currency pair requested of it so far has been captured.
+// (competition_observation_sets). Status stays 'pending' until the LAST
+// worker pass over the boundary's entire entry population captures every
+// symbol and currency pair that pass still needed — never merely "the most
+// recent pass's own batch is fully captured" (see captureObservations).
 type ObservationSet struct {
 	ID            string
 	CompetitionID string
@@ -83,10 +101,18 @@ type ObservationRepository interface {
 	// set, keyed by observationKey and by "FROM->TO" respectively.
 	LoadObservations(ctx context.Context, setID string) (map[string]PriceObservation, map[string]FxObservation, error)
 	// RecordObservations persists newly captured price/FX rows (idempotent:
-	// a symbol or pair already stored is never overwritten) and, when
-	// allCaptured is true, marks the set completed. Safe to call with empty
-	// newPrices/newFX just to flip a set to completed once nothing is missing.
-	RecordObservations(ctx context.Context, setID string, newPrices []PriceObservation, newFX []FxObservation, allCaptured bool, now time.Time) error
+	// a symbol or pair already stored is never overwritten) and, when sealed
+	// is true, marks the set sealed. sealed must only ever be passed as true
+	// once the caller has verified BOTH that this batch's own requested
+	// symbols/pairs are fully captured AND that this batch was the last one
+	// needed to cover the boundary's entire entry population (see
+	// captureObservations) — never from batch-local completeness alone, or a
+	// later batch that first sees a different symbol/pair goes unrecorded
+	// behind an already-"sealed" set. Safe to call with empty
+	// newPrices/newFX just to flip a set to sealed once nothing is missing.
+	// A set that is already sealed is terminal: implementations must never
+	// unseal it or accept further writes against it.
+	RecordObservations(ctx context.Context, setID string, newPrices []PriceObservation, newFX []FxObservation, sealed bool, now time.Time) error
 }
 
 // priceSource is what baselineEntry/valueCompetitionEntry actually need to
@@ -174,13 +200,63 @@ func entrySymbolsAndPairs(entries []CompetitionEntry) (map[string]PriceObservati
 	return symbols, pairs
 }
 
+// captureSinglePrice resolves one instrument's frozen boundary price. It
+// prefers the provider's history at-or-before effectiveAt (methodology
+// prices.MethodologySessionClose today, since the only history source wired
+// up is Twelve Data daily bars) over a live quote captured whenever this
+// worker pass happens to run: a live quote at capture time can be minutes,
+// hours, or — on a retried pass — days after the competition's declared
+// start/end instant, silently mispricing the boundary. When no historical
+// provider is configured, or the historical lookup itself fails (outage,
+// symbol not covered, predates the symbol's history), it falls back to
+// GetLatestPrice, explicitly tagged prices.MethodologyFallbackLatest so the
+// imprecision is auditable rather than indistinguishable from an exact
+// boundary price. Returns ok=false only when neither path can price the
+// symbol at all.
+func (s *Service) captureSinglePrice(ctx context.Context, ref PriceObservation, effectiveAt, now time.Time) (PriceObservation, bool) {
+	if hp, ok := s.prices.(prices.HistoricalPriceProvider); ok {
+		if hist, err := hp.PriceAtOrBefore(ctx, ref.Symbol, effectiveAt); err == nil {
+			return PriceObservation{
+				InstrumentID: ref.InstrumentID, VenueMIC: ref.VenueMIC, Symbol: ref.Symbol,
+				Price: money.PriceFromFloat64(hist.Price), Currency: hist.Currency, ObservedAt: now,
+				ProviderTimestamp: hist.ProviderTimestamp, TradingSessionDate: hist.TradingSessionDate,
+				Methodology: hist.Methodology,
+			}, true
+		}
+	}
+	quote, err := s.prices.GetLatestPrice(ctx, ref.Symbol)
+	if err != nil {
+		return PriceObservation{}, false
+	}
+	return PriceObservation{
+		InstrumentID: ref.InstrumentID, VenueMIC: ref.VenueMIC, Symbol: ref.Symbol,
+		Price: money.PriceFromFloat64(quote.Price), Currency: quote.Currency, ObservedAt: now,
+		ProviderTimestamp: now, Methodology: prices.MethodologyFallbackLatest,
+	}, true
+}
+
 // captureObservations ensures the competition+boundary observation set
 // exists, fetches (once, ever) any of the requested symbols/currency pairs
 // that have not yet been captured by this or an earlier pass, persists them,
 // and returns the full stored view for valuation. A symbol's currency is
 // only known once its quote is fetched, so FX pairs discovered that way are
 // captured in the same pass they're first seen.
-func (s *Service) captureObservations(ctx context.Context, repo ObservationRepository, competitionID, boundary string, effectiveAt time.Time, entries []CompetitionEntry, now time.Time) (*boundaryObservations, error) {
+//
+// lastBatch must be true only when the caller's entries are the final batch
+// needed to sweep the boundary's entire entry population (e.g. baseline's
+// "fewer entries returned than the batch limit", finalize's own lapComplete)
+// — never merely "true once per worker tick". The set is sealed only when
+// this batch's own requested symbols/pairs are fully captured AND lastBatch
+// is true, so a competition spanning more than one batch is never marked
+// sealed off the first batch alone while a later batch still holds
+// symbols/pairs no earlier batch had reason to request (see
+// ObservationSet's doc comment for the bug this prevents).
+//
+// Once a set is sealed, this function never fetches another symbol/pair for
+// it: a request for something outside the frozen set is left unresolved
+// (returned via errObservationNotCaptured at read time) rather than
+// silently expanding a set that downstream code already treats as closed.
+func (s *Service) captureObservations(ctx context.Context, repo ObservationRepository, competitionID, boundary string, effectiveAt time.Time, entries []CompetitionEntry, lastBatch bool, now time.Time) (*boundaryObservations, error) {
 	set, err := repo.EnsureObservationSet(ctx, competitionID, boundary, effectiveAt, observationProvider)
 	if err != nil {
 		return nil, fmt.Errorf("ensure observation set: %w", err)
@@ -190,6 +266,10 @@ func (s *Service) captureObservations(ctx context.Context, repo ObservationRepos
 		return nil, fmt.Errorf("load observations: %w", err)
 	}
 
+	if set.Status == ObservationSealed {
+		return &boundaryObservations{prices: existingPrices, fx: existingFX}, nil
+	}
+
 	symbols, pairs := entrySymbolsAndPairs(entries)
 
 	var newPrices []PriceObservation
@@ -197,18 +277,14 @@ func (s *Service) captureObservations(ctx context.Context, repo ObservationRepos
 		if _, ok := existingPrices[key]; ok {
 			continue
 		}
-		quote, err := s.prices.GetLatestPrice(ctx, ref.Symbol)
-		if err != nil {
+		obs, ok := s.captureSinglePrice(ctx, ref, effectiveAt, now)
+		if !ok {
 			continue // left uncaptured; retried on the next pass within the operational window
-		}
-		obs := PriceObservation{
-			InstrumentID: ref.InstrumentID, VenueMIC: ref.VenueMIC, Symbol: ref.Symbol, Price: money.PriceFromFloat64(quote.Price),
-			Currency: quote.Currency, ObservedAt: now,
 		}
 		existingPrices[key] = obs
 		newPrices = append(newPrices, obs)
-		if quote.Currency != fx.BaseCurrency {
-			pairs[fxPairKey(quote.Currency, fx.BaseCurrency)] = struct{}{}
+		if obs.Currency != fx.BaseCurrency {
+			pairs[fxPairKey(obs.Currency, fx.BaseCurrency)] = struct{}{}
 		}
 	}
 
@@ -230,24 +306,29 @@ func (s *Service) captureObservations(ctx context.Context, repo ObservationRepos
 		newFX = append(newFX, obs)
 	}
 
-	allCaptured := true
+	batchCaptured := true
 	for key := range symbols {
 		if _, ok := existingPrices[key]; !ok {
-			allCaptured = false
+			batchCaptured = false
 			break
 		}
 	}
-	if allCaptured {
+	if batchCaptured {
 		for pair := range pairs {
 			if _, ok := existingFX[pair]; !ok {
-				allCaptured = false
+				batchCaptured = false
 				break
 			}
 		}
 	}
+	// Sealing requires BOTH: this batch's own requested symbols/pairs are
+	// fully captured, AND this batch was the last one needed for the whole
+	// boundary population — batch-local completeness alone is exactly the
+	// premature-completion bug this guards against.
+	sealed := batchCaptured && lastBatch
 
-	if len(newPrices) > 0 || len(newFX) > 0 || (allCaptured && set.Status != ObservationCompleted) {
-		if err := repo.RecordObservations(ctx, set.ID, newPrices, newFX, allCaptured, now); err != nil {
+	if len(newPrices) > 0 || len(newFX) > 0 || (sealed && set.Status != ObservationSealed) {
+		if err := repo.RecordObservations(ctx, set.ID, newPrices, newFX, sealed, now); err != nil {
 			return nil, fmt.Errorf("record observations: %w", err)
 		}
 	}
@@ -309,13 +390,17 @@ func (r *InMemoryCompetitionRepository) LoadObservations(_ context.Context, setI
 	return prices, fxRates, nil
 }
 
-func (r *InMemoryCompetitionRepository) RecordObservations(_ context.Context, setID string, newPrices []PriceObservation, newFX []FxObservation, allCaptured bool, now time.Time) error {
+func (r *InMemoryCompetitionRepository) RecordObservations(_ context.Context, setID string, newPrices []PriceObservation, newFX []FxObservation, sealed bool, now time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sets := r.observationSets()
 	entry, ok := sets[setID]
 	if !ok {
 		return ErrCompetitionNotFound
+	}
+	if entry.set.Status == ObservationSealed {
+		// Terminal: a sealed set never accepts further writes or reverts.
+		return nil
 	}
 	for _, p := range newPrices {
 		key := observationKey(p.InstrumentID, p.Symbol)
@@ -329,8 +414,8 @@ func (r *InMemoryCompetitionRepository) RecordObservations(_ context.Context, se
 			entry.fx[key] = f
 		}
 	}
-	if allCaptured && entry.set.Status != ObservationCompleted {
-		entry.set.Status = ObservationCompleted
+	if sealed {
+		entry.set.Status = ObservationSealed
 		stamp := now.UTC()
 		entry.set.CompletedAt = &stamp
 	}

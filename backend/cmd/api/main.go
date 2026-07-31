@@ -742,7 +742,8 @@ func main() {
 
 	// --- market-data provider (+ conservative quote cache service) ---
 	var marketProvider marketdata.Provider
-	var twelveData *marketdata.TwelveDataProvider // set when the real feed is active
+	var twelveData *marketdata.TwelveDataProvider               // set when the real feed is active
+	var twelveDataHistory *marketdata.TwelveDataHistoryProvider // set when twelveData is
 	priceProviderName := cfg.PriceProvider
 	switch cfg.PriceProvider {
 	case "mock", "":
@@ -765,6 +766,7 @@ func main() {
 		}
 		marketProvider = p
 		twelveData = p
+		twelveDataHistory = marketdata.NewTwelveDataHistoryProvider(p, cfg.PriceCacheTTL)
 	case "yahoo":
 		slog.Warn("the Yahoo (finance-go) provider is PROTOTYPE ONLY; use PRICE_PROVIDER=twelvedata for Prototype 3A real data")
 		baseProvider, err := prices.NewProvider(cfg.PriceProvider)
@@ -786,6 +788,9 @@ func main() {
 		SearchLimit:           10,
 		MaxQuoteBatchSize:     25,
 	})
+	if twelveDataHistory != nil {
+		marketDataSvc.SetHistoryProvider(twelveDataHistory)
+	}
 	var priceProvider prices.PriceProvider = marketDataSvc
 	// A short in-process cache absorbs bursts of mutations against the same
 	// held symbols in quick succession: every mutation re-prices EVERY
@@ -934,10 +939,8 @@ func main() {
 	// deterministic offline provider supports previews in local development but
 	// is not eligible to create permanent awards.
 	var benchmarkHistory benchmark.HistoricalPriceProvider
-	if twelveData != nil {
-		benchmarkHistory = benchmarkHistoryAdapter{
-			marketdata.NewTwelveDataHistoryProvider(twelveData, cfg.PriceCacheTTL),
-		}
+	if twelveDataHistory != nil {
+		benchmarkHistory = benchmarkHistoryAdapter{twelveDataHistory}
 		slog.Info("benchmark evaluation using real Twelve Data historical prices")
 	} else {
 		benchmarkHistory = benchmark.NewMockHistoricalPriceProvider(benchmark.DefaultMockReturns())
