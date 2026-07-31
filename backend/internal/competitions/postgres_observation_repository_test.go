@@ -41,6 +41,7 @@ func TestPostgresObservationRepository_EnsureIsIdempotentAndCapturesIncrementall
 		"effective_at must not be overwritten by a later pass")
 
 	now := time.Now().UTC()
+	key := observationKey("", "BTC-ID")
 	err = repo.RecordObservations(ctx, first.ID, []PriceObservation{
 		{Symbol: "BTC-ID", Price: money.PriceFromFloat64(50), Currency: "USD", ObservedAt: now},
 	}, nil, false, now)
@@ -48,8 +49,8 @@ func TestPostgresObservationRepository_EnsureIsIdempotentAndCapturesIncrementall
 
 	prices, fxRates, err := repo.LoadObservations(ctx, first.ID)
 	require.NoError(t, err)
-	require.Contains(t, prices, "BTC-ID")
-	assert.Equal(t, 0, prices["BTC-ID"].Price.Cmp(money.MustPrice("50")))
+	require.Contains(t, prices, key)
+	assert.Equal(t, 0, prices[key].Price.Cmp(money.MustPrice("50")))
 	assert.Empty(t, fxRates)
 
 	// Recording the same symbol again must never overwrite the frozen value —
@@ -60,7 +61,7 @@ func TestPostgresObservationRepository_EnsureIsIdempotentAndCapturesIncrementall
 	require.NoError(t, err)
 	prices, _, err = repo.LoadObservations(ctx, first.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 0, prices["BTC-ID"].Price.Cmp(money.MustPrice("50")),
+	assert.Equal(t, 0, prices[key].Price.Cmp(money.MustPrice("50")),
 		"an already-captured observation must never be overwritten by a later pass")
 
 	completed, err := repo.EnsureObservationSet(ctx, edition.ID, BoundaryStart, effectiveAt, "live_quote")

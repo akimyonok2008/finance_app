@@ -45,7 +45,7 @@ func (r *PostgresCompetitionRepository) EnsureObservationSet(ctx context.Context
 func (r *PostgresCompetitionRepository) LoadObservations(ctx context.Context, setID string) (map[string]PriceObservation, map[string]FxObservation, error) {
 	prices := map[string]PriceObservation{}
 	priceRows, err := r.pool.Query(ctx, `
-		SELECT symbol, price, currency, provider_observed_at
+		SELECT instrument_id, venue_mic, symbol, price, currency, provider_observed_at
 		FROM competition_price_observations WHERE observation_set_id = $1
 	`, setID)
 	if err != nil {
@@ -53,11 +53,18 @@ func (r *PostgresCompetitionRepository) LoadObservations(ctx context.Context, se
 	}
 	for priceRows.Next() {
 		var p PriceObservation
-		if err := priceRows.Scan(&p.Symbol, &p.Price, &p.Currency, &p.ObservedAt); err != nil {
+		var instrumentID, venueMIC *string
+		if err := priceRows.Scan(&instrumentID, &venueMIC, &p.Symbol, &p.Price, &p.Currency, &p.ObservedAt); err != nil {
 			priceRows.Close()
 			return nil, nil, fmt.Errorf("competition repository: scan price observation: %w", err)
 		}
-		prices[p.Symbol] = p
+		if instrumentID != nil {
+			p.InstrumentID = *instrumentID
+		}
+		if venueMIC != nil {
+			p.VenueMIC = *venueMIC
+		}
+		prices[observationKey(p.InstrumentID, p.Symbol)] = p
 	}
 	if err := priceRows.Err(); err != nil {
 		priceRows.Close()
@@ -97,11 +104,33 @@ func (r *PostgresCompetitionRepository) RecordObservations(ctx context.Context, 
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, p := range newPrices {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO competition_price_observations (id, observation_set_id, symbol, price, currency, provider_observed_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (observation_set_id, symbol) DO NOTHING
-		`, uuid.NewString(), setID, p.Symbol, p.Price, p.Currency, p.ObservedAt.UTC()); err != nil {
+		var instrumentID, venueMIC *string
+		if p.InstrumentID != "" {
+			instrumentID = &p.InstrumentID
+		}
+		if p.VenueMIC != "" {
+			venueMIC = &p.VenueMIC
+		}
+		// ON CONFLICT targets the partial unique indexes from migration 0058:
+		// instrument_id when present (authoritative identity), symbol as the
+		// legacy/unresolved fallback. Postgres requires the inference
+		// predicate to match the index's WHERE clause exactly, so the two
+		// cases need separate statements.
+		var err error
+		if instrumentID != nil {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO competition_price_observations (id, observation_set_id, instrument_id, venue_mic, symbol, price, currency, provider_observed_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				ON CONFLICT (observation_set_id, instrument_id) WHERE instrument_id IS NOT NULL DO NOTHING
+			`, uuid.NewString(), setID, instrumentID, venueMIC, p.Symbol, p.Price, p.Currency, p.ObservedAt.UTC())
+		} else {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO competition_price_observations (id, observation_set_id, instrument_id, venue_mic, symbol, price, currency, provider_observed_at)
+				VALUES ($1, $2, NULL, $3, $4, $5, $6, $7)
+				ON CONFLICT (observation_set_id, symbol) WHERE instrument_id IS NULL DO NOTHING
+			`, uuid.NewString(), setID, venueMIC, p.Symbol, p.Price, p.Currency, p.ObservedAt.UTC())
+		}
+		if err != nil {
 			return fmt.Errorf("competition repository: insert price observation: %w", err)
 		}
 	}

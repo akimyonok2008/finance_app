@@ -1125,9 +1125,9 @@ func main() {
 		}
 	}
 	// Competition results and this event are committed by one transaction.
-	// This projector is mandatory in Postgres mode and independently retries
-	// idempotent achievement evaluation until success or dead-lettering.
-	if repos.pgPool != nil {
+	// On the designated competition instance this independently retries each
+	// participant's idempotent evaluation until success or dead-lettering.
+	if repos.pgPool != nil && cfg.EnableCompetitionWorker {
 		competitionOutbox := competitions.NewCompetitionOutboxStore(repos.pgPool)
 		competitionProjector := competitions.NewCompetitionAchievementProjector(
 			competitionOutbox, competitionAchievementAdapter{achievements: achievementsSvc}, cfg.LeaderboardRefreshInterval,
@@ -1143,6 +1143,8 @@ func main() {
 				return err
 			},
 		})
+	} else if repos.pgPool != nil {
+		slog.Info("competition achievement projector disabled on non-designated instance")
 	}
 
 	// --- background workers ---
@@ -1165,6 +1167,7 @@ func main() {
 	if optionalJobs {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
 		worker.SetLeaderElector(leader)
+		worker.SetCompetitionJobsEnabled(cfg.EnableCompetitionWorker)
 		worker.SetExploreProjectionRefresher(profileSvc)
 		// Private daily portfolio archives remain available for owner analytics;
 		// ranked achievements use the independent canonical snapshot worker below.
@@ -1173,6 +1176,7 @@ func main() {
 			walker:    &userBatchWalker{users: authSvc, batch: cfg.RefreshBatchSize},
 		})
 		worker.Start(ctx)
+		slog.Info("competition worker designation", "enabled", cfg.EnableCompetitionWorker)
 		rankedWorker := jobs.NewRankedSnapshotWorker(rankedSnapshotJobAdapter{
 			walker:       &userBatchWalker{users: authSvc, batch: cfg.RefreshBatchSize},
 			history:      historySvc,

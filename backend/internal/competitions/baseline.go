@@ -229,8 +229,9 @@ func newObservationMemo(s *Service) *observationMemo {
 	}
 }
 
-func (m *observationMemo) priceOf(ctx context.Context, symbol string) (money.Price, string, error) {
-	if hit, ok := m.prices[symbol]; ok {
+func (m *observationMemo) priceOf(ctx context.Context, instrumentID, symbol string) (money.Price, string, error) {
+	key := observationKey(instrumentID, symbol)
+	if hit, ok := m.prices[key]; ok {
 		return hit.price, hit.currency, nil
 	}
 	quote, err := m.svc.prices.GetLatestPrice(ctx, symbol)
@@ -238,7 +239,7 @@ func (m *observationMemo) priceOf(ctx context.Context, symbol string) (money.Pri
 		return money.Price{}, "", err
 	}
 	exact := money.PriceFromFloat64(quote.Price)
-	m.prices[symbol] = struct {
+	m.prices[key] = struct {
 		price    money.Price
 		currency string
 	}{exact, quote.Currency}
@@ -282,7 +283,7 @@ func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository,
 		if !snap.IncludedInScore {
 			continue
 		}
-		price, currency, err := memo.priceOf(ctx, snap.Symbol)
+		price, currency, err := memo.priceOf(ctx, snap.InstrumentID, snap.Symbol)
 		if err != nil {
 			return fmt.Errorf("price %s: %w", snap.Symbol, err)
 		}

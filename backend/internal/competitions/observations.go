@@ -33,10 +33,19 @@ const observationProvider = "live_quote"
 
 // PriceObservation is one symbol's frozen price for a competition boundary.
 type PriceObservation struct {
-	Symbol     string
-	Price      money.Price
-	Currency   string
-	ObservedAt time.Time
+	InstrumentID string
+	VenueMIC     string
+	Symbol       string
+	Price        money.Price
+	Currency     string
+	ObservedAt   time.Time
+}
+
+func observationKey(instrumentID, symbol string) string {
+	if instrumentID != "" {
+		return "id:" + instrumentID
+	}
+	return "sym:" + symbol
 }
 
 // FxObservation is one currency pair's frozen conversion rate for a
@@ -71,7 +80,7 @@ type ObservationRepository interface {
 	// provider are only ever written on first creation.
 	EnsureObservationSet(ctx context.Context, competitionID, boundary string, effectiveAt time.Time, provider string) (ObservationSet, error)
 	// LoadObservations returns every price/FX row already captured for the
-	// set, keyed by symbol and by "FROM->TO" respectively.
+	// set, keyed by observationKey and by "FROM->TO" respectively.
 	LoadObservations(ctx context.Context, setID string) (map[string]PriceObservation, map[string]FxObservation, error)
 	// RecordObservations persists newly captured price/FX rows (idempotent:
 	// a symbol or pair already stored is never overwritten) and, when
@@ -90,7 +99,7 @@ type ObservationRepository interface {
 // same stored start/end observation regardless of which pass or batch values
 // them.
 type priceSource interface {
-	priceOf(ctx context.Context, symbol string) (money.Price, string, error)
+	priceOf(ctx context.Context, instrumentID, symbol string) (money.Price, string, error)
 	toBase(ctx context.Context, value money.Amount, currency string) (money.Amount, error)
 }
 
@@ -113,8 +122,8 @@ var _ priceSource = (*boundaryObservations)(nil)
 
 func fxPairKey(from, to string) string { return from + "->" + to }
 
-func (b *boundaryObservations) priceOf(_ context.Context, symbol string) (money.Price, string, error) {
-	obs, ok := b.prices[symbol]
+func (b *boundaryObservations) priceOf(_ context.Context, instrumentID, symbol string) (money.Price, string, error) {
+	obs, ok := b.prices[observationKey(instrumentID, symbol)]
 	if !ok {
 		return money.Price{}, "", errObservationNotCaptured
 	}
@@ -135,8 +144,8 @@ func (b *boundaryObservations) toBase(_ context.Context, value money.Amount, cur
 // entrySymbolsAndPairs collects the distinct symbols and "FROM->TO" currency
 // pairs a batch of entries needs priced, restricted to scoring-included
 // components (mirrors baselineEntry/valueCompetitionEntry's own filter).
-func entrySymbolsAndPairs(entries []CompetitionEntry) (map[string]struct{}, map[string]struct{}) {
-	symbols := map[string]struct{}{}
+func entrySymbolsAndPairs(entries []CompetitionEntry) (map[string]PriceObservation, map[string]struct{}) {
+	symbols := map[string]PriceObservation{}
 	pairs := map[string]struct{}{}
 	addPair := func(currency string) {
 		if currency != fx.BaseCurrency {
@@ -148,7 +157,7 @@ func entrySymbolsAndPairs(entries []CompetitionEntry) (map[string]struct{}, map[
 			if !snap.IncludedInScore {
 				continue
 			}
-			symbols[snap.Symbol] = struct{}{}
+			symbols[observationKey(snap.InstrumentID, snap.Symbol)] = PriceObservation{InstrumentID: snap.InstrumentID, VenueMIC: snap.VenueMIC, Symbol: snap.Symbol}
 			// The position's priced currency is only known once it's been
 			// captured, so both the position currency and the cash currency
 			// are captured directly below via the cash snapshots; equity/ETF
@@ -184,19 +193,19 @@ func (s *Service) captureObservations(ctx context.Context, repo ObservationRepos
 	symbols, pairs := entrySymbolsAndPairs(entries)
 
 	var newPrices []PriceObservation
-	for symbol := range symbols {
-		if _, ok := existingPrices[symbol]; ok {
+	for key, ref := range symbols {
+		if _, ok := existingPrices[key]; ok {
 			continue
 		}
-		quote, err := s.prices.GetLatestPrice(ctx, symbol)
+		quote, err := s.prices.GetLatestPrice(ctx, ref.Symbol)
 		if err != nil {
 			continue // left uncaptured; retried on the next pass within the operational window
 		}
 		obs := PriceObservation{
-			Symbol: symbol, Price: money.PriceFromFloat64(quote.Price),
+			InstrumentID: ref.InstrumentID, VenueMIC: ref.VenueMIC, Symbol: ref.Symbol, Price: money.PriceFromFloat64(quote.Price),
 			Currency: quote.Currency, ObservedAt: now,
 		}
-		existingPrices[symbol] = obs
+		existingPrices[key] = obs
 		newPrices = append(newPrices, obs)
 		if quote.Currency != fx.BaseCurrency {
 			pairs[fxPairKey(quote.Currency, fx.BaseCurrency)] = struct{}{}
@@ -222,8 +231,8 @@ func (s *Service) captureObservations(ctx context.Context, repo ObservationRepos
 	}
 
 	allCaptured := true
-	for symbol := range symbols {
-		if _, ok := existingPrices[symbol]; !ok {
+	for key := range symbols {
+		if _, ok := existingPrices[key]; !ok {
 			allCaptured = false
 			break
 		}
@@ -309,8 +318,9 @@ func (r *InMemoryCompetitionRepository) RecordObservations(_ context.Context, se
 		return ErrCompetitionNotFound
 	}
 	for _, p := range newPrices {
-		if _, exists := entry.prices[p.Symbol]; !exists {
-			entry.prices[p.Symbol] = p
+		key := observationKey(p.InstrumentID, p.Symbol)
+		if _, exists := entry.prices[key]; !exists {
+			entry.prices[key] = p
 		}
 	}
 	for _, f := range newFX {

@@ -76,12 +76,13 @@ type ExploreProjectionRefresher interface {
 // Worker periodically runs all maintenance jobs. Each job is independent: one
 // failing job never prevents the others from running.
 type Worker struct {
-	global    GlobalLeaderboardRefresher
-	sprints   SprintMaintainer
-	snapshots PortfolioSnapshotter       // optional
-	explore   ExploreProjectionRefresher // optional
-	interval  time.Duration
-	leader    Leader // optional; nil means "always leader"
+	global                 GlobalLeaderboardRefresher
+	sprints                SprintMaintainer
+	snapshots              PortfolioSnapshotter       // optional
+	explore                ExploreProjectionRefresher // optional
+	interval               time.Duration
+	leader                 Leader // optional; nil means "always leader"
+	competitionJobsEnabled bool
 
 	// explorePending and exploreRanOnce gate the Explore rebuild when the
 	// global refresher reports generation promotions (see
@@ -97,8 +98,13 @@ type Worker struct {
 
 // NewWorker wires a Worker that runs every interval.
 func NewWorker(global GlobalLeaderboardRefresher, sprints SprintMaintainer, interval time.Duration) *Worker {
-	return &Worker{global: global, sprints: sprints, interval: interval}
+	return &Worker{global: global, sprints: sprints, interval: interval, competitionJobsEnabled: true}
 }
+
+// SetCompetitionJobsEnabled confines competition lifecycle, baseline, ranking,
+// finalization, and legacy sprint maintenance to explicitly designated worker
+// instances. Other background jobs continue to run on this Worker.
+func (w *Worker) SetCompetitionJobsEnabled(enabled bool) { w.competitionJobsEnabled = enabled }
 
 // SetPortfolioSnapshotter attaches an optional daily-snapshot job. When set, the
 // worker records daily portfolio snapshots on every pass (idempotent per day).
@@ -161,11 +167,15 @@ func (w *Worker) runIfLeader(ctx context.Context) {
 // RunOnce executes every job a single time. Exported so startup and tests can
 // trigger a full pass synchronously.
 func (w *Worker) RunOnce(ctx context.Context) {
-	w.ensureSprint(ctx)
-	w.maintainCompetitionEngine(ctx)
+	if w.competitionJobsEnabled {
+		w.ensureSprint(ctx)
+		w.maintainCompetitionEngine(ctx)
+	}
 	w.refreshGlobal(ctx)
 	w.refreshExplore(ctx)
-	w.refreshSprints(ctx)
+	if w.competitionJobsEnabled {
+		w.refreshSprints(ctx)
+	}
 	w.recordSnapshots(ctx)
 }
 

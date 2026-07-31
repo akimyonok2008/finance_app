@@ -2,7 +2,6 @@ package competitions
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -17,7 +16,7 @@ const competitionOutboxMaxAttempts = 10
 
 type CompetitionOutboxEvent struct {
 	ID, EventType, CompetitionID string
-	ParticipantIDs               []string
+	ParticipantID                string
 	AttemptCount                 int
 }
 
@@ -32,7 +31,7 @@ func (s *CompetitionOutboxStore) Claim(ctx context.Context, limit int) ([]Compet
 		WHERE id IN (SELECT id FROM competition_outbox WHERE processed_at IS NULL AND dead_lettered_at IS NULL
 		AND (next_attempt_at IS NULL OR next_attempt_at<=now()) AND (claimed_at IS NULL OR claimed_at<now()-interval '5 minutes')
 		ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1)
-		RETURNING id::text,event_type,competition_id,participant_ids,attempt_count`, limit)
+		RETURNING id::text,event_type,competition_id,participant_id::text,attempt_count`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +39,7 @@ func (s *CompetitionOutboxStore) Claim(ctx context.Context, limit int) ([]Compet
 	var out []CompetitionOutboxEvent
 	for rows.Next() {
 		var e CompetitionOutboxEvent
-		var raw []byte
-		if err := rows.Scan(&e.ID, &e.EventType, &e.CompetitionID, &raw, &e.AttemptCount); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(raw, &e.ParticipantIDs); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventType, &e.CompetitionID, &e.ParticipantID, &e.AttemptCount); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -137,10 +132,8 @@ func (p *CompetitionAchievementProjector) project(ctx context.Context, e Competi
 	if e.EventType != CompetitionFinalizedEvent {
 		return nil
 	}
-	for _, userID := range e.ParticipantIDs {
-		if err := p.achievements.EvaluateCompetitionFinalizationAchievements(ctx, userID, e.CompetitionID); err != nil {
-			return fmt.Errorf("participant %s: %w", userID, err)
-		}
+	if err := p.achievements.EvaluateCompetitionFinalizationAchievements(ctx, e.ParticipantID, e.CompetitionID); err != nil {
+		return fmt.Errorf("participant %s: %w", e.ParticipantID, err)
 	}
 	return nil
 }

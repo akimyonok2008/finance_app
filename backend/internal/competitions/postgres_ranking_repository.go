@@ -187,10 +187,10 @@ func (r *PostgresCompetitionRepository) FailGeneration(ctx context.Context, comp
 	return tx.Commit(ctx)
 }
 
-// PromoteGeneration materializes sequential ranks (return% desc, display name
-// asc, user_id asc — a strict total order since user_id is unique, so ranks
-// are always sequential and never shared, see the package's tie-break policy
-// doc), then atomically: marks the generation active, marks the previously
+// PromoteGeneration materializes sequential ranks (return% desc, entry_id
+// asc — a strict total order since entry_id is unique, so ranks are always
+// sequential and never shared, see the package's tie-break policy doc), then
+// atomically: marks the generation active, marks the previously
 // active generation superseded and deletes its rows, and commits — all inside
 // one transaction, so a leaderboard read never observes a partially-ranked
 // generation or a gap between the old and new active generation.
@@ -224,7 +224,7 @@ func (r *PostgresCompetitionRepository) PromoteGeneration(ctx context.Context, c
 		FROM (
 			SELECT cr2.entry_id,
 			       ROW_NUMBER() OVER (
-			           ORDER BY cr2.return_percentage DESC, u.display_name ASC, cr2.user_id ASC
+			           ORDER BY cr2.return_percentage DESC, cr2.entry_id ASC
 			       ) AS rnk
 			FROM competition_rankings cr2
 			JOIN users u ON u.id = cr2.user_id AND u.deleted_at IS NULL

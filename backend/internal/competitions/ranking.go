@@ -83,9 +83,9 @@ type RankingRepository interface {
 	// untouched; EnsureBuildingGeneration creates a fresh retry on the next
 	// worker pass.
 	FailGeneration(ctx context.Context, competitionID string, generation int64, reason string, now time.Time) error
-	// PromoteGeneration materializes sequential ranks (return% desc, display
-	// name asc, user_id asc — see the package doc comment on tie-breaking),
-	// atomically promotes the generation to active, marks the previously
+	// PromoteGeneration materializes sequential ranks (return% desc, entry_id
+	// asc — see the package doc comment on tie-breaking), atomically promotes
+	// the generation to active, marks the previously
 	// active generation superseded and prunes its rows, and creates the next
 	// building generation. Guarded: fails with ErrGenerationConflict if the
 	// generation is not still building (e.g. a write failure was recorded
@@ -302,7 +302,7 @@ func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEn
 		if !snap.IncludedInScore {
 			continue
 		}
-		price, currency, err := memo.priceOf(ctx, snap.Symbol)
+		price, currency, err := memo.priceOf(ctx, snap.InstrumentID, snap.Symbol)
 		if err != nil {
 			return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("price %s: %w", snap.Symbol, err)
 		}
@@ -346,7 +346,9 @@ func (s *Service) valueCompetitionEntry(ctx context.Context, entry CompetitionEn
 		return money.ZeroIndexValue(), money.ZeroRatio(), fmt.Errorf("index factor: %w", err)
 	}
 	idx := money.QuantizeIndex(money.MustIndexValue("100").MulRatio(factor))
-	retPct := money.QuantizeRatio(factor.Sub(money.MustRatio("1")).Mul(money.MustRatio("100")), 2)
+	// ReturnPct is authoritative ranking data. Preserve the precise fixed-point
+	// result; presentation code alone rounds it to two decimal places.
+	retPct := factor.Sub(money.MustRatio("1")).Mul(money.MustRatio("100"))
 	return idx, retPct, nil
 }
 
@@ -579,28 +581,19 @@ func (r *InMemoryCompetitionRepository) PromoteGeneration(_ context.Context, com
 		return ErrGenerationConflict
 	}
 
-	// Materialize sequential ranks: return% desc, display name asc, user_id
-	// asc. This chain is a strict total order (user_id is unique), so ranks
-	// are always sequential — no ties ever share a rank. See the doc on
+	// Materialize sequential ranks: return% desc, entry_id asc. This chain is
+	// a strict total order (entry_id is unique), so ranks are always
+	// sequential — no ties ever share a rank. See the doc on
 	// RankingRepository.PromoteGeneration.
 	rows := make([]CompetitionRankingRow, 0, len(st.rows[generation]))
 	for _, row := range st.rows[generation] {
 		rows = append(rows, row)
 	}
-	names := make(map[string]string, len(rows))
-	for _, row := range rows {
-		if u, err := r.userDisplayName(row.UserID); err == nil {
-			names[row.UserID] = u
-		}
-	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if c := rows[i].ReturnPct.Cmp(rows[j].ReturnPct); c != 0 {
 			return c > 0
 		}
-		if names[rows[i].UserID] != names[rows[j].UserID] {
-			return names[rows[i].UserID] < names[rows[j].UserID]
-		}
-		return rows[i].UserID < rows[j].UserID
+		return rows[i].EntryID < rows[j].EntryID
 	})
 	for i := range rows {
 		rows[i].Rank = i + 1

@@ -175,3 +175,8 @@ func TestValidateRejectsInvalidTrustedProxyCIDR(t *testing.T) {
 	err := cfg.Validate()
 	require.ErrorContains(t, err, "TRUSTED_PROXY_CIDRS")
 }
+
+func TestValidateCompetitionWorkerRequiresBackgroundWorkers(t *testing.T) {
+	cfg := Config{EnableCompetitionWorker: true}
+	require.ErrorContains(t, cfg.Validate(), "ENABLE_BACKGROUND_WORKERS")
+}
