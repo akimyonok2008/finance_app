@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/prices"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -45,7 +46,7 @@ func (r *PostgresCompetitionRepository) EnsureObservationSet(ctx context.Context
 func (r *PostgresCompetitionRepository) LoadObservations(ctx context.Context, setID string) (map[string]PriceObservation, map[string]FxObservation, error) {
 	prices := map[string]PriceObservation{}
 	priceRows, err := r.pool.Query(ctx, `
-		SELECT symbol, price, currency, provider_observed_at
+		SELECT instrument_id, venue_mic, symbol, price, currency, provider_observed_at, price_methodology, trading_session_date
 		FROM competition_price_observations WHERE observation_set_id = $1
 	`, setID)
 	if err != nil {
@@ -53,11 +54,22 @@ func (r *PostgresCompetitionRepository) LoadObservations(ctx context.Context, se
 	}
 	for priceRows.Next() {
 		var p PriceObservation
-		if err := priceRows.Scan(&p.Symbol, &p.Price, &p.Currency, &p.ObservedAt); err != nil {
+		var instrumentID, venueMIC *string
+		var tradingSessionDate *time.Time
+		if err := priceRows.Scan(&instrumentID, &venueMIC, &p.Symbol, &p.Price, &p.Currency, &p.ProviderTimestamp, &p.Methodology, &tradingSessionDate); err != nil {
 			priceRows.Close()
 			return nil, nil, fmt.Errorf("competition repository: scan price observation: %w", err)
 		}
-		prices[p.Symbol] = p
+		if instrumentID != nil {
+			p.InstrumentID = *instrumentID
+		}
+		if venueMIC != nil {
+			p.VenueMIC = *venueMIC
+		}
+		if tradingSessionDate != nil {
+			p.TradingSessionDate = tradingSessionDate.Format("2006-01-02")
+		}
+		prices[observationKey(p.InstrumentID, p.Symbol)] = p
 	}
 	if err := priceRows.Err(); err != nil {
 		priceRows.Close()
@@ -84,24 +96,67 @@ func (r *PostgresCompetitionRepository) LoadObservations(ctx context.Context, se
 	return prices, fxRates, fxRows.Err()
 }
 
-// RecordObservations writes newly captured rows and, when allCaptured, marks
-// the set completed — all in one transaction. ON CONFLICT DO NOTHING makes
+// RecordObservations writes newly captured rows and, when sealed, marks the
+// set sealed — all in one transaction. ON CONFLICT DO NOTHING makes
 // concurrent workers capturing the same symbol/pair a harmless race: whichever
 // commits first wins, and the loser's LoadObservations on its next pass sees
-// the winner's stored value instead of overwriting it.
-func (r *PostgresCompetitionRepository) RecordObservations(ctx context.Context, setID string, newPrices []PriceObservation, newFX []FxObservation, allCaptured bool, now time.Time) error {
+// the winner's stored value instead of overwriting it. A set already sealed
+// is left untouched entirely: sealing is terminal, and captureObservations
+// (observations.go) never asks to write against a sealed set anyway — this
+// is a defensive backstop, not the primary guard.
+func (r *PostgresCompetitionRepository) RecordObservations(ctx context.Context, setID string, newPrices []PriceObservation, newFX []FxObservation, sealed bool, now time.Time) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("competition repository: begin record observations tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var currentStatus string
+	if err := tx.QueryRow(ctx, `SELECT observation_status FROM competition_observation_sets WHERE id = $1`, setID).Scan(&currentStatus); err != nil {
+		return fmt.Errorf("competition repository: load observation set status: %w", err)
+	}
+	if currentStatus == ObservationSealed {
+		return nil
+	}
+
 	for _, p := range newPrices {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO competition_price_observations (id, observation_set_id, symbol, price, currency, provider_observed_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (observation_set_id, symbol) DO NOTHING
-		`, uuid.NewString(), setID, p.Symbol, p.Price, p.Currency, p.ObservedAt.UTC()); err != nil {
+		var instrumentID, venueMIC *string
+		if p.InstrumentID != "" {
+			instrumentID = &p.InstrumentID
+		}
+		if p.VenueMIC != "" {
+			venueMIC = &p.VenueMIC
+		}
+		var tradingSessionDate *time.Time
+		if p.TradingSessionDate != "" {
+			if d, parseErr := time.Parse("2006-01-02", p.TradingSessionDate); parseErr == nil {
+				tradingSessionDate = &d
+			}
+		}
+		methodology := p.Methodology
+		if methodology == "" {
+			methodology = prices.MethodologyFallbackLatest
+		}
+		// ON CONFLICT targets the partial unique indexes from migration 0058:
+		// instrument_id when present (authoritative identity), symbol as the
+		// legacy/unresolved fallback. Postgres requires the inference
+		// predicate to match the index's WHERE clause exactly, so the two
+		// cases need separate statements.
+		var err error
+		if instrumentID != nil {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO competition_price_observations (id, observation_set_id, instrument_id, venue_mic, symbol, price, currency, provider_observed_at, price_methodology, trading_session_date)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				ON CONFLICT (observation_set_id, instrument_id) WHERE instrument_id IS NOT NULL DO NOTHING
+			`, uuid.NewString(), setID, instrumentID, venueMIC, p.Symbol, p.Price, p.Currency, p.ProviderTimestamp.UTC(), methodology, tradingSessionDate)
+		} else {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO competition_price_observations (id, observation_set_id, instrument_id, venue_mic, symbol, price, currency, provider_observed_at, price_methodology, trading_session_date)
+				VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9)
+				ON CONFLICT (observation_set_id, symbol) WHERE instrument_id IS NULL DO NOTHING
+			`, uuid.NewString(), setID, venueMIC, p.Symbol, p.Price, p.Currency, p.ProviderTimestamp.UTC(), methodology, tradingSessionDate)
+		}
+		if err != nil {
 			return fmt.Errorf("competition repository: insert price observation: %w", err)
 		}
 	}
@@ -114,13 +169,13 @@ func (r *PostgresCompetitionRepository) RecordObservations(ctx context.Context, 
 			return fmt.Errorf("competition repository: insert fx observation: %w", err)
 		}
 	}
-	if allCaptured {
+	if sealed {
 		if _, err := tx.Exec(ctx, `
 			UPDATE competition_observation_sets
 			SET observation_status = $1, completed_at = $2
 			WHERE id = $3 AND observation_status <> $1
-		`, ObservationCompleted, now.UTC(), setID); err != nil {
-			return fmt.Errorf("competition repository: complete observation set: %w", err)
+		`, ObservationSealed, now.UTC(), setID); err != nil {
+			return fmt.Errorf("competition repository: seal observation set: %w", err)
 		}
 	}
 	return tx.Commit(ctx)

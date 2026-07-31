@@ -52,6 +52,7 @@ type AdminOperationalStatus struct {
 
 type AdminProjectionFailure struct {
 	EventID        string    `json:"event_id"`
+	ParticipantID  string    `json:"participant_id"`
 	AttemptCount   int       `json:"attempt_count"`
 	LastError      string    `json:"last_error"`
 	DeadLetteredAt time.Time `json:"dead_lettered_at"`

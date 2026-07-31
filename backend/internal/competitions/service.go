@@ -132,7 +132,7 @@ func (s *Service) RefreshCache(ctx context.Context, competitionID string) (int, 
 			skipped++
 			continue
 		}
-		score := money.QuantizeRatio(factor.Mul(money.MustRatio("100")), 2)
+		score := factor.Mul(money.MustRatio("100"))
 		if err := s.cache.UpsertCompetitionScore(ctx, competitionID, e.UserID, score); err != nil {
 			return skipped, err
 		}
@@ -391,7 +391,7 @@ func (s *Service) rankedEntries(ctx context.Context, competitionID string) ([]ra
 		if err != nil {
 			continue
 		}
-		returnPct := money.QuantizeRatio(factor.Sub(money.MustRatio("1")).Mul(money.MustRatio("100")), 2)
+		returnPct := factor.Sub(money.MustRatio("1")).Mul(money.MustRatio("100"))
 		index := money.QuantizeIndex(money.MustIndexValue("100").MulRatio(factor))
 		rows = append(rows, rankedRow{
 			userID:      e.UserID,

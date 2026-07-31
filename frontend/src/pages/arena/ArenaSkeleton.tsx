@@ -19,25 +19,6 @@ function CardGridSkeleton({ count }: { count: number }) {
 
 export function ArenaSkeleton() {
   return (
-    <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
-      <section className="space-y-8 lg:col-span-2">
-        <div>
-          <Skeleton className="mb-4 h-5 w-32" />
-          <CardGridSkeleton count={2} />
-        </div>
-        <div>
-          <Skeleton className="mb-4 h-5 w-32" />
-          <CardGridSkeleton count={3} />
-        </div>
-      </section>
-      <aside className={card}>
-        <Skeleton className="h-10 w-40" />
-        <div className="mt-5 space-y-4">
-          {[0, 1, 2, 3].map((item) => (
-            <Skeleton key={item} className="h-36 rounded-2xl" />
-          ))}
-        </div>
-      </aside>
-    </div>
+    <CardGridSkeleton count={3} />
   );
 }

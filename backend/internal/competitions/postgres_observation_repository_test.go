@@ -9,13 +9,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ardakimyonok/finance_app/internal/money"
+	"github.com/ardakimyonok/finance_app/internal/prices"
 )
 
 // TestPostgresObservationRepository_EnsureIsIdempotentAndCapturesIncrementally
 // exercises migration 0050 directly: EnsureObservationSet must return the
 // same row (same effective_at/provider) across calls for the same
 // competition+boundary, RecordObservations must be idempotent per
-// symbol/pair, and the set must flip to completed only once allCaptured is
+// symbol/pair, and the set must flip to sealed only once sealed is
 // signalled true.
 func TestPostgresObservationRepository_EnsureIsIdempotentAndCapturesIncrementally(t *testing.T) {
 	pool := testPool(t)
@@ -41,30 +42,32 @@ func TestPostgresObservationRepository_EnsureIsIdempotentAndCapturesIncrementall
 		"effective_at must not be overwritten by a later pass")
 
 	now := time.Now().UTC()
+	key := observationKey("", "BTC-ID")
 	err = repo.RecordObservations(ctx, first.ID, []PriceObservation{
-		{Symbol: "BTC-ID", Price: money.PriceFromFloat64(50), Currency: "USD", ObservedAt: now},
+		{Symbol: "BTC-ID", Price: money.PriceFromFloat64(50), Currency: "USD", ObservedAt: now, ProviderTimestamp: now, Methodology: prices.MethodologyFallbackLatest},
 	}, nil, false, now)
 	require.NoError(t, err)
 
-	prices, fxRates, err := repo.LoadObservations(ctx, first.ID)
+	observed, fxRates, err := repo.LoadObservations(ctx, first.ID)
 	require.NoError(t, err)
-	require.Contains(t, prices, "BTC-ID")
-	assert.Equal(t, 0, prices["BTC-ID"].Price.Cmp(money.MustPrice("50")))
+	require.Contains(t, observed, key)
+	assert.Equal(t, 0, observed[key].Price.Cmp(money.MustPrice("50")))
+	assert.Equal(t, prices.MethodologyFallbackLatest, observed[key].Methodology)
 	assert.Empty(t, fxRates)
 
 	// Recording the same symbol again must never overwrite the frozen value —
 	// this is the property the whole fix depends on.
 	err = repo.RecordObservations(ctx, first.ID, []PriceObservation{
-		{Symbol: "BTC-ID", Price: money.PriceFromFloat64(999), Currency: "USD", ObservedAt: now},
+		{Symbol: "BTC-ID", Price: money.PriceFromFloat64(999), Currency: "USD", ObservedAt: now, ProviderTimestamp: now, Methodology: prices.MethodologyFallbackLatest},
 	}, nil, true, now)
 	require.NoError(t, err)
-	prices, _, err = repo.LoadObservations(ctx, first.ID)
+	observed, _, err = repo.LoadObservations(ctx, first.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 0, prices["BTC-ID"].Price.Cmp(money.MustPrice("50")),
+	assert.Equal(t, 0, observed[key].Price.Cmp(money.MustPrice("50")),
 		"an already-captured observation must never be overwritten by a later pass")
 
 	completed, err := repo.EnsureObservationSet(ctx, edition.ID, BoundaryStart, effectiveAt, "live_quote")
 	require.NoError(t, err)
-	assert.Equal(t, ObservationCompleted, completed.Status)
+	assert.Equal(t, ObservationSealed, completed.Status)
 	require.NotNil(t, completed.CompletedAt)
 }

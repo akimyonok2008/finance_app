@@ -107,6 +107,16 @@ func TestValueCompetitionEntry_IncludeFXFalseMeasuresLocalPriceOnly(t *testing.T
 	assert.Equal(t, 0, ret.Cmp(money.MustRatio("10")))
 }
 
+func TestValueCompetitionEntry_PreservesAuthoritativeReturnPrecision(t *testing.T) {
+	h := newHarness(nil, nil)
+	entry := activeEntry("e1", "c1", "u1", "PRECISE", "100")
+	h.mp.Set("PRECISE", 107.214873, "USD")
+
+	_, ret, err := h.svc.valueCompetitionEntry(context.Background(), entry, newObservationMemo(h.svc), rules.Scoring{})
+	require.NoError(t, err)
+	assert.Equal(t, "7.214873", ret.String(), "valuation must not quantize authoritative return to display precision")
+}
+
 func TestEditionLeaderboard_CursorPagination(t *testing.T) {
 	h := newHarness(nil, nil)
 	ctx := context.Background()
@@ -271,6 +281,28 @@ func TestPromoteGeneration_WithheldOnWriteFailure(t *testing.T) {
 	_, _, found, err := repo.ActiveGeneration(ctx, competitionID)
 	require.NoError(t, err)
 	assert.False(t, found, "nothing was ever promoted")
+}
+
+func TestPromoteGeneration_RanksByAuthoritativeReturnBeforeDisplayRounding(t *testing.T) {
+	repo := NewInMemoryCompetitionRepository()
+	repo.SetDisplayNames(map[string]string{"higher": "Zulu", "lower": "Alpha"})
+	ctx := context.Background()
+	gen, err := repo.EnsureBuildingGeneration(ctx, "precise")
+	require.NoError(t, err)
+	rows := []CompetitionRankingRow{
+		{EntryID: "higher-entry", UserID: "higher", Index: money.MustIndexValue("107.2149"), ReturnPct: money.MustRatio("7.2149"), ValuedAt: fixedTime},
+		{EntryID: "lower-entry", UserID: "lower", Index: money.MustIndexValue("107.2051"), ReturnPct: money.MustRatio("7.2051"), ValuedAt: fixedTime},
+	}
+	for _, row := range rows {
+		require.NoError(t, repo.UpsertRanking(ctx, "precise", gen.Generation, row))
+	}
+	require.NoError(t, repo.AdvanceGeneration(ctx, "precise", gen.Generation, "lower-entry", 2, 2, 0, false))
+	require.NoError(t, repo.PromoteGeneration(ctx, "precise", gen.Generation, fixedTime))
+	ranked, err := repo.LeaderboardPage(ctx, "precise", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, ranked, 2)
+	assert.Equal(t, "Zulu", ranked[0].DisplayName, "display-name tie-break must not replace the more precise financial result")
+	assert.Equal(t, "7.2149", ranked[0].ReturnPercentage.String())
 }
 
 func finalizingEdition(t *testing.T, h *harness, id string, endsAt time.Time) Competition {

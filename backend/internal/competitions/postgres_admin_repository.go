@@ -267,14 +267,14 @@ func (r *PostgresCompetitionAdminRepository) OperationalStatus(ctx context.Conte
 		FROM competition_outbox WHERE competition_id=$1 AND processed_at IS NULL`, competitionID).Scan(&status.AchievementProjectionPending, &status.AchievementProjectionDeadLetters); err != nil {
 		return nil, err
 	}
-	rows, err = r.pool.Query(ctx, `SELECT id::text,attempt_count,COALESCE(last_error,''),dead_lettered_at
+	rows, err = r.pool.Query(ctx, `SELECT id::text,participant_id::text,attempt_count,COALESCE(last_error,''),dead_lettered_at
 		FROM competition_outbox WHERE competition_id=$1 AND dead_lettered_at IS NOT NULL ORDER BY dead_lettered_at DESC`, competitionID)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var failure AdminProjectionFailure
-		if err := rows.Scan(&failure.EventID, &failure.AttemptCount, &failure.LastError, &failure.DeadLetteredAt); err != nil {
+		if err := rows.Scan(&failure.EventID, &failure.ParticipantID, &failure.AttemptCount, &failure.LastError, &failure.DeadLetteredAt); err != nil {
 			rows.Close()
 			return nil, err
 		}

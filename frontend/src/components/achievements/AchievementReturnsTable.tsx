@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { useState } from "react";
 
 import { getAchievementReturns } from "@/api/achievements";
 import { TimeframeTabs } from "@/pages/leaderboard/TimeframeTabs";
@@ -13,11 +15,14 @@ export function AchievementReturnsTable({
   timeframe: LeaderboardTimeframe;
   onTimeframeChange: (value: LeaderboardTimeframe) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const query = useQuery({
     queryKey: queryKeys.achievementReturns(timeframe),
     queryFn: ({ signal }) => getAchievementReturns(timeframe, signal),
     retry: 1,
   });
+  const rows = query.data?.rows ?? [];
+  const visibleRows = expanded ? rows : rows.slice(0, 5);
 
   return (
     <section
@@ -65,7 +70,7 @@ export function AchievementReturnsTable({
               </tr>
             </thead>
             <tbody>
-              {(query.data?.rows ?? []).map((row) => (
+              {visibleRows.map((row) => (
                 <tr key={row.key} className="border-b border-zinc-800/70 last:border-0">
                   <td className="px-5 py-3">
                     <p className="text-sm font-semibold text-zinc-200">{row.name}</p>
@@ -87,6 +92,18 @@ export function AchievementReturnsTable({
               ))}
             </tbody>
           </table>
+          {rows.length > 5 && (
+            <div className="border-t border-zinc-800/80 px-4 py-3 text-center">
+              <button
+                type="button"
+                aria-expanded={expanded}
+                onClick={() => setExpanded((value) => !value)}
+                className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold text-zinc-400 transition hover:bg-white/[0.04] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/40"
+              >
+                {expanded ? <>Show fewer achievements <ChevronUp className="h-4 w-4" /></> : <>Show all {rows.length} achievements <ChevronDown className="h-4 w-4" /></>}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </section>

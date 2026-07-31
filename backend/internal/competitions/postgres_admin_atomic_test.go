@@ -32,15 +32,13 @@ func TestPostgresFinalizeCommitsOutboxWithResults(t *testing.T) {
 	edition := pgEngineEdition(t, repo, defs)
 	require.NoError(t, repo.TransitionLifecycle(ctx, edition.ID, LifecycleRegistrationClosed, LifecycleActive, time.Now()))
 	require.NoError(t, repo.TransitionLifecycle(ctx, edition.ID, LifecycleActive, LifecycleFinalizing, time.Now()))
-	// Zero results still proves the durable event exists even when a
-	// competition has no qualifying participants.
+	// With participant-granular projection, zero results correctly enqueue no
+	// achievement work.
 	gen, err := repo.EnsureBuildingFinalizationGeneration(ctx, edition.ID)
 	require.NoError(t, err)
 	require.NoError(t, repo.AdvanceFinalizationGeneration(ctx, edition.ID, gen.Generation, "", 0, 0, 0, false))
 	require.NoError(t, repo.PromoteFinalizationGeneration(ctx, edition.ID, gen.Generation, time.Now()))
-	var eventType string
-	var participants []byte
-	require.NoError(t, pool.QueryRow(ctx, `SELECT event_type,participant_ids FROM competition_outbox WHERE competition_id=$1`, edition.ID).Scan(&eventType, &participants))
-	require.Equal(t, CompetitionFinalizedEvent, eventType)
-	require.JSONEq(t, `[]`, string(participants))
+	var outboxCount int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM competition_outbox WHERE competition_id=$1`, edition.ID).Scan(&outboxCount))
+	require.Zero(t, outboxCount)
 }

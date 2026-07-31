@@ -275,6 +275,10 @@ func (s *Service) finalizeEdition(ctx context.Context, repo FinalizationReposito
 	if err != nil {
 		return false, fmt.Errorf("claim entries for finalization: %w", err)
 	}
+	// Computed before adjustment since adjustedEntryBasket never changes the
+	// entry count — reused below both to gate observation sealing and (as
+	// before) to decide whether this batch closes the finalization lap.
+	lapComplete := len(entries) < batchSize
 	adjustedEntries := make([]CompetitionEntry, 0, len(entries))
 	for _, entry := range entries {
 		adjusted, adjustErr := s.adjustedEntryBasket(ctx, comp, entry, comp.EndsAt)
@@ -288,8 +292,11 @@ func (s *Service) finalizeEdition(ctx context.Context, repo FinalizationReposito
 	// One shared, persisted end-time observation set — captured incrementally
 	// across every batch and every retry, so a slow or delayed finalizer
 	// never reprices participants against a later market moment than the
-	// pass that valued everyone else (see observations.go).
-	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryEnd, comp.EndsAt, entries, now)
+	// pass that valued everyone else (see observations.go). Sealed only once
+	// lapComplete, so a competition spanning more than one finalization batch
+	// is never marked sealed off the first batch while a later batch still
+	// holds symbols/pairs no earlier batch had reason to request.
+	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryEnd, comp.EndsAt, entries, lapComplete, now)
 	if err != nil {
 		return false, fmt.Errorf("capture end observations: %w", err)
 	}
@@ -328,7 +335,6 @@ func (s *Service) finalizeEdition(ctx context.Context, repo FinalizationReposito
 		successful++
 	}
 
-	lapComplete := len(entries) < batchSize
 	cursor := gen.CursorEntryID
 	if lastEntryID != "" {
 		cursor = lastEntryID

@@ -96,6 +96,19 @@ func TestWorker_RunOnceSurvivesJobErrors(t *testing.T) {
 	assert.Equal(t, 1, sprints.refreshs["weekly_2026_24"])
 }
 
+func TestWorker_RunOnceSkipsCompetitionJobsOnNonDesignatedInstance(t *testing.T) {
+	global := &fakeGlobal{}
+	sprints := &fakeSprints{active: []string{"weekly_2026_24"}}
+	w := NewWorker(global, sprints, time.Minute)
+	w.SetCompetitionJobsEnabled(false)
+
+	w.RunOnce(context.Background())
+
+	assert.Equal(t, 1, global.count(), "non-competition jobs must continue")
+	assert.Zero(t, sprints.ensured)
+	assert.Empty(t, sprints.refreshs)
+}
+
 func TestWorker_StartTicksAndStops(t *testing.T) {
 	global := &fakeGlobal{}
 	sprints := &fakeSprints{}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -293,11 +292,11 @@ func (r *PostgresCompetitionRepository) PromoteFinalizationGeneration(ctx contex
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO competition_outbox (id, event_type, competition_id, participant_ids, created_at)
-		SELECT $1, $2, $3, COALESCE(jsonb_agg(user_id), '[]'::jsonb), $4
-		FROM competition_results WHERE competition_id = $3
-		ON CONFLICT (event_type, competition_id) DO NOTHING
-	`, uuid.NewString(), CompetitionFinalizedEvent, competitionID, now.UTC()); err != nil {
+		INSERT INTO competition_outbox (id, event_type, competition_id, participant_id, created_at)
+		SELECT gen_random_uuid(), $1, $2, user_id, $3
+		FROM competition_results WHERE competition_id = $2
+		ON CONFLICT (event_type, competition_id, participant_id) DO NOTHING
+	`, CompetitionFinalizedEvent, competitionID, now.UTC()); err != nil {
 		return fmt.Errorf("competition repository: enqueue finalization: %w", err)
 	}
 

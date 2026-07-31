@@ -1,93 +1,137 @@
 import { motion } from "framer-motion";
-import { ArrowRight, CheckCircle2, Clock, Users, Zap } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Check, Clock3, ShieldCheck, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { categoryLabel, statusLabel } from "@/pages/arena/arenaUtils";
 import type { ArenaCompetitionCard as ArenaCompetitionCardType } from "@/types/arena";
 import { cn } from "@/utils/cn";
 
-const STATUS_STYLE: Record<string, { icon: typeof Zap; className: string }> = {
-  active: { icon: Zap, className: "border-violet-500/20 bg-violet-500/10 text-violet-300" },
-  registration_open: { icon: Clock, className: "border-sky-500/20 bg-sky-500/10 text-sky-300" },
-  registration_closed: { icon: Clock, className: "border-sky-500/20 bg-sky-500/10 text-sky-300" },
-  upcoming: { icon: Clock, className: "border-sky-500/20 bg-sky-500/10 text-sky-300" },
+const STATUS_STYLE: Record<string, { badge: string; accent: string; glow: string }> = {
+  active: {
+    badge: "border-emerald-300/20 bg-emerald-400/[0.09] text-emerald-200",
+    accent: "from-emerald-300 via-teal-400 to-transparent",
+    glow: "bg-emerald-400/10",
+  },
+  registration_open: {
+    badge: "border-violet-300/20 bg-violet-400/[0.10] text-violet-200",
+    accent: "from-violet-300 via-fuchsia-400 to-transparent",
+    glow: "bg-violet-400/10",
+  },
+  registration_closed: {
+    badge: "border-sky-300/20 bg-sky-400/[0.09] text-sky-200",
+    accent: "from-sky-300 via-indigo-400 to-transparent",
+    glow: "bg-sky-400/10",
+  },
+  upcoming: {
+    badge: "border-sky-300/20 bg-sky-400/[0.09] text-sky-200",
+    accent: "from-sky-300 via-indigo-400 to-transparent",
+    glow: "bg-sky-400/10",
+  },
+  published: {
+    badge: "border-sky-300/20 bg-sky-400/[0.09] text-sky-200",
+    accent: "from-sky-300 via-indigo-400 to-transparent",
+    glow: "bg-sky-400/10",
+  },
   completed: {
-    icon: CheckCircle2,
-    className: "border-emerald-500/20 bg-emerald-500/10 text-emerald-300",
+    badge: "border-amber-200/20 bg-amber-300/[0.08] text-amber-100",
+    accent: "from-amber-200 via-orange-300 to-transparent",
+    glow: "bg-amber-300/10",
   },
 };
 
-export function CompetitionCard({
-  competition,
-  index = 0,
-}: {
-  competition: ArenaCompetitionCardType;
-  index?: number;
-}) {
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+}
+
+function actionLabel(competition: ArenaCompetitionCardType): string {
+  if (competition.status === "completed") return "See results";
+  if (competition.joined) return "View standing";
+  if (competition.status === "registration_open") return "Join competition";
+  return "View competition";
+}
+
+function eligibilityLabel(competition: ArenaCompetitionCardType): string {
+  if (competition.joined) return competition.entryStatus ? competition.entryStatus.replaceAll("_", " ") : "Entry confirmed";
+  if (competition.status === "registration_open") return "Eligibility checked on entry";
+  return "Rules available in details";
+}
+
+export function CompetitionCard({ competition, index = 0 }: { competition: ArenaCompetitionCardType; index?: number }) {
   const style = STATUS_STYLE[competition.status] ?? {
-    icon: Clock,
-    className: "border-zinc-700 bg-zinc-900 text-zinc-400",
+    badge: "border-zinc-600/50 bg-zinc-700/20 text-zinc-300",
+    accent: "from-zinc-400 via-zinc-600 to-transparent",
+    glow: "bg-zinc-500/10",
   };
-  const StatusIcon = style.icon;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
+    <motion.article
+      initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18, delay: Math.min(index * 0.03, 0.24) }}
+      transition={{ duration: 0.28, delay: Math.min(index * 0.045, 0.24) }}
+      className="h-full"
     >
       <Link
         to={`/arena/competitions/${competition.id}`}
-        className="group block rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5 shadow-sm shadow-black/20 transition hover:border-zinc-700 hover:bg-zinc-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/40"
+        aria-label={`${actionLabel(competition)}: ${competition.name}`}
+        className="group relative flex h-full min-h-[360px] flex-col overflow-hidden rounded-[1.4rem] border border-white/[0.09] bg-[linear-gradient(145deg,rgba(39,39,42,0.74),rgba(9,9,11,0.9))] p-5 shadow-[0_18px_55px_-30px_rgba(0,0,0,0.9)] backdrop-blur-sm transition duration-300 hover:-translate-y-1 hover:border-white/[0.17] hover:shadow-[0_28px_65px_-32px_rgba(0,0,0,0.95)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 sm:p-6"
       >
-        <div className="flex items-start justify-between gap-3">
+        <div className={cn("pointer-events-none absolute -right-16 -top-20 h-44 w-44 rounded-full blur-3xl transition duration-500 group-hover:scale-125", style.glow)} />
+        <div className={cn("absolute inset-x-0 top-0 h-px bg-gradient-to-r", style.accent)} />
+
+        <div className="relative flex items-start justify-between gap-3">
           <div className="min-w-0">
-            {competition.isLegacy && (
-              <div className="mb-2 inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] text-amber-300">
-                Legacy sprint
-              </div>
-            )}
-            {competition.category && (
-              <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                {categoryLabel(competition.category)}
-              </div>
-            )}
-            <h3 className="truncate text-base font-medium text-zinc-100">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[10px] font-medium uppercase tracking-[0.2em] text-violet-300/90">
+                {categoryLabel(competition.category) || "Open field"}
+              </span>
+              {competition.isLegacy && <span className="text-[10px] uppercase tracking-wider text-amber-200/70">Legacy sprint</span>}
+            </div>
+            <h3 className="arena-display mt-3 line-clamp-2 text-[1.35rem] font-semibold leading-tight tracking-[-0.02em] text-zinc-50 transition group-hover:text-white">
               {competition.name}
             </h3>
           </div>
-          <span
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium",
-              style.className,
-            )}
-          >
-            <StatusIcon className="h-3 w-3" />
+          <span className={cn("inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.1em]", style.badge)}>
             {statusLabel(competition.status)}
           </span>
         </div>
 
-        {competition.description && (
-          <p className="mt-3 line-clamp-2 text-sm text-zinc-400">{competition.description}</p>
-        )}
+        <p className="relative mt-4 line-clamp-3 min-h-[3.75rem] text-sm leading-5 text-zinc-400">
+          {competition.description || "A focused portfolio competition scored under a published, immutable ruleset."}
+        </p>
 
-        <div className="mt-5 flex items-center justify-between text-xs text-zinc-500">
-          <span className="inline-flex items-center gap-1.5">
-            <Users className="h-3.5 w-3.5" />
-            {competition.participantCount} joined
-          </span>
-          <span className="inline-flex items-center gap-1 font-medium text-zinc-400 transition group-hover:text-zinc-200">
-            {competition.joined ? "View standing" : "View details"}
-            <ArrowRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
-          </span>
+        <div className="relative mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-white/[0.07] py-4 text-xs">
+          <div>
+            <span className="flex items-center gap-1.5 text-zinc-600"><CalendarDays className="h-3.5 w-3.5" /> Starts</span>
+            <span className="mt-1 block font-mono text-[11px] text-zinc-300">{formatDate(competition.startsAt)}</span>
+          </div>
+          <div>
+            <span className="flex items-center gap-1.5 text-zinc-600"><Clock3 className="h-3.5 w-3.5" /> Ends</span>
+            <span className="mt-1 block font-mono text-[11px] text-zinc-300">{formatDate(competition.endsAt)}</span>
+          </div>
+          <div>
+            <span className="flex items-center gap-1.5 text-zinc-600"><Users className="h-3.5 w-3.5" /> Participants</span>
+            <span className="mt-1 block font-mono text-[11px] text-zinc-300">{competition.participantCount.toLocaleString()} joined</span>
+          </div>
+          <div>
+            <span className="flex items-center gap-1.5 text-zinc-600"><ShieldCheck className="h-3.5 w-3.5" /> Eligibility</span>
+            <span className="mt-1 block truncate text-[11px] capitalize text-zinc-300">{eligibilityLabel(competition)}</span>
+          </div>
         </div>
 
-        {competition.joined && (
-          <div className="mt-3 inline-flex rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-300">
-            Joined
-          </div>
-        )}
+        <div className="relative mt-auto flex items-center justify-between gap-3 pt-5">
+          {competition.joined ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-300"><Check className="h-3.5 w-3.5" /> Joined</span>
+          ) : (
+            <span className="text-xs text-zinc-600">{competition.scoringScope?.replaceAll("_", " ") || "Published rules"}</span>
+          )}
+          <span className="inline-flex items-center gap-2 rounded-full bg-zinc-50 px-4 py-2 text-xs font-bold text-zinc-950 shadow-[0_8px_22px_-10px_rgba(255,255,255,0.45)] transition group-hover:bg-white group-hover:pr-3.5">
+            {actionLabel(competition)}
+            <ArrowUpRight className="h-3.5 w-3.5 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+          </span>
+        </div>
       </Link>
-    </motion.div>
+    </motion.article>
   );
 }

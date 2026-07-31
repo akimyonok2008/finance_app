@@ -127,7 +127,15 @@ func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 		// never re-queried for a symbol already captured. This is what makes
 		// every entry's start-time price/FX identical regardless of which
 		// 200-entry batch or which pass baselines it (see observations.go).
-		memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
+		//
+		// lastBatch mirrors finalize's own lapComplete: registration is
+		// already closed by the time baseline runs (ListBaselineDueEditions
+		// only returns registration_closed/active editions), so the admitted
+		// population is fixed and fewer entries than the batch limit means
+		// there is no further batch left that could still introduce a new
+		// symbol or currency pair — only then is it safe to seal the set.
+		lastBatch := len(entries) < defaultBaselineBatch
+		memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, lastBatch, now)
 		if err != nil {
 			slog.Error("competition_baseline_observation_capture_failed", "competition_id", comp.ID, "error", err)
 			continue
@@ -191,7 +199,8 @@ func (s *Service) retryCompetitionBaseline(ctx context.Context, comp Competition
 	if err != nil {
 		return err
 	}
-	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
+	lastBatch := len(entries) < defaultBaselineBatch
+	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, lastBatch, now)
 	if err != nil {
 		return err
 	}
@@ -229,8 +238,9 @@ func newObservationMemo(s *Service) *observationMemo {
 	}
 }
 
-func (m *observationMemo) priceOf(ctx context.Context, symbol string) (money.Price, string, error) {
-	if hit, ok := m.prices[symbol]; ok {
+func (m *observationMemo) priceOf(ctx context.Context, instrumentID, symbol string) (money.Price, string, error) {
+	key := observationKey(instrumentID, symbol)
+	if hit, ok := m.prices[key]; ok {
 		return hit.price, hit.currency, nil
 	}
 	quote, err := m.svc.prices.GetLatestPrice(ctx, symbol)
@@ -238,7 +248,7 @@ func (m *observationMemo) priceOf(ctx context.Context, symbol string) (money.Pri
 		return money.Price{}, "", err
 	}
 	exact := money.PriceFromFloat64(quote.Price)
-	m.prices[symbol] = struct {
+	m.prices[key] = struct {
 		price    money.Price
 		currency string
 	}{exact, quote.Currency}
@@ -282,7 +292,7 @@ func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository,
 		if !snap.IncludedInScore {
 			continue
 		}
-		price, currency, err := memo.priceOf(ctx, snap.Symbol)
+		price, currency, err := memo.priceOf(ctx, snap.InstrumentID, snap.Symbol)
 		if err != nil {
 			return fmt.Errorf("price %s: %w", snap.Symbol, err)
 		}

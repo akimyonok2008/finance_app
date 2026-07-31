@@ -79,6 +79,7 @@ type Config struct {
 	TrustedProxyCIDRs []string
 
 	EnableBackgroundWorkers    bool
+	EnableCompetitionWorker    bool
 	OutboxReadinessMaxPending  int
 	OutboxReadinessMaxAge      time.Duration
 	LeaderboardRefreshInterval time.Duration
@@ -224,6 +225,7 @@ func Load() Config {
 		DemoModeEnabled:    getEnvBool("DEMO_MODE_ENABLED", false),
 
 		EnableBackgroundWorkers:        getEnvBool("ENABLE_BACKGROUND_WORKERS", defaultEnableBackground),
+		EnableCompetitionWorker:        getEnvBool("ENABLE_COMPETITION_WORKER", false),
 		OutboxReadinessMaxPending:      getEnvInt("OUTBOX_READINESS_MAX_PENDING", 1000),
 		OutboxReadinessMaxAge:          getEnvDuration("OUTBOX_READINESS_MAX_AGE", 15*time.Minute),
 		LeaderboardRefreshInterval:     time.Duration(getEnvInt("LEADERBOARD_REFRESH_INTERVAL_SECONDS", defaultLeaderboardSecs)) * time.Second,
@@ -337,6 +339,9 @@ func (c Config) UsingDefaultSecret() bool {
 }
 
 func (c Config) Validate() error {
+	if c.EnableCompetitionWorker && !c.EnableBackgroundWorkers {
+		return fmt.Errorf("ENABLE_COMPETITION_WORKER=true requires ENABLE_BACKGROUND_WORKERS=true")
+	}
 	for _, cidr := range c.TrustedProxyCIDRs {
 		if _, err := netip.ParsePrefix(strings.TrimSpace(cidr)); err != nil {
 			return fmt.Errorf("TRUSTED_PROXY_CIDRS contains invalid CIDR %q", cidr)

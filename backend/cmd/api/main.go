@@ -742,7 +742,8 @@ func main() {
 
 	// --- market-data provider (+ conservative quote cache service) ---
 	var marketProvider marketdata.Provider
-	var twelveData *marketdata.TwelveDataProvider // set when the real feed is active
+	var twelveData *marketdata.TwelveDataProvider               // set when the real feed is active
+	var twelveDataHistory *marketdata.TwelveDataHistoryProvider // set when twelveData is
 	priceProviderName := cfg.PriceProvider
 	switch cfg.PriceProvider {
 	case "mock", "":
@@ -765,6 +766,7 @@ func main() {
 		}
 		marketProvider = p
 		twelveData = p
+		twelveDataHistory = marketdata.NewTwelveDataHistoryProvider(p, cfg.PriceCacheTTL)
 	case "yahoo":
 		slog.Warn("the Yahoo (finance-go) provider is PROTOTYPE ONLY; use PRICE_PROVIDER=twelvedata for Prototype 3A real data")
 		baseProvider, err := prices.NewProvider(cfg.PriceProvider)
@@ -786,6 +788,9 @@ func main() {
 		SearchLimit:           10,
 		MaxQuoteBatchSize:     25,
 	})
+	if twelveDataHistory != nil {
+		marketDataSvc.SetHistoryProvider(twelveDataHistory)
+	}
 	var priceProvider prices.PriceProvider = marketDataSvc
 	// A short in-process cache absorbs bursts of mutations against the same
 	// held symbols in quick succession: every mutation re-prices EVERY
@@ -934,10 +939,8 @@ func main() {
 	// deterministic offline provider supports previews in local development but
 	// is not eligible to create permanent awards.
 	var benchmarkHistory benchmark.HistoricalPriceProvider
-	if twelveData != nil {
-		benchmarkHistory = benchmarkHistoryAdapter{
-			marketdata.NewTwelveDataHistoryProvider(twelveData, cfg.PriceCacheTTL),
-		}
+	if twelveDataHistory != nil {
+		benchmarkHistory = benchmarkHistoryAdapter{twelveDataHistory}
 		slog.Info("benchmark evaluation using real Twelve Data historical prices")
 	} else {
 		benchmarkHistory = benchmark.NewMockHistoricalPriceProvider(benchmark.DefaultMockReturns())
@@ -1125,9 +1128,9 @@ func main() {
 		}
 	}
 	// Competition results and this event are committed by one transaction.
-	// This projector is mandatory in Postgres mode and independently retries
-	// idempotent achievement evaluation until success or dead-lettering.
-	if repos.pgPool != nil {
+	// On the designated competition instance this independently retries each
+	// participant's idempotent evaluation until success or dead-lettering.
+	if repos.pgPool != nil && cfg.EnableCompetitionWorker {
 		competitionOutbox := competitions.NewCompetitionOutboxStore(repos.pgPool)
 		competitionProjector := competitions.NewCompetitionAchievementProjector(
 			competitionOutbox, competitionAchievementAdapter{achievements: achievementsSvc}, cfg.LeaderboardRefreshInterval,
@@ -1143,6 +1146,8 @@ func main() {
 				return err
 			},
 		})
+	} else if repos.pgPool != nil {
+		slog.Info("competition achievement projector disabled on non-designated instance")
 	}
 
 	// --- background workers ---
@@ -1165,6 +1170,7 @@ func main() {
 	if optionalJobs {
 		worker := jobs.NewWorker(leaderboardSvc, competitionsSvc, cfg.LeaderboardRefreshInterval)
 		worker.SetLeaderElector(leader)
+		worker.SetCompetitionJobsEnabled(cfg.EnableCompetitionWorker)
 		worker.SetExploreProjectionRefresher(profileSvc)
 		// Private daily portfolio archives remain available for owner analytics;
 		// ranked achievements use the independent canonical snapshot worker below.
@@ -1173,6 +1179,7 @@ func main() {
 			walker:    &userBatchWalker{users: authSvc, batch: cfg.RefreshBatchSize},
 		})
 		worker.Start(ctx)
+		slog.Info("competition worker designation", "enabled", cfg.EnableCompetitionWorker)
 		rankedWorker := jobs.NewRankedSnapshotWorker(rankedSnapshotJobAdapter{
 			walker:       &userBatchWalker{users: authSvc, batch: cfg.RefreshBatchSize},
 			history:      historySvc,
