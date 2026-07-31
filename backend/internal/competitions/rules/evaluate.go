@@ -24,11 +24,16 @@ type PositionFacts struct {
 }
 
 // PortfolioFacts is the aggregate composition a rule evaluation runs against.
-// TotalValueBase = position values + cash (weights are shares of the WHOLE
-// portfolio including cash, so "30% crypto" means 30% of everything the user
-// holds). UniverseMembership carries the resolved named universes
-// (universe -> instrument ID set), supplied by the caller: resolution is I/O,
-// evaluation is pure.
+// TotalValueBase = position values + cash. Weight metrics that describe
+// portfolio COMPOSITION (portfolio_weight, largest_position_weight) are
+// measured against investedValueBase = TotalValueBase - CashValueBase, i.e.
+// the user's CURRENTLY INVESTED holdings — idle cash sitting in the account
+// never dilutes them, so "30% crypto" means 30% of what's actually invested.
+// cash_weight is the one metric that is, by definition, about cash's own
+// share of the whole account, so it alone still divides by TotalValueBase.
+// UniverseMembership carries the resolved named universes (universe ->
+// instrument ID set), supplied by the caller: resolution is I/O, evaluation
+// is pure.
 type PortfolioFacts struct {
 	Positions          []PositionFacts
 	CashValueBase      money.Amount
@@ -179,7 +184,8 @@ func metricValue(r Rule, facts PortfolioFacts) (actual money.Ratio, displayAsPer
 		}
 		return w, true, ""
 	case MetricLargestPositionWeight:
-		if facts.TotalValueBase.Sign() <= 0 {
+		invested := investedValueBase(facts)
+		if invested.Sign() <= 0 {
 			return money.ZeroRatio(), true, ReasonEmptyPortfolio
 		}
 		largest := money.ZeroAmount()
@@ -188,7 +194,7 @@ func metricValue(r Rule, facts PortfolioFacts) (actual money.Ratio, displayAsPer
 				largest = p.ValueBase
 			}
 		}
-		w, err := largest.DivExact(facts.TotalValueBase, weightDivPlaces)
+		w, err := largest.DivExact(invested, weightDivPlaces)
 		if err != nil {
 			return money.ZeroRatio(), true, ReasonEmptyPortfolio
 		}
@@ -218,7 +224,8 @@ func metricValue(r Rule, facts PortfolioFacts) (actual money.Ratio, displayAsPer
 }
 
 func filteredWeight(f *Filter, facts PortfolioFacts) (money.Ratio, bool, string) {
-	if facts.TotalValueBase.Sign() <= 0 {
+	invested := investedValueBase(facts)
+	if invested.Sign() <= 0 {
 		return money.ZeroRatio(), true, ReasonEmptyPortfolio
 	}
 	if f != nil && f.Universe != "" {
@@ -232,11 +239,18 @@ func filteredWeight(f *Filter, facts PortfolioFacts) (money.Ratio, bool, string)
 			matching = matching.Add(p.ValueBase)
 		}
 	}
-	w, err := matching.DivExact(facts.TotalValueBase, weightDivPlaces)
+	w, err := matching.DivExact(invested, weightDivPlaces)
 	if err != nil {
 		return money.ZeroRatio(), true, ReasonEmptyPortfolio
 	}
 	return w, true, ""
+}
+
+// investedValueBase is the value of what the user actually holds right now
+// (positions only) — the denominator for composition weight metrics, so idle
+// cash sitting in the account never dilutes them.
+func investedValueBase(facts PortfolioFacts) money.Amount {
+	return facts.TotalValueBase.Sub(facts.CashValueBase)
 }
 
 func compare(actual money.Ratio, r Rule) bool {

@@ -188,11 +188,13 @@ func TestEvaluate_CryptoWeightThresholdExactDecimals(t *testing.T) {
 	assert.True(t, res.Eligible)
 	assert.Equal(t, "30.00", res.Rules[0].Actual)
 
-	// Cash dilutes weight: 30 crypto of 100 positions + 20 cash = 25%.
-	diluted := factsWith("20", pos("i1", "crypto", "", "USD", "30"), pos("i2", "stock", "", "USD", "70"))
-	res = Evaluate(elig, diluted, now)
-	assert.False(t, res.Eligible)
-	assert.Equal(t, "25.00", res.Rules[0].Actual)
+	// Idle cash never dilutes weight: 30 crypto of 100 invested (70 stock)
+	// still reads as 30% crypto even with 20 sitting uninvested in cash —
+	// composition weights are measured against what's actually invested.
+	notDiluted := factsWith("20", pos("i1", "crypto", "", "USD", "30"), pos("i2", "stock", "", "USD", "70"))
+	res = Evaluate(elig, notDiluted, now)
+	assert.True(t, res.Eligible)
+	assert.Equal(t, "30.00", res.Rules[0].Actual)
 }
 
 func TestEvaluate_AllAndAnyGroups(t *testing.T) {
@@ -231,7 +233,7 @@ func TestEvaluate_MetricsAndOperators(t *testing.T) {
 		pos("i1", "stock", "XIST", "TRY", "50"),
 		pos("i2", "stock", "XNAS", "USD", "15"),
 		pos("i3", "crypto", "", "USD", "10"),
-	) // total 100: cash 25%, XIST 50%, largest 50%
+	) // total 100: cash 25%, invested 75 (XIST 50, largest 50 -> both 66.67% of invested)
 	facts.PortfolioAgeDays = 45
 
 	cases := []struct {
@@ -242,7 +244,7 @@ func TestEvaluate_MetricsAndOperators(t *testing.T) {
 		{"cash lte", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"cash_weight","operator":"lte","value":"0.25"}]}`, true},
 		{"cash lt fails on boundary", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"cash_weight","operator":"lt","value":"0.25"}]}`, false},
 		{"venue MIC weight (XIST)", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"portfolio_weight","filter":{"venue_mics":["XIST"]},"operator":"gte","value":"0.50"}]}`, true},
-		{"largest position between", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"largest_position_weight","operator":"between","value":"0.40","value_high":"0.60"}]}`, true},
+		{"largest position between", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"largest_position_weight","operator":"between","value":"0.60","value_high":"0.70"}]}`, true},
 		{"asset class count eq", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"asset_class_count","operator":"eq","value":"2"}]}`, true},
 		{"portfolio age", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"portfolio_age_days","operator":"gte","value":"30"}]}`, true},
 		{"filtered position count", `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"position_count","filter":{"currencies":["USD"]},"operator":"eq","value":"2"}]}`, true},
