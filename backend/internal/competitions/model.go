@@ -87,6 +87,13 @@ type CompetitionEntry struct {
 	DisqualificationReason    string
 	WithdrawnAt               *time.Time
 	CashSnapshots             []CompetitionEntrySnapshotCash
+
+	// IdempotencyKey/RequestFingerprint bind the join that created this entry
+	// to the exact Idempotency-Key header and request it was admitted under.
+	// Empty on legacy entries and any engine entry created before this was
+	// tracked. See checkJoinIdempotency in join.go.
+	IdempotencyKey     string
+	RequestFingerprint string
 }
 
 // CompetitionEntrySnapshotCash is a frozen cash balance captured at join time

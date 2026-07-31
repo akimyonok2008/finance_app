@@ -46,6 +46,10 @@ var (
 	// ErrIdempotencyKeyRequired → HTTP 400: engine joins are mutations and
 	// follow the application-wide Idempotency-Key convention.
 	ErrIdempotencyKeyRequired = errors.New("Idempotency-Key header is required")
+	// ErrIdempotencyConflict → HTTP 409: this Idempotency-Key was already
+	// bound to a different join request (different competition or user
+	// state) by this user.
+	ErrIdempotencyConflict = errors.New("Idempotency-Key was already used for a different request")
 	// ErrJoinWindowClosed → HTTP 409: outside [join_opens_at, join_closes_at]
 	// or the edition is not in registration_open. Late joins are structurally
 	// impossible for engine editions — everyone is measured from the same
