@@ -54,6 +54,9 @@ func (r *InMemoryRepository) CreateInstrument(ctx context.Context, in Instrument
 	if in.IdentityQuality == "" {
 		in.IdentityQuality = QualityUnresolved
 	}
+	if in.Sector == "" {
+		in.Sector = SectorUnknown
+	}
 	in.FIGI = normalizeAliasValue(in.FIGI)
 	in.CompositeFIGI = normalizeAliasValue(in.CompositeFIGI)
 	in.ShareClassFIGI = normalizeAliasValue(in.ShareClassFIGI)

@@ -30,7 +30,7 @@ const instrumentColumns = `id, COALESCE(figi,''), COALESCE(composite_figi,''), C
 	COALESCE(isin,''), COALESCE(cusip,''), COALESCE(cik,''), COALESCE(current_symbol,''),
 	COALESCE(name,''), COALESCE(security_type,''), COALESCE(asset_type,''),
 	COALESCE(exchange_code,''), COALESCE(mic,''), COALESCE(venue_id::text,''), COALESCE(issuer_id::text,''),
-	COALESCE(currency,''), COALESCE(country,''),
+	COALESCE(currency,''), COALESCE(country,''), sector,
 	status, listed_at, delisted_at, identity_quality, COALESCE(identity_provider,''),
 	created_at, updated_at`
 
@@ -39,7 +39,7 @@ func scanInstrument(row pgx.Row) (Instrument, error) {
 	err := row.Scan(&in.ID, &in.FIGI, &in.CompositeFIGI, &in.ShareClassFIGI,
 		&in.ISIN, &in.CUSIP, &in.CIK, &in.CurrentSymbol, &in.Name, &in.SecurityType,
 		&in.AssetType, &in.ExchangeCode, &in.MIC, &in.VenueID, &in.IssuerID,
-		&in.Currency, &in.Country,
+		&in.Currency, &in.Country, &in.Sector,
 		&in.Status, &in.ListedAt, &in.DelistedAt, &in.IdentityQuality,
 		&in.IdentityProvider, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
@@ -89,6 +89,9 @@ func (r *PostgresRepository) CreateInstrument(ctx context.Context, in Instrument
 	if in.IdentityQuality == "" {
 		in.IdentityQuality = QualityUnresolved
 	}
+	if in.Sector == "" {
+		in.Sector = SectorUnknown
+	}
 	in.FIGI = normalizeAliasValue(in.FIGI)
 	in.CompositeFIGI = normalizeAliasValue(in.CompositeFIGI)
 	in.ShareClassFIGI = normalizeAliasValue(in.ShareClassFIGI)
@@ -99,16 +102,16 @@ func (r *PostgresRepository) CreateInstrument(ctx context.Context, in Instrument
 			id, figi, composite_figi, share_class_figi, isin, cusip, cik,
 			current_symbol, name, security_type, asset_type, exchange_code, mic,
 			venue_id, issuer_id,
-			currency, country, status, listed_at, delisted_at, identity_quality,
+			currency, country, sector, status, listed_at, delisted_at, identity_quality,
 			identity_provider, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		 RETURNING `+instrumentColumns,
 		in.ID, nullable(in.FIGI), nullable(in.CompositeFIGI), nullable(in.ShareClassFIGI),
 		nullable(in.ISIN), nullable(in.CUSIP), nullable(in.CIK), nullable(in.CurrentSymbol),
 		nullable(in.Name), nullable(in.SecurityType), nullable(in.AssetType),
 		nullable(in.ExchangeCode), nullable(in.MIC), nullableUUID(in.VenueID), nullableUUID(in.IssuerID),
 		nullable(in.Currency),
-		nullable(in.Country), in.Status, in.ListedAt, in.DelistedAt,
+		nullable(in.Country), string(in.Sector), in.Status, in.ListedAt, in.DelistedAt,
 		string(in.IdentityQuality), nullable(in.IdentityProvider), in.CreatedAt, in.UpdatedAt,
 	)
 	out, err := scanInstrument(row)

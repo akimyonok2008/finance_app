@@ -3,6 +3,7 @@ package competitions
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -39,6 +40,7 @@ type Service struct {
 	fx        fx.FXProvider
 	clock     clock.Clock
 	cache     leaderboard.LeaderboardCache // optional sprint ranking cache
+	sectors   SectorProvider               // optional; nil classifies every position as "unknown"
 }
 
 // NewService wires a competitions Service.
@@ -54,6 +56,15 @@ func (s *Service) CurrentCompetitionID(_ context.Context) string {
 // SetCache attaches an optional sprint ranking cache (Redis in production).
 func (s *Service) SetCache(cache leaderboard.LeaderboardCache) {
 	s.cache = cache
+}
+
+// SetSectorProvider attaches the sector lookup used to populate snapshot
+// positions' Sector field at join time, which sector-gated competitions
+// (Competition.EligibilityFilter) evaluate against. Leaving this unset makes
+// every position classify as "unknown", so a sector-gated competition simply
+// stays unjoinable rather than silently admitting everyone.
+func (s *Service) SetSectorProvider(sectors SectorProvider) {
+	s.sectors = sectors
 }
 
 // EnsureCurrentSprint makes sure the sprint for the current ISO week exists.
@@ -202,10 +213,17 @@ func (s *Service) JoinCompetition(ctx context.Context, competitionID, userID str
 			StartingPrice:         exactPrice,
 			StartingPriceCurrency: price.Currency,
 			StartingValueBase:     valueBase,
+			Sector:                sectorForSymbol(ctx, s.sectors, pos.Symbol),
 		})
 	}
 	if startingValueBase.Cmp(money.ZeroAmount()) <= 0 {
 		return nil, ErrEmptyPortfolio
+	}
+
+	if eligible, err := checkEligibility(comp.EligibilityFilter, snapshots, startingValueBase); err != nil {
+		return nil, fmt.Errorf("competitions: evaluate eligibility: %w", err)
+	} else if !eligible {
+		return nil, ErrNotEligible
 	}
 
 	entry := CompetitionEntry{

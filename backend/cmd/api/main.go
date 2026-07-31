@@ -137,6 +137,26 @@ func (c cachingSummaryProvider) GetSummary(ctx context.Context, userID string) (
 	return summary, nil
 }
 
+// sectorProvider adapts instrument.Resolver into competitions.SectorProvider.
+// It checks the local instrument register first (a symbol resolved from an
+// earlier OpenFIGI lookup or backfill carries a real, persisted
+// instrument.Sector); an unresolved ticker falls back to the same curated
+// classifier the register itself uses for newly-created instruments, so a
+// symbol never seen before still gets a real classification instead of
+// "unknown" by default.
+type sectorProvider struct{ resolver *instrument.Resolver }
+
+func (p sectorProvider) SectorForSymbol(ctx context.Context, symbol string) (string, error) {
+	in, quality, err := p.resolver.ResolveTickerAsOf(ctx, symbol, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
+	if quality == instrument.QualityResolved && in != nil && in.Sector != "" {
+		return string(in.Sector), nil
+	}
+	return string(instrument.ClassifySector(symbol)), nil
+}
+
 type positionProvider struct{ s *portfolio.Service }
 
 func (p positionProvider) ListPositions(ctx context.Context, userID string) ([]portfolio.Position, error) {
@@ -878,6 +898,7 @@ func main() {
 		repos.competitions, userProvider{authSvc}, positionProvider{portfolioSvc},
 		priceProvider, fxProvider, clock.RealClock{},
 	)
+	competitionsSvc.SetSectorProvider(sectorProvider{identityResolver})
 	// Benchmark badge engine. The portfolio side uses canonical ranked snapshots;
 	// the benchmark side uses Twelve Data historical closes when enabled. The
 	// deterministic offline provider supports previews in local development but

@@ -2,13 +2,37 @@ package competitions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ardakimyonok/finance_app/internal/competitions/rules"
 )
+
+// scanEligibilityFilter decodes the nullable eligibility_filter JSONB column.
+// NULL (no filter, the weekly sprint's case) decodes to a nil *rules.Filter.
+func scanEligibilityFilter(raw []byte) (*rules.Filter, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var f rules.Filter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, fmt.Errorf("competition repository: decode eligibility filter: %w", err)
+	}
+	return &f, nil
+}
+
+// encodeEligibilityFilter is the inverse of scanEligibilityFilter, for writes.
+func encodeEligibilityFilter(f *rules.Filter) ([]byte, error) {
+	if f == nil {
+		return nil, nil
+	}
+	return json.Marshal(f)
+}
 
 // PostgresCompetitionRepository is the durable implementation of
 // CompetitionRepository. Entries and their snapshot positions are written in a
@@ -24,7 +48,7 @@ func NewPostgresCompetitionRepository(pool *pgxpool.Pool) *PostgresCompetitionRe
 
 func (r *PostgresCompetitionRepository) ListCompetitions(ctx context.Context) ([]Competition, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, name, type, starts_at, ends_at, status, created_at
+		`SELECT id, name, type, starts_at, ends_at, status, eligibility_filter, created_at
 		 FROM competitions ORDER BY starts_at`)
 	if err != nil {
 		return nil, fmt.Errorf("competition repository: list: %w", err)
@@ -34,8 +58,12 @@ func (r *PostgresCompetitionRepository) ListCompetitions(ctx context.Context) ([
 	var out []Competition
 	for rows.Next() {
 		var c Competition
-		if err := rows.Scan(&c.ID, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt, &c.Status, &c.CreatedAt); err != nil {
+		var filterRaw []byte
+		if err := rows.Scan(&c.ID, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt, &c.Status, &filterRaw, &c.CreatedAt); err != nil {
 			return nil, fmt.Errorf("competition repository: scan: %w", err)
+		}
+		if c.EligibilityFilter, err = scanEligibilityFilter(filterRaw); err != nil {
+			return nil, err
 		}
 		out = append(out, c)
 	}
@@ -44,26 +72,34 @@ func (r *PostgresCompetitionRepository) ListCompetitions(ctx context.Context) ([
 
 func (r *PostgresCompetitionRepository) GetCompetition(ctx context.Context, competitionID string) (*Competition, error) {
 	var c Competition
+	var filterRaw []byte
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, name, type, starts_at, ends_at, status, created_at
+		`SELECT id, name, type, starts_at, ends_at, status, eligibility_filter, created_at
 		 FROM competitions WHERE id = $1`, competitionID,
-	).Scan(&c.ID, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt, &c.Status, &c.CreatedAt)
+	).Scan(&c.ID, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt, &c.Status, &filterRaw, &c.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrCompetitionNotFound
 		}
 		return nil, fmt.Errorf("competition repository: get: %w", err)
 	}
+	if c.EligibilityFilter, err = scanEligibilityFilter(filterRaw); err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
 
 func (r *PostgresCompetitionRepository) CreateCompetition(ctx context.Context, competition Competition) error {
-	_, err := r.pool.Exec(ctx,
-		`INSERT INTO competitions (id, name, type, starts_at, ends_at, status, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+	filterRaw, err := encodeEligibilityFilter(competition.EligibilityFilter)
+	if err != nil {
+		return fmt.Errorf("competition repository: encode eligibility filter: %w", err)
+	}
+	_, err = r.pool.Exec(ctx,
+		`INSERT INTO competitions (id, name, type, starts_at, ends_at, status, eligibility_filter, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (id) DO NOTHING`,
 		competition.ID, competition.Name, competition.Type,
-		competition.StartsAt, competition.EndsAt, competition.Status, competition.CreatedAt,
+		competition.StartsAt, competition.EndsAt, competition.Status, filterRaw, competition.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("competition repository: create: %w", err)
@@ -95,13 +131,17 @@ func (r *PostgresCompetitionRepository) CreateEntry(ctx context.Context, entry C
 	}
 
 	for _, s := range entry.Snapshots {
+		sector := s.Sector
+		if sector == "" {
+			sector = unknownSector
+		}
 		_, err = tx.Exec(ctx,
 			`INSERT INTO competition_entry_snapshot_positions
 			 (id, competition_entry_id, symbol, asset_type, quantity, currency,
-			  starting_price, starting_price_currency, starting_value_base)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			  starting_price, starting_price_currency, starting_value_base, sector)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			s.ID, s.CompetitionEntryID, s.Symbol, s.AssetType, s.Quantity, s.Currency,
-			s.StartingPrice, s.StartingPriceCurrency, s.StartingValueBase,
+			s.StartingPrice, s.StartingPriceCurrency, s.StartingValueBase, sector,
 		)
 		if err != nil {
 			return fmt.Errorf("competition repository: create snapshot: %w", err)
@@ -165,7 +205,7 @@ func (r *PostgresCompetitionRepository) ListEntries(ctx context.Context, competi
 func (r *PostgresCompetitionRepository) loadSnapshots(ctx context.Context, entryID string) ([]CompetitionEntrySnapshotPosition, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, competition_entry_id, symbol, asset_type, quantity, currency,
-		        starting_price, starting_price_currency, starting_value_base
+		        starting_price, starting_price_currency, starting_value_base, sector
 		 FROM competition_entry_snapshot_positions
 		 WHERE competition_entry_id = $1 ORDER BY created_at`, entryID)
 	if err != nil {
@@ -177,7 +217,7 @@ func (r *PostgresCompetitionRepository) loadSnapshots(ctx context.Context, entry
 	for rows.Next() {
 		var s CompetitionEntrySnapshotPosition
 		if err := rows.Scan(&s.ID, &s.CompetitionEntryID, &s.Symbol, &s.AssetType, &s.Quantity,
-			&s.Currency, &s.StartingPrice, &s.StartingPriceCurrency, &s.StartingValueBase); err != nil {
+			&s.Currency, &s.StartingPrice, &s.StartingPriceCurrency, &s.StartingValueBase, &s.Sector); err != nil {
 			return nil, fmt.Errorf("competition repository: scan snapshot: %w", err)
 		}
 		out = append(out, s)

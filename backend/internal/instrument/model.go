@@ -82,6 +82,7 @@ type Instrument struct {
 	IssuerID         string
 	Currency         string
 	Country          string
+	Sector           Sector
 	Status           string
 	ListedAt         *time.Time
 	DelistedAt       *time.Time

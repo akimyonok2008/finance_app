@@ -121,7 +121,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrCompetitionNotActive),
 		errors.Is(err, ErrEmptyPortfolio),
-		errors.Is(err, ErrJoinSnapshot):
+		errors.Is(err, ErrJoinSnapshot),
+		errors.Is(err, ErrNotEligible):
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, "internal error")

@@ -14,4 +14,7 @@ var (
 	ErrJoinSnapshot = errors.New("cannot snapshot portfolio: a position is unpriceable or has an unsupported currency")
 	// ErrEntryNotFound is an internal repository signal (user has no entry).
 	ErrEntryNotFound = errors.New("competition entry not found")
+	// ErrNotEligible → HTTP 400 (portfolio snapshot fails the competition's
+	// eligibility filter, e.g. not enough technology-sector exposure).
+	ErrNotEligible = errors.New("portfolio does not meet this competition's eligibility requirements")
 )

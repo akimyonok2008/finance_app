@@ -97,6 +97,7 @@ func TestResolver_MissWithSingleCandidateCreatesInstrumentAndAliases(t *testing.
 	assert.Equal(t, "APPLE INC", got.Name)
 	assert.Equal(t, QualityResolved, got.IdentityQuality)
 	assert.Equal(t, "openfigi", got.IdentityProvider)
+	assert.Equal(t, SectorTechnology, got.Sector, "AAPL is in the curated sector seed list")
 
 	aliases, err := repo.ListAliasesForInstrument(ctx, got.ID)
 	require.NoError(t, err)
@@ -118,6 +119,17 @@ func TestResolver_MissWithSingleCandidateCreatesInstrumentAndAliases(t *testing.
 	require.NotNil(t, again)
 	assert.Equal(t, got.ID, again.ID)
 	assert.Equal(t, 1, spy.calls, "the second call must be a cache hit")
+}
+
+func TestResolver_CreatedInstrumentDefaultsToUnknownSectorWhenUncurated(t *testing.T) {
+	spy := &spyProvider{candidates: []IdentityCandidate{{
+		FIGI: "BBG000ZZZZZZ", Ticker: "ZZZZ", ExchangeCode: "UW", Name: "NOT A REAL COMPANY",
+	}}}
+	r, _ := newResolver(t, spy)
+	got, _, err := r.ResolveOrCreate(context.Background(), IdentityQuery{Ticker: "ZZZZ", ExchangeCode: "UW"})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, SectorUnknown, got.Sector)
 }
 
 func TestResolver_MissWithZeroCandidatesIsUnresolvedAndWritesNothing(t *testing.T) {

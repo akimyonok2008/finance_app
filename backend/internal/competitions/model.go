@@ -4,28 +4,40 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ardakimyonok/finance_app/internal/competitions/rules"
 	"github.com/ardakimyonok/finance_app/internal/money"
 )
 
 // Competition types and statuses.
 const (
-	TypeWeeklySprint = "weekly_sprint"
+	TypeWeeklySprint    = "weekly_sprint"
+	TypeSectorChallenge = "sector_challenge"
 
 	StatusUpcoming  = "upcoming"
 	StatusActive    = "active"
 	StatusCompleted = "completed"
 )
 
-// Competition is a time-bound competition. The prototype runs one active weekly
-// sprint at a time, derived from the current ISO week.
+// TechnologyChallengeID is the id of the seeded technology-sector challenge
+// (migration 0043). Unlike the weekly sprint, sector challenges are not
+// derived from the clock: they are fixed rows with a fixed eligibility rule.
+const TechnologyChallengeID = "technology_challenge"
+
+// Competition is a time-bound competition. Most competitions are the
+// prototype's weekly sprint (derived from the current ISO week); a
+// competition may also carry an EligibilityFilter, evaluated against a
+// user's join-time snapshot before the entry is accepted (see
+// eligibility.go). A nil/zero-value filter admits everyone, matching the
+// weekly sprint's original behavior.
 type Competition struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	StartsAt  time.Time `json:"starts_at"`
-	EndsAt    time.Time `json:"ends_at"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                string        `json:"id"`
+	Name              string        `json:"name"`
+	Type              string        `json:"type"`
+	StartsAt          time.Time     `json:"starts_at"`
+	EndsAt            time.Time     `json:"ends_at"`
+	Status            string        `json:"status"`
+	EligibilityFilter *rules.Filter `json:"-"`
+	CreatedAt         time.Time     `json:"created_at"`
 }
 
 // CompetitionEntry records a user's participation. StartingValue (the private
@@ -54,6 +66,11 @@ type CompetitionEntrySnapshotPosition struct {
 	StartingPrice         money.Price
 	StartingPriceCurrency string
 	StartingValueBase     money.Amount
+	// Sector is captured at join time (see eligibility.go's SectorProvider) so
+	// eligibility can be re-evaluated from the durable snapshot without a
+	// second instrument lookup. Defaults to instrument.SectorUnknown's string
+	// value ("unknown") when no provider is configured or none is found.
+	Sector string
 }
 
 // --- public DTOs (the only shapes ever serialized) ---------------------------

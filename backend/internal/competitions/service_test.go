@@ -14,7 +14,9 @@ import (
 
 	"github.com/ardakimyonok/finance_app/internal/auth"
 	"github.com/ardakimyonok/finance_app/internal/clock"
+	"github.com/ardakimyonok/finance_app/internal/competitions/rules"
 	"github.com/ardakimyonok/finance_app/internal/fx"
+	"github.com/ardakimyonok/finance_app/internal/instrument"
 	"github.com/ardakimyonok/finance_app/internal/leaderboard"
 	"github.com/ardakimyonok/finance_app/internal/money"
 	"github.com/ardakimyonok/finance_app/internal/portfolio"
@@ -300,6 +302,99 @@ func TestLeaderboard_FallsBackToLiveWhenCacheEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, board, 1, "empty cache must fall back to live snapshot calculation")
 	assert.Equal(t, "0", board[0].SprintReturnPercentage.String())
+}
+
+// --- sector eligibility (Technology Challenge) -------------------------------
+
+// classifierSectors adapts instrument.ClassifySector into a SectorProvider,
+// so these tests exercise the same curated classifier production wiring
+// uses, not a hand-rolled test double's idea of what "technology" means.
+type classifierSectors struct{}
+
+func (classifierSectors) SectorForSymbol(_ context.Context, symbol string) (string, error) {
+	return string(instrument.ClassifySector(symbol)), nil
+}
+
+// technologyChallenge mirrors migration 0043's seeded row: >=50% portfolio
+// weight in technology-sector positions, required at join time.
+func technologyChallenge() Competition {
+	filter := rules.Filter{
+		Metric:    rules.MetricPortfolioWeight,
+		Sectors:   []string{"technology"},
+		Operator:  rules.OpGTE,
+		Threshold: 0.5,
+	}
+	return Competition{
+		ID:                "technology_challenge",
+		Name:              "Technology Challenge",
+		Type:              TypeSectorChallenge,
+		StartsAt:          fixedTime.Add(-24 * time.Hour),
+		EndsAt:            fixedTime.Add(24 * time.Hour),
+		Status:            StatusActive,
+		EligibilityFilter: &filter,
+		CreatedAt:         fixedTime,
+	}
+}
+
+func TestJoin_TechnologyChallenge_EligiblePortfolioAdmitted(t *testing.T) {
+	h := newHarness(
+		map[string]*auth.User{"u1": {ID: "u1"}},
+		// AAPL and MSFT both classify as technology: 100% technology exposure.
+		map[string][]portfolio.Position{"u1": {pos("AAPL", 10, 180, "USD"), pos("MSFT", 5, 400, "USD")}},
+	)
+	h.svc.SetSectorProvider(classifierSectors{})
+	require.NoError(t, h.repo.CreateCompetition(context.Background(), technologyChallenge()))
+
+	resp, err := h.svc.JoinCompetition(context.Background(), "technology_challenge", "u1")
+	require.NoError(t, err)
+	assert.True(t, resp.Joined)
+
+	entry, err := h.repo.GetEntry(context.Background(), "technology_challenge", "u1")
+	require.NoError(t, err)
+	for _, snap := range entry.Snapshots {
+		assert.Equal(t, "technology", snap.Sector)
+	}
+}
+
+func TestJoin_TechnologyChallenge_IneligiblePortfolioRejected(t *testing.T) {
+	h := newHarness(
+		map[string]*auth.User{"u1": {ID: "u1"}},
+		// SPY isn't in the curated sector map, so it classifies as "unknown":
+		// 0% technology exposure, well under the 50% threshold.
+		map[string][]portfolio.Position{"u1": {pos("SPY", 10, 500, "USD")}},
+	)
+	h.mp.Set("SPY", 540, "USD")
+	h.svc.SetSectorProvider(classifierSectors{})
+	require.NoError(t, h.repo.CreateCompetition(context.Background(), technologyChallenge()))
+
+	_, err := h.svc.JoinCompetition(context.Background(), "technology_challenge", "u1")
+	assert.ErrorIs(t, err, ErrNotEligible)
+
+	_, err = h.repo.GetEntry(context.Background(), "technology_challenge", "u1")
+	assert.ErrorIs(t, err, ErrEntryNotFound, "a rejected join must not create a partial entry")
+}
+
+func TestJoin_MixedPortfolio_EligibleOnlyAboveThreshold(t *testing.T) {
+	h := newHarness(
+		map[string]*auth.User{
+			"tech_heavy": {ID: "tech_heavy"},
+			"tech_light": {ID: "tech_light"},
+		},
+		map[string][]portfolio.Position{
+			// AAPL (technology) dominates: >50% technology weight.
+			"tech_heavy": {pos("AAPL", 10, 180, "USD"), pos("SPY", 1, 500, "USD")},
+			// SPY (unknown) dominates: <50% technology weight.
+			"tech_light": {pos("AAPL", 1, 180, "USD"), pos("SPY", 10, 500, "USD")},
+		},
+	)
+	h.svc.SetSectorProvider(classifierSectors{})
+	require.NoError(t, h.repo.CreateCompetition(context.Background(), technologyChallenge()))
+
+	_, err := h.svc.JoinCompetition(context.Background(), "technology_challenge", "tech_heavy")
+	require.NoError(t, err, "1950 USD of AAPL vs 540 USD of SPY should clear the 50% technology threshold")
+
+	_, err = h.svc.JoinCompetition(context.Background(), "technology_challenge", "tech_light")
+	assert.ErrorIs(t, err, ErrNotEligible, "195 USD of AAPL vs 5400 USD of SPY should not clear the 50% technology threshold")
 }
 
 // --- privacy (Problem 3) -----------------------------------------------------

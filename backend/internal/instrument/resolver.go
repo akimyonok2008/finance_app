@@ -201,6 +201,7 @@ func (r *Resolver) create(ctx context.Context, query IdentityQuery, c IdentityCa
 		MIC:              mic,
 		VenueID:          venueID,
 		Currency:         c.Currency,
+		Sector:           ClassifySector(ticker),
 		Status:           StatusActive,
 		IdentityQuality:  QualityResolved,
 		IdentityProvider: r.ProviderName,
