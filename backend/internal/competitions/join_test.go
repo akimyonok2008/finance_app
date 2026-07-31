@@ -35,6 +35,18 @@ func engineEdition(t *testing.T, h *harness, id, scoringDoc string) Competition 
 	return edition
 }
 
+// countingSnapshots wraps fakeSnapshots to count capture calls, so tests can
+// assert a same-key retry replays the stored entry instead of recapturing.
+type countingSnapshots struct {
+	snap  portfolio.CompetitionPortfolioSnapshot
+	calls int
+}
+
+func (c *countingSnapshots) CaptureCompetitionSnapshot(ctx context.Context, userID string, req portfolio.CompetitionSnapshotRequest) (portfolio.CompetitionPortfolioSnapshot, error) {
+	c.calls++
+	return fakeSnapshots{snap: c.snap}.CaptureCompetitionSnapshot(ctx, userID, req)
+}
+
 func eligibleSnapshot() portfolio.CompetitionPortfolioSnapshot {
 	return snapshotOf("20",
 		snapPosition("btc-id", "crypto", "", "40"),
@@ -72,6 +84,49 @@ func TestJoin_IdempotentReplayAndConcurrencyBackstop(t *testing.T) {
 	entries, err := h.repo.ListEntries(ctx, edition.ID)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "unique (competition, user) must hold")
+}
+
+func TestJoin_IdempotencyKeyReplaysStoredEntryWithoutRecapture(t *testing.T) {
+	h := newHarness(nil, nil)
+	edition := engineEdition(t, h, "crypto-w1", `{"schema_version":1,"scope":"full_portfolio","include_cash":true}`)
+	captures := &countingSnapshots{snap: eligibleSnapshot()}
+	h.svc.SetSnapshotProvider(captures)
+	ctx := context.Background()
+
+	first, err := h.svc.Join(ctx, edition.ID, "u1", "same-key")
+	require.NoError(t, err)
+	require.Equal(t, 1, captures.calls)
+
+	// Same Idempotency-Key, same request: replay the stored entry's response
+	// instead of recapturing a snapshot or re-evaluating eligibility.
+	replay, err := h.svc.Join(ctx, edition.ID, "u1", "same-key")
+	require.NoError(t, err)
+	assert.Equal(t, first, replay)
+	assert.Equal(t, 1, captures.calls, "a same-key retry must not re-capture a snapshot")
+
+	entries, err := h.repo.ListEntries(ctx, edition.ID)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+}
+
+func TestJoin_IdempotencyKeyReusedAcrossDifferentJoinConflicts(t *testing.T) {
+	h := newHarness(nil, nil)
+	editionA := engineEdition(t, h, "crypto-w1", `{"schema_version":1,"scope":"full_portfolio","include_cash":true}`)
+	editionB := engineEdition(t, h, "crypto-w2", `{"schema_version":1,"scope":"full_portfolio","include_cash":true}`)
+	h.svc.SetSnapshotProvider(fakeSnapshots{snap: eligibleSnapshot()})
+	ctx := context.Background()
+
+	_, err := h.svc.Join(ctx, editionA.ID, "u1", "dup-key")
+	require.NoError(t, err)
+
+	// Same key, same user, DIFFERENT competition: this is key misuse, not a
+	// retry, and must not silently replay editionA's entry for editionB.
+	_, err = h.svc.Join(ctx, editionB.ID, "u1", "dup-key")
+	assert.ErrorIs(t, err, ErrIdempotencyConflict)
+
+	entries, err := h.repo.ListEntries(ctx, editionB.ID)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the conflicting request must not create an entry")
 }
 
 func TestJoin_WindowEnforcement(t *testing.T) {
