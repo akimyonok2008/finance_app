@@ -194,6 +194,7 @@ type EngineLeaderboardRowWire = {
 
 type EngineLeaderboardPageWire = {
   entries: EngineLeaderboardRowWire[];
+  return_model: "fixed_basket_price_return_v1";
   next_cursor?: number;
   valued_at?: string;
   unavailable?: boolean;
@@ -242,6 +243,7 @@ export async function getCompetitionLeaderboard(
     // The backend's "not ready" response omits no field but leaves entries
     // null (Go's encoding/json for a nil slice) — never assume it's an array.
     entries: (raw.entries ?? []).map((row) => toRow(row, options.currentUserDisplayName)),
+    returnModel: raw.return_model,
     nextCursor: raw.next_cursor,
     valuedAt: raw.valued_at,
     unavailable: Boolean(raw.unavailable),

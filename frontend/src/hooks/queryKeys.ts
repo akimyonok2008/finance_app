@@ -103,4 +103,7 @@ export const POSITION_MUTATION_INVALIDATIONS = [
   queryKeys.leaderboardMe,
   queryKeys.achievements,
   queryKeys.myProfile,
+  ["arenaCatalogue"],
+  ["arenaEligibility"],
+  ["arenaMyStatus"],
 ] as const;

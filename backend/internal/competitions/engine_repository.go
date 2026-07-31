@@ -11,6 +11,8 @@ import (
 // snapshot position, written by CompleteBaseline.
 type PositionBaseline struct {
 	SnapshotID    string
+	Symbol        string
+	Quantity      money.Quantity
 	Price         money.Price
 	PriceCurrency string
 	ValueBase     money.Amount
@@ -41,6 +43,15 @@ type EngineEntryRepository interface {
 	// ListPendingBaselineEntries returns up to limit admitted entries still
 	// awaiting their baseline for one competition.
 	ListPendingBaselineEntries(ctx context.Context, competitionID string, limit int) ([]CompetitionEntry, error)
+	// HasPendingBaselineEntries reports whether any admitted entry for this
+	// competition has not yet reached a terminal baseline state (active,
+	// baseline_failed, withdrawn, or disqualified). Baseline runs in bounded
+	// batches (see defaultBaselineBatch), so a competition can have entries
+	// still awaiting their first baseline pass well after ranking refresh
+	// starts running for it — this is the coverage check that keeps a ranking
+	// generation from being promoted off a partial population (see
+	// refreshEditionRanking).
+	HasPendingBaselineEntries(ctx context.Context, competitionID string) (bool, error)
 	// CompleteBaseline atomically writes the official baseline: the entry's
 	// eligible starting value, per-position official prices/values/weights,
 	// baseline completion, and entry activation. Guarded on the entry still
@@ -177,6 +188,17 @@ func (r *InMemoryCompetitionRepository) ListPendingBaselineEntries(_ context.Con
 	return out, nil
 }
 
+func (r *InMemoryCompetitionRepository) HasPendingBaselineEntries(_ context.Context, competitionID string) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, e := range r.entries[competitionID] {
+		if e.EntryStatus == EntryAdmitted {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *InMemoryCompetitionRepository) CompleteBaseline(_ context.Context, entryID string, eligibleStartingValue money.Amount, baselines []PositionBaseline, now time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -200,6 +222,8 @@ func (r *InMemoryCompetitionRepository) CompleteBaseline(_ context.Context, entr
 			e.StartingValue = eligibleStartingValue
 			for i := range e.Snapshots {
 				if b, ok := byID[e.Snapshots[i].ID]; ok {
+					e.Snapshots[i].Symbol = b.Symbol
+					e.Snapshots[i].Quantity = b.Quantity
 					e.Snapshots[i].StartingPrice = b.Price
 					e.Snapshots[i].StartingPriceCurrency = b.PriceCurrency
 					e.Snapshots[i].StartingValueBase = b.ValueBase

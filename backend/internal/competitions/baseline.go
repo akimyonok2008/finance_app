@@ -117,6 +117,11 @@ func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 		if len(entries) == 0 {
 			continue
 		}
+		entries, err = s.normalizeEntriesForBaseline(ctx, comp, entries)
+		if err != nil {
+			slog.Error("competition_baseline_basket_normalization_failed", "competition_id", comp.ID, "error", err)
+			continue
+		}
 		// One shared, persisted observation set per competition — captured
 		// incrementally as new symbols/pairs are first seen across passes,
 		// never re-queried for a symbol already captured. This is what makes
@@ -148,6 +153,24 @@ func (s *Service) RunCompetitionBaselines(ctx context.Context) (int, error) {
 	return completed, nil
 }
 
+func (s *Service) normalizeEntriesForBaseline(ctx context.Context, comp Competition, entries []CompetitionEntry) ([]CompetitionEntry, error) {
+	out := make([]CompetitionEntry, 0, len(entries))
+	for _, entry := range entries {
+		from := entry.JoinedAt
+		if entry.SnapshotCapturedAt != nil {
+			from = *entry.SnapshotCapturedAt
+		}
+		baselineComp := comp
+		baselineComp.StartsAt = from
+		adjusted, err := s.adjustedEntryBasket(ctx, baselineComp, entry, comp.StartsAt)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, adjusted)
+	}
+	return out, nil
+}
+
 // retryCompetitionBaseline runs the same bounded, persisted-observation
 // baseline path as the scheduler, but for one explicitly selected edition.
 func (s *Service) retryCompetitionBaseline(ctx context.Context, comp Competition) error {
@@ -162,6 +185,10 @@ func (s *Service) retryCompetitionBaseline(ctx context.Context, comp Competition
 	now := s.clock.Now().UTC()
 	entries, err := repo.ListPendingBaselineEntries(ctx, comp.ID, defaultBaselineBatch)
 	if err != nil || len(entries) == 0 {
+		return err
+	}
+	entries, err = s.normalizeEntriesForBaseline(ctx, comp, entries)
+	if err != nil {
 		return err
 	}
 	memo, err := s.captureObservations(ctx, obsRepo, comp.ID, BoundaryStart, comp.StartsAt, entries, now)
@@ -242,6 +269,8 @@ func (m *observationMemo) toBase(ctx context.Context, value money.Amount, curren
 func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository, entry CompetitionEntry, memo priceSource, now time.Time) error {
 	type valued struct {
 		snapshotID string
+		symbol     string
+		quantity   money.Quantity
 		price      money.Price
 		currency   string
 		valueBase  money.Amount
@@ -262,7 +291,7 @@ func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository,
 		if err != nil {
 			return fmt.Errorf("fx %s: %w", currency, err)
 		}
-		included = append(included, valued{snapshotID: snap.ID, price: price, currency: currency, valueBase: base})
+		included = append(included, valued{snapshotID: snap.ID, symbol: snap.Symbol, quantity: snap.Quantity, price: price, currency: currency, valueBase: base})
 		total = total.Add(base)
 	}
 	for _, cash := range entry.CashSnapshots {
@@ -286,7 +315,7 @@ func (s *Service) baselineEntry(ctx context.Context, repo EngineEntryRepository,
 			return fmt.Errorf("weight: %w", err)
 		}
 		baselines = append(baselines, PositionBaseline{
-			SnapshotID: v.snapshotID, Price: v.price, PriceCurrency: v.currency,
+			SnapshotID: v.snapshotID, Symbol: v.symbol, Quantity: v.quantity, Price: v.price, PriceCurrency: v.currency,
 			ValueBase: v.valueBase, Weight: weight, ObservedAt: now,
 		})
 	}

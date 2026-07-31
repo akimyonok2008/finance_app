@@ -125,6 +125,9 @@ type CompetitionEntrySnapshotPosition struct {
 	StartingWeight             money.Ratio
 	BaselinePriceObservedAt    *time.Time
 	BaselineFXObservedAt       *time.Time
+	// OriginalQuantity is transient valuation state populated before corporate
+	// action normalization. It is never persisted or serialized.
+	OriginalQuantity money.Quantity
 }
 
 // --- public DTOs (the only shapes ever serialized) ---------------------------
@@ -177,10 +180,13 @@ type CompetitionLeaderboardEntry struct {
 // see Service.EditionLeaderboard).
 type CompetitionLeaderboardPage struct {
 	Entries     []CompetitionLeaderboardEntry `json:"entries"`
+	ReturnModel string                        `json:"return_model"`
 	NextCursor  *int                          `json:"next_cursor,omitempty"`
 	ValuedAt    *time.Time                    `json:"valued_at,omitempty"`
 	Unavailable bool                          `json:"unavailable,omitempty"`
 }
+
+const ReturnModelFixedBasketPriceV1 = "fixed_basket_price_return_v1"
 
 // CompetitionResultEntry is one immutable final-result row: privacy-safe,
 // identical shape to a leaderboard row, but sourced only from

@@ -70,6 +70,9 @@ type InMemoryCompetitionRepository struct {
 	rankingStates map[string]*memoryRankingState
 	displayNames  map[string]string
 	resultStore   *memoryResults
+	// finalizationStates backs the FinalizationRepository implementation
+	// (see finalize.go), keyed by competitionID.
+	finalizationStates map[string]*memoryFinalizationState
 	// observations backs ObservationRepository (see observations.go), keyed
 	// by "competitionID|boundary".
 	observations map[string]*memoryObservationSet

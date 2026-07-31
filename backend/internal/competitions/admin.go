@@ -19,6 +19,7 @@ const (
 	AdminJobBaseline     = "baseline"
 	AdminJobRanking      = "ranking"
 	AdminJobFinalization = "finalization"
+	AdminJobAchievements = "achievement_projection"
 )
 
 type AdminAuditRecord struct {
@@ -37,13 +38,23 @@ type AdminAuditRecord struct {
 }
 
 type AdminOperationalStatus struct {
-	Competition       Competition              `json:"competition"`
-	EntryStatusCounts map[string]int           `json:"entry_status_counts"`
-	BaselineCounts    map[string]int           `json:"baseline_status_counts"`
-	Disqualifications []AdminFailureDetail     `json:"disqualifications"`
-	RankingFailures   []RankingGeneration      `json:"ranking_generations"`
-	ObservationSets   []AdminObservationStatus `json:"observation_sets"`
-	ResultCount       int                      `json:"result_count"`
+	Competition                      Competition              `json:"competition"`
+	EntryStatusCounts                map[string]int           `json:"entry_status_counts"`
+	BaselineCounts                   map[string]int           `json:"baseline_status_counts"`
+	Disqualifications                []AdminFailureDetail     `json:"disqualifications"`
+	RankingFailures                  []RankingGeneration      `json:"ranking_generations"`
+	ObservationSets                  []AdminObservationStatus `json:"observation_sets"`
+	ResultCount                      int                      `json:"result_count"`
+	AchievementProjectionPending     int                      `json:"achievement_projection_pending"`
+	AchievementProjectionDeadLetters int                      `json:"achievement_projection_dead_letters"`
+	AchievementProjectionFailures    []AdminProjectionFailure `json:"achievement_projection_failures"`
+}
+
+type AdminProjectionFailure struct {
+	EventID        string    `json:"event_id"`
+	AttemptCount   int       `json:"attempt_count"`
+	LastError      string    `json:"last_error"`
+	DeadLetteredAt time.Time `json:"dead_lettered_at"`
 }
 
 type AdminFailureDetail struct {
@@ -67,6 +78,16 @@ type CompetitionAdminRepository interface {
 	ListAdminAudit(context.Context, string, int) ([]AdminAuditRecord, error)
 }
 
+// AtomicCompetitionAdminRepository is the production mutation boundary. Each
+// method commits the state change and its successful audit row together.
+type AtomicCompetitionAdminRepository interface {
+	CreateDefinitionWithAudit(context.Context, Definition, AdminAuditRecord) error
+	CreateVersionWithAudit(context.Context, DefinitionVersion, AdminAuditRecord) error
+	CreateEditionWithAudit(context.Context, Competition, AdminAuditRecord) error
+	TransitionEditionWithAudit(context.Context, string, string, string, time.Time, AdminAuditRecord) error
+	RequeueAchievementProjectionWithAudit(context.Context, string, AdminAuditRecord) error
+}
+
 type AdminService struct {
 	engine      *Service
 	definitions DefinitionRepository
@@ -80,7 +101,28 @@ func NewAdminService(engine *Service, definitions DefinitionRepository, editions
 }
 
 func (s *AdminService) ValidateRules(eligibility, scoring json.RawMessage) (rules.Eligibility, rules.Scoring, error) {
-	return rules.ValidateDefinitionVersionPayloads(eligibility, scoring)
+	e, sc, err := rules.ValidateDefinitionVersionPayloads(eligibility, scoring)
+	if err != nil {
+		return rules.Eligibility{}, rules.Scoring{}, err
+	}
+	if err := rules.ValidateCapabilities(e, sc, s.capabilities()); err != nil {
+		return rules.Eligibility{}, rules.Scoring{}, err
+	}
+	return e, sc, nil
+}
+
+// capabilities reports which rule filter dimensions this deployment can
+// actually evaluate right now. Sector and issuer-country filters are
+// schema-valid but have no backing classification data yet (see
+// portfolio.enrichSnapshotClassification), so they are rejected at admission
+// time rather than silently accepted and never matched. Update these once
+// real enrichment for a dimension lands.
+func (s *AdminService) capabilities() rules.Capabilities {
+	return rules.Capabilities{
+		SectorSupported:        false,
+		IssuerCountrySupported: false,
+		UniverseResolverWired:  s.engine.HasUniverseResolver(),
+	}
 }
 
 func (s *AdminService) ListDefinitions(ctx context.Context) ([]Definition, error) {
@@ -97,13 +139,14 @@ func (s *AdminService) CreateDefinition(ctx context.Context, actor, requestID st
 	if len(def.PresentationConfigJSON) == 0 {
 		def.PresentationConfigJSON = json.RawMessage(`{}`)
 	}
-	err := s.definitions.CreateDefinition(ctx, def)
-	auditErr := s.audit(ctx, actor, requestID, "definition.create", "definition", def.ID, "", "", def, err)
+	audit := s.auditRecord(actor, requestID, "definition.create", "definition", def.ID, "", "", def)
+	atomic, ok := s.operations.(AtomicCompetitionAdminRepository)
+	if !ok {
+		return nil, fmt.Errorf("atomic competition admin repository is unavailable")
+	}
+	err := atomic.CreateDefinitionWithAudit(ctx, def, audit)
 	if err != nil {
 		return nil, err
-	}
-	if auditErr != nil {
-		return nil, auditErr
 	}
 	return s.definitions.GetDefinition(ctx, def.ID)
 }
@@ -123,13 +166,14 @@ func (s *AdminService) CreateVersion(ctx context.Context, actor, requestID, defi
 	if len(v.DisplayRulesJSON) == 0 {
 		v.DisplayRulesJSON = json.RawMessage(`{}`)
 	}
-	err = s.definitions.CreateDefinitionVersion(ctx, v)
-	auditErr := s.audit(ctx, actor, requestID, "definition_version.create", "definition_version", fmt.Sprintf("%s:%d", definitionID, v.Version), "", "", map[string]any{"definition_id": definitionID, "version": v.Version}, err)
+	audit := s.auditRecord(actor, requestID, "definition_version.create", "definition_version", fmt.Sprintf("%s:%d", definitionID, v.Version), "", "", map[string]any{"definition_id": definitionID, "version": v.Version})
+	atomic, ok := s.operations.(AtomicCompetitionAdminRepository)
+	if !ok {
+		return nil, fmt.Errorf("atomic competition admin repository is unavailable")
+	}
+	err = atomic.CreateVersionWithAudit(ctx, v, audit)
 	if err != nil {
 		return nil, err
-	}
-	if auditErr != nil {
-		return nil, auditErr
 	}
 	return s.definitions.GetDefinitionVersion(ctx, definitionID, v.Version)
 }
@@ -173,13 +217,14 @@ func (s *AdminService) CreateEdition(ctx context.Context, actor, requestID strin
 	if err != nil {
 		return nil, err
 	}
-	err = s.editions.CreateEdition(ctx, edition)
-	auditErr := s.audit(ctx, actor, requestID, "edition.create", "edition", edition.ID, edition.ID, "", map[string]any{"definition_id": edition.DefinitionID, "definition_version": edition.DefinitionVersion}, err)
+	audit := s.auditRecord(actor, requestID, "edition.create", "edition", edition.ID, edition.ID, "", map[string]any{"definition_id": edition.DefinitionID, "definition_version": edition.DefinitionVersion})
+	atomic, ok := s.operations.(AtomicCompetitionAdminRepository)
+	if !ok {
+		return nil, fmt.Errorf("atomic competition admin repository is unavailable")
+	}
+	err = atomic.CreateEditionWithAudit(ctx, edition, audit)
 	if err != nil {
 		return nil, err
-	}
-	if auditErr != nil {
-		return nil, auditErr
 	}
 	return s.engine.GetCompetition(ctx, edition.ID)
 }
@@ -203,13 +248,15 @@ func (s *AdminService) transition(ctx context.Context, actor, requestID, competi
 	if to == LifecyclePublished && (comp.JoinOpensAt == nil || !s.clock().Before(comp.JoinOpensAt.UTC())) {
 		return nil, fmt.Errorf("cannot publish after the join window has opened")
 	}
-	err = s.editions.TransitionLifecycle(ctx, competitionID, comp.LifecycleStatus, to, s.clock())
-	auditErr := s.audit(ctx, actor, requestID, action, "edition", competitionID, competitionID, reason, map[string]string{"from": comp.LifecycleStatus, "to": to}, err)
+	now := s.clock()
+	audit := s.auditRecord(actor, requestID, action, "edition", competitionID, competitionID, reason, map[string]string{"from": comp.LifecycleStatus, "to": to})
+	atomic, ok := s.operations.(AtomicCompetitionAdminRepository)
+	if !ok {
+		return nil, fmt.Errorf("atomic competition admin repository is unavailable")
+	}
+	err = atomic.TransitionEditionWithAudit(ctx, competitionID, comp.LifecycleStatus, to, now, audit)
 	if err != nil {
 		return nil, err
-	}
-	if auditErr != nil {
-		return nil, auditErr
 	}
 	return s.engine.GetCompetition(ctx, competitionID)
 }
@@ -240,6 +287,13 @@ func (s *AdminService) Retry(ctx context.Context, actor, requestID, competitionI
 		err = s.engine.retryCompetitionRanking(ctx, *comp)
 	case AdminJobFinalization:
 		err = s.engine.retryCompetitionFinalization(ctx, *comp)
+	case AdminJobAchievements:
+		atomic, ok := s.operations.(AtomicCompetitionAdminRepository)
+		if !ok {
+			return fmt.Errorf("atomic competition admin repository is unavailable")
+		}
+		audit := s.auditRecord(actor, requestID, "job.retry."+job, "job", competitionID+":"+job, competitionID, reason, map[string]string{"job": job})
+		return atomic.RequeueAchievementProjectionWithAudit(ctx, competitionID, audit)
 	default:
 		return fmt.Errorf("unsupported job %q", job)
 	}
@@ -251,8 +305,8 @@ func (s *AdminService) Retry(ctx context.Context, actor, requestID, competitionI
 }
 
 func (s *AdminService) audit(ctx context.Context, actor, requestID, action, targetType, targetID, competitionID, reason string, details any, operationErr error) error {
-	raw, _ := json.Marshal(details)
-	rec := AdminAuditRecord{ID: uuid.NewString(), ActorUserID: actor, Action: action, TargetType: targetType, TargetID: targetID, CompetitionID: competitionID, RequestID: requestID, Reason: reason, Details: raw, Succeeded: operationErr == nil, CreatedAt: s.clock()}
+	rec := s.auditRecord(actor, requestID, action, targetType, targetID, competitionID, reason, details)
+	rec.Succeeded = operationErr == nil
 	if operationErr != nil {
 		rec.ErrorMessage = operationErr.Error()
 	}
@@ -260,4 +314,9 @@ func (s *AdminService) audit(ctx context.Context, actor, requestID, action, targ
 		return fmt.Errorf("competition admin audit failed: %w", err)
 	}
 	return nil
+}
+
+func (s *AdminService) auditRecord(actor, requestID, action, targetType, targetID, competitionID, reason string, details any) AdminAuditRecord {
+	raw, _ := json.Marshal(details)
+	return AdminAuditRecord{ID: uuid.NewString(), ActorUserID: actor, Action: action, TargetType: targetType, TargetID: targetID, CompetitionID: competitionID, RequestID: requestID, Reason: reason, Details: raw, Succeeded: true, CreatedAt: s.clock()}
 }

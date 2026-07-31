@@ -348,6 +348,14 @@ func (a portfolioSnapshotAdapter) SnapshotAllDaily(ctx context.Context) (int, er
 
 type rankedMutationSnapshotAdapter struct{ history *performancehistory.Service }
 
+type competitionAchievementAdapter struct{ achievements *achievements.Service }
+
+func (a competitionAchievementAdapter) EvaluateCompetitionFinalizationAchievements(ctx context.Context, userID, _ string) error {
+	// Evaluation is idempotent: repository uniqueness protects already-earned
+	// awards when an outbox event is replayed after a partial batch failure.
+	return a.achievements.EvaluateLocked(ctx, userID)
+}
+
 func (a rankedMutationSnapshotAdapter) RecordMutationSnapshot(ctx context.Context, ev portfolio.OutboxEvent) error {
 	_, err := a.history.RecordTransitionIfChanged(ctx, performance.TransitionSnapshot{
 		PortfolioID: ev.AggregateID, UserID: ev.UserID,
@@ -909,6 +917,9 @@ func main() {
 	// narrow, read-only, version-consistent boundary (eligibility previews
 	// and, later, join snapshots) — never through repositories directly.
 	competitionsSvc.SetSnapshotProvider(portfolioSvc)
+	if repos.pgPool != nil {
+		competitionsSvc.SetBasketAdjustmentProvider(competitions.NewPostgresBasketAdjustmentProvider(repos.pgPool))
+	}
 	var competitionAdminSvc *competitions.AdminService
 	if repos.pgPool != nil {
 		competitionAdminSvc = competitions.NewAdminService(
@@ -1112,6 +1123,26 @@ func main() {
 				},
 			})
 		}
+	}
+	// Competition results and this event are committed by one transaction.
+	// This projector is mandatory in Postgres mode and independently retries
+	// idempotent achievement evaluation until success or dead-lettering.
+	if repos.pgPool != nil {
+		competitionOutbox := competitions.NewCompetitionOutboxStore(repos.pgPool)
+		competitionProjector := competitions.NewCompetitionAchievementProjector(
+			competitionOutbox, competitionAchievementAdapter{achievements: achievementsSvc}, cfg.LeaderboardRefreshInterval,
+		)
+		competitionProjector.Start(ctx)
+		readinessChecks = append(readinessChecks, server.ReadinessCheck{
+			Name: "competition_achievement_projector",
+			Check: func(ctx context.Context) error {
+				if !competitionProjector.Running() {
+					return fmt.Errorf("projector is not running")
+				}
+				_, _, err := competitionOutbox.Backlog(ctx)
+				return err
+			},
+		})
 	}
 
 	// --- background workers ---

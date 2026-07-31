@@ -69,7 +69,43 @@ func (r *adminDefinitionRepo) GetDefinitionVersion(_ context.Context, id string,
 	return &v, nil
 }
 
-type adminOpsRepo struct{ audit []AdminAuditRecord }
+type adminOpsRepo struct {
+	audit    []AdminAuditRecord
+	defs     *adminDefinitionRepo
+	editions EditionRepository
+}
+
+func (r *adminOpsRepo) CreateDefinitionWithAudit(ctx context.Context, d Definition, a AdminAuditRecord) error {
+	if err := r.defs.CreateDefinition(ctx, d); err != nil {
+		return err
+	}
+	r.audit = append(r.audit, a)
+	return nil
+}
+func (r *adminOpsRepo) CreateVersionWithAudit(ctx context.Context, v DefinitionVersion, a AdminAuditRecord) error {
+	if err := r.defs.CreateDefinitionVersion(ctx, v); err != nil {
+		return err
+	}
+	r.audit = append(r.audit, a)
+	return nil
+}
+func (r *adminOpsRepo) CreateEditionWithAudit(ctx context.Context, e Competition, a AdminAuditRecord) error {
+	if err := r.editions.CreateEdition(ctx, e); err != nil {
+		return err
+	}
+	r.audit = append(r.audit, a)
+	return nil
+}
+func (r *adminOpsRepo) TransitionEditionWithAudit(ctx context.Context, id, from, to string, now time.Time, a AdminAuditRecord) error {
+	if err := r.editions.TransitionLifecycle(ctx, id, from, to, now); err != nil {
+		return err
+	}
+	r.audit = append(r.audit, a)
+	return nil
+}
+func (r *adminOpsRepo) RequeueAchievementProjectionWithAudit(context.Context, string, AdminAuditRecord) error {
+	return nil
+}
 
 func (r *adminOpsRepo) RecordAdminAudit(_ context.Context, a AdminAuditRecord) error {
 	r.audit = append(r.audit, a)
@@ -91,8 +127,8 @@ func TestAdminServiceCreatesImmutableVersionAndDraftEdition(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	defs := &adminDefinitionRepo{defs: map[string]Definition{}, versions: map[string]DefinitionVersion{}}
-	ops := &adminOpsRepo{}
 	editions := NewInMemoryCompetitionRepository()
+	ops := &adminOpsRepo{defs: defs, editions: editions}
 	engine := NewService(editions, nil, nil, nil, nil, &clock.FixedClock{Time: now})
 	admin := NewAdminService(engine, defs, editions, ops)
 	admin.clock = func() time.Time { return now }
@@ -144,5 +180,43 @@ func TestAdminServiceRejectsInvalidRulesBeforePersistence(t *testing.T) {
 	}
 	if len(defs.versions) != 0 {
 		t.Fatal("invalid version was persisted")
+	}
+}
+
+func TestAdminServiceRejectsFiltersUnsupportedByDeployment(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	defs := &adminDefinitionRepo{
+		defs:     map[string]Definition{"d": {ID: "d", Slug: "test", Name: "Test", IsEnabled: true}},
+		versions: map[string]DefinitionVersion{},
+	}
+	engine := NewService(NewInMemoryCompetitionRepository(), nil, nil, nil, nil, &clock.FixedClock{Time: now})
+	admin := NewAdminService(engine, defs, nil, &adminOpsRepo{})
+
+	cases := map[string]json.RawMessage{
+		"sector filter":  json.RawMessage(`{"schema_version":1,"all":[{"code":"tech","label":"tech","metric":"portfolio_weight","filter":{"sectors":["technology"]},"operator":"gte","value":"0.3"}]}`),
+		"issuer country": json.RawMessage(`{"schema_version":1,"all":[{"code":"us","label":"us","metric":"portfolio_weight","filter":{"issuer_countries":["US"]},"operator":"gte","value":"0.3"}]}`),
+	}
+	for name, eligibility := range cases {
+		_, err := admin.CreateVersion(ctx, "actor", "request", "d", DefinitionVersion{
+			EligibilityRulesJSON: eligibility,
+			ScoringRulesJSON:     json.RawMessage(`{"schema_version":1,"scope":"full_portfolio","include_cash":true}`),
+		})
+		if !errors.Is(err, ErrInvalidRuleDocument) {
+			t.Fatalf("%s: want invalid rule document, got %v", name, err)
+		}
+	}
+	if len(defs.versions) != 0 {
+		t.Fatal("capability-unsupported version was persisted")
+	}
+
+	// No UniverseResolver is wired on this engine, so custom_universe scoring
+	// must also be rejected at admission time.
+	_, err := admin.CreateVersion(ctx, "actor", "request", "d", DefinitionVersion{
+		EligibilityRulesJSON: json.RawMessage(`{"schema_version":1,"all":[{"code":"positions","label":"Has a position","metric":"position_count","operator":"gte","value":"1"}]}`),
+		ScoringRulesJSON:     json.RawMessage(`{"schema_version":1,"scope":"custom_universe","filter":{"universe":"tech-v1"},"include_cash":false}`),
+	})
+	if !errors.Is(err, ErrInvalidRuleDocument) {
+		t.Fatalf("want invalid rule document for unresolved universe, got %v", err)
 	}
 }

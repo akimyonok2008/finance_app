@@ -76,6 +76,20 @@ func TestParse_SpecExamplesValidate(t *testing.T) {
 	assert.Equal(t, []string{"crypto"}, s2.Filter.AssetTypes)
 }
 
+func TestParseScoring_RejectsUnsupportedTotalReturnFlags(t *testing.T) {
+	for _, flag := range []string{"include_dividends", "include_fees"} {
+		raw := `{"schema_version":1,"scope":"full_portfolio","include_cash":false,"` + flag + `":true}`
+		_, err := ParseScoring([]byte(raw))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "fixed-basket price return")
+	}
+
+	includeFXFalse, err := ParseScoring([]byte(`{"schema_version":1,"scope":"full_portfolio","include_cash":false,"include_fx":false}`))
+	require.NoError(t, err)
+	require.NotNil(t, includeFXFalse.IncludeFX)
+	assert.False(t, *includeFXFalse.IncludeFX)
+}
+
 func TestParseEligibility_RejectsInvalidDocuments(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":       `{"schema_version":1,"all":[{"code":"c","label":"l","metric":"position_count","operator":"gte","value":"1","bogus":true}]}`,
@@ -121,6 +135,33 @@ func TestParseScoring_CustomUniverseAndLegacyFlags(t *testing.T) {
 	legacy, err := ParseScoring([]byte(`{"schema_version":1,"scope":"full_portfolio","include_cash":false,"legacy_join_time_baseline":true}`))
 	require.NoError(t, err, "the migrated legacy sprint document must stay parseable")
 	assert.True(t, legacy.LegacyJoinTimeBaseline)
+}
+
+func TestValidateCapabilities_RejectsUnsupportedFilterDimensions(t *testing.T) {
+	noCaps := Capabilities{}
+
+	sectorElig, err := ParseEligibility([]byte(`{"schema_version":1,"all":[{"code":"tech","label":"tech sector","metric":"portfolio_weight","filter":{"sectors":["technology"]},"operator":"gte","value":"0.30"}]}`))
+	require.NoError(t, err)
+	err = ValidateCapabilities(sectorElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, noCaps)
+	assert.ErrorContains(t, err, "sector filter is not supported")
+
+	issuerElig, err := ParseEligibility([]byte(`{"schema_version":1,"all":[{"code":"us_only","label":"US issuers","metric":"portfolio_weight","filter":{"issuer_countries":["US"]},"operator":"gte","value":"0.50"}]}`))
+	require.NoError(t, err)
+	err = ValidateCapabilities(issuerElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, noCaps)
+	assert.ErrorContains(t, err, "issuer_country filter is not supported")
+
+	universeScoring, err := ParseScoring([]byte(`{"schema_version":1,"scope":"custom_universe","filter":{"universe":"tech-v1"},"include_cash":false}`))
+	require.NoError(t, err)
+	minimalElig, err := ParseEligibility([]byte(`{"schema_version":1,"all":[{"code":"nonempty","label":"non-empty","metric":"position_count","operator":"gte","value":"1"}]}`))
+	require.NoError(t, err)
+	err = ValidateCapabilities(minimalElig, universeScoring, noCaps)
+	assert.ErrorContains(t, err, `custom universe "tech-v1" is not supported`)
+
+	// Fully capable deployment accepts all three dimensions.
+	fullCaps := Capabilities{SectorSupported: true, IssuerCountrySupported: true, UniverseResolverWired: true}
+	require.NoError(t, ValidateCapabilities(sectorElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, fullCaps))
+	require.NoError(t, ValidateCapabilities(issuerElig, Scoring{SchemaVersion: SchemaVersion, Scope: ScopeFullPortfolio}, fullCaps))
+	require.NoError(t, ValidateCapabilities(minimalElig, universeScoring, fullCaps))
 }
 
 func TestEvaluate_CryptoWeightThresholdExactDecimals(t *testing.T) {

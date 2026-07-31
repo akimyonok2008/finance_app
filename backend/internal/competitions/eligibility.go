@@ -32,6 +32,11 @@ func (s *Service) SetSnapshotProvider(p SnapshotProvider) { s.snapshots = p }
 // SetUniverseResolver attaches the named-universe resolver. Optional.
 func (s *Service) SetUniverseResolver(r UniverseResolver) { s.universes = r }
 
+// HasUniverseResolver reports whether a UniverseResolver is wired, so admin
+// validation can reject filter.universe references before they are ever
+// evaluated against a resolver that doesn't exist.
+func (s *Service) HasUniverseResolver() bool { return s.universes != nil }
+
 // EligibilityRuleResult is the privacy-safe public projection of one rule
 // outcome: percentages, counts and reason codes only.
 type EligibilityRuleResult struct {
