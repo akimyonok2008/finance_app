@@ -287,98 +287,33 @@ function Overview({
       (item.difficulty === "hard" || item.difficulty === "elite"),
   );
   return (
-    <div className="space-y-9">
+    <div className="space-y-7">
       <section aria-label="Achievement summary" className="grid gap-3 md:grid-cols-3">
-        <SummaryCard
-          icon={<Target className="h-4 w-4" />}
-          tone="sky"
-          label="Closest badge"
-          value={closestBadge?.name ?? "Progress unavailable"}
-          detail={
-            closestBadge
-              ? `${Math.round(closestBadge.progressPct ?? 0)}% complete`
-              : "Benchmark tracking is active and building the required history."
-          }
-          onClick={closestBadge ? () => onSelect(closestBadge) : undefined}
-        />
-        <SummaryCard
-          icon={<BadgeCheck className="h-4 w-4" />}
-          tone="emerald"
-          label="Best unlocked"
-          value={bestUnlocked?.name ?? "No badge unlocked yet"}
-          detail={
-            bestUnlocked
-              ? bestUnlocked.unlockRule
-              : "Your first benchmark win will appear here."
-          }
-          onClick={bestUnlocked ? () => onSelect(bestUnlocked) : undefined}
-        />
-        <SummaryCard
-          icon={<Sparkles className="h-4 w-4" />}
-          tone="violet"
-          label="Next major badge"
-          value={nextMajor?.name ?? "Major set complete"}
-          detail={
-            nextMajor
-              ? `${nextMajor.difficulty === "elite" ? "Elite" : "Hard"} • ${nextMajor.period}`
-              : "Every hard and elite badge is unlocked."
-          }
-          onClick={nextMajor ? () => onSelect(nextMajor) : undefined}
-        />
+        <SummaryCard icon={<Target className="h-4 w-4" />} tone="sky" label="Closest badge" value={closestBadge?.name ?? "Progress unavailable"} detail={closestBadge ? `${Math.round(closestBadge.progressPct ?? 0)}% complete` : "Benchmark tracking is active and building the required history."} onClick={closestBadge ? () => onSelect(closestBadge) : undefined} />
+        <SummaryCard icon={<BadgeCheck className="h-4 w-4" />} tone="emerald" label="Best unlocked" value={bestUnlocked?.name ?? "No badge unlocked yet"} detail={bestUnlocked ? bestUnlocked.unlockRule : "Your first benchmark win will appear here."} onClick={bestUnlocked ? () => onSelect(bestUnlocked) : undefined} />
+        <SummaryCard icon={<Sparkles className="h-4 w-4" />} tone="violet" label="Next major badge" value={nextMajor?.name ?? "Major set complete"} detail={nextMajor ? `${nextMajor.difficulty === "elite" ? "Elite" : "Hard"} • ${nextMajor.period}` : "Every hard and elite badge is unlocked."} onClick={nextMajor ? () => onSelect(nextMajor) : undefined} />
       </section>
 
-      <AchievementReturnsTable
-        timeframe={returnsTimeframe}
-        onTimeframeChange={onReturnsTimeframeChange}
-      />
+      <div className="grid items-start gap-7 lg:grid-cols-[minmax(0,1fr)_minmax(480px,0.9fr)] xl:grid-cols-[minmax(0,1.08fr)_minmax(500px,0.92fr)]">
+        <div className="space-y-7">
 
-      <OverviewSection
-        title="Recently unlocked"
-        description="Your latest benchmark wins."
-      >
-        {recentlyUnlocked.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {recentlyUnlocked.map((badge) => (
-              <OverviewBadgeCard
-                key={badge.id}
-                badge={badge}
-                context="recent"
-                onSelect={onSelect}
-              />
-            ))}
-          </div>
-        ) : (
-          <CompactNotice text="No badges unlocked yet. Your first benchmark win will appear here." />
-        )}
-      </OverviewSection>
+        <OverviewSection title="Recently unlocked" description="Your latest benchmark wins.">
+          {recentlyUnlocked.length > 0 ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">{recentlyUnlocked.map((badge) => <OverviewBadgeCard key={badge.id} badge={badge} context="recent" onSelect={onSelect} />)}</div> : <CompactNotice text="No badges unlocked yet. Your first benchmark win will appear here." />}
+        </OverviewSection>
 
-      <OverviewSection
-        title="Closest to unlock"
-        description="The few badges nearest to completion."
-      >
-        {closest.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {closest.map((badge) => (
-              <OverviewBadgeCard
-                key={badge.id}
-                badge={badge}
-                context="closest"
-                onSelect={onSelect}
-              />
-            ))}
-          </div>
-        ) : (
-          <CompactNotice text="Benchmark tracking is active and building the required portfolio history." />
-        )}
-      </OverviewSection>
+        <OverviewSection title="Closest to unlock" description="The few badges nearest to completion.">
+          {closest.length > 0 ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">{closest.map((badge) => <OverviewBadgeCard key={badge.id} badge={badge} context="closest" onSelect={onSelect} />)}</div> : <CompactNotice text="Benchmark tracking is active and building the required portfolio history." />}
+        </OverviewSection>
 
-      <button
-        type="button"
-        onClick={() => onChangeTab("all")}
-        className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-400 transition hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
-      >
-        View all badges <ArrowRight className="h-3.5 w-3.5" />
-      </button>
+        <button type="button" onClick={() => onChangeTab("all")} className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-400 transition hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30">
+          View all badges <ArrowRight className="h-3.5 w-3.5" />
+        </button>
+        </div>
+
+        <div className="lg:sticky lg:top-5">
+          <AchievementReturnsTable timeframe={returnsTimeframe} onTimeframeChange={onReturnsTimeframeChange} />
+        </div>
+      </div>
     </div>
   );
 }
