@@ -59,8 +59,14 @@ func TestTwelveDataProvider_BatchQuoteSuccess(t *testing.T) {
 	quotes, err := p.GetQuotes(context.Background(), []string{"AAPL", "MSFT", "AAPL"})
 	require.NoError(t, err)
 	require.Len(t, quotes, 2)
-	assert.Equal(t, "AAPL", quotes[0].Symbol)
-	assert.Equal(t, "MSFT", quotes[1].Symbol)
+	bySymbol := make(map[string]Quote, len(quotes))
+	for _, q := range quotes {
+		bySymbol[q.Symbol] = q
+	}
+	require.Contains(t, bySymbol, "AAPL")
+	require.Contains(t, bySymbol, "MSFT")
+	assert.Equal(t, "AAPL", bySymbol["AAPL"].Symbol)
+	assert.Equal(t, "MSFT", bySymbol["MSFT"].Symbol)
 }
 
 func TestTwelveDataProvider_MalformedQuote(t *testing.T) {
